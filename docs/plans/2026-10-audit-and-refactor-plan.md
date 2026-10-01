@@ -699,29 +699,12 @@ Takeaways:
 
 ## 9. Tooling, CI and supply chain (TOOL)
 
-### Current versions
+All TOOL items landed in T1. Follow-ups:
 
-| Component | Pinned / locked | Latest (2026-10-01) | Note |
-| --- | --- | --- | --- |
-| `gif` | 0.14.1 | 0.14.2 | Removed by RM-1. |
-| `approx` (dev) | 0.5.1 | 0.5.1 | Unused (RM-9). |
-| `actions/checkout` / `actions/setup-node` | v6 / v6 | v7.0.1 / v7.0.0 | |
-| `actions/upload-artifact` / `actions/download-artifact` | v7 / v8 | v7.0.1 / v8.0.1 | |
-| `Swatinem/rust-cache` | v2 | v2.9.2 | |
-| `crate-ci/typos` | v1.44.0 | v1.50.3 | |
-| `dtolnay/rust-toolchain` | `@stable` (branch) | n/a | A floating ref; redundant with `rust-toolchain.toml`. |
-
-At audit time OSV reported 3 crate advisories (`rand`, `anyhow`, `crossbeam-epoch`), a yanked `chacha20` and 0 npm advisories. T1 bumped the Rust toolchain and fixed all of them with `cargo update`. `gif` and `approx` go with their removals; the other rows are pending.
-
-### Items
-
-| ID | Severity | Status | `next` | Finding | Fix |
-| --- | --- | --- | --- | --- | --- |
-| TOOL-5 | Medium | Verified | yes | Actions are behind and **not pinned**, contrary to the `AGENTS.md` rule "Pin CI tooling versions". `dtolnay/rust-toolchain@stable` is a floating branch and is redundant: rustup reads `rust-toolchain.toml` on its own. | Pin by full SHA with a `# vX.Y.Z` comment; drop `dtolnay/rust-toolchain`; let Dependabot bump the SHAs. |
-| TOOL-7 | Medium | Verified | yes | No `.github/dependabot.yml`; only npm security updates arrive. | Weekly `npm`, `cargo` and `github-actions` updates, with patch and minor grouped. Nothing more (no Renovate, no scanner zoo). |
-| TOOL-8 | Medium | Verified absent | yes | No Rust supply-chain gate. | `cargo-deny` (advisories, licenses, bans for duplicate versions, sources) in the hygiene job, with a pinned version. |
-| TOOL-11 | Low | Verified absent | yes | Workflows are not linted. | `actionlint` and `zizmor`, pinned, in hygiene. |
-| TOOL-12 | Low | Verified | yes | Config leftovers: `.editorconfig` sets **tabs for `*.yml`/`*.yaml`**, which makes YAML invalid, keeps `go` and `Makefile` sections and has nothing for rs, ts, js, json or toml. `.gitignore` keeps Python (`.venv`, `__pycache__`, `*.py[cod]`), `/bin/` and profiling entries, and lacks `/artifacts/` and `/npm/`. `.typos.toml` excludes `docs/readme/progression` and `docs/readme/thumbs`, which do not exist (the images live in `docs/images/`). | Rewrite `.editorconfig` for this stack; clean `.gitignore`; fix the excludes. |
+- `napi-prebuilds.yml` calls the quality workflow with `uses: ./...` plus `# zizmor: ignore[self-repository]`. Switch to the `$/...` syntax and drop the ignore once actionlint accepts it (1.7.12 does not).
+- Dependabot does not bump the actionlint `docker://` digest in the hygiene job; update it by hand.
+- Two things only CI can confirm, on the first pull request run: `rustup toolchain install` (no arguments) installs the toolchain and components from `rust-toolchain.toml`, and the pinned actionlint image works as a `docker://` step.
+- `gif` and `approx` leave with RM-1 and RM-9.
 
 ---
 
@@ -790,11 +773,7 @@ Every code change follows the red-green-refactor rule in `AGENTS.md`. Tickets ar
 
 ### T1: Toolchain and formatting baseline (first)
 
-Mechanical; touches every file type, so doing it first keeps later diffs clean.
-
-- [ ] TOOL-5, TOOL-7, TOOL-11 Actions pinned by SHA, Dependabot, actionlint/zizmor
-- [ ] TOOL-8 `cargo-deny`
-- [ ] TOOL-12 `.editorconfig`, `.gitignore`, `.typos.toml`
+Done. Every TOOL item plus REL-3 and REL-4 landed; section 9 lists the follow-ups.
 
 ### T2: Simplification and the engine boundary
 
