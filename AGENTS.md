@@ -73,7 +73,7 @@ While working:
 
 Final gate, once, before handing off or committing:
 
-- `npm run verify` runs exactly what CI runs: `verify:rust` (fmt check, clippy, cargo test), `verify:node` (napi targets check, typecheck, build, native build, tests, tooling tests), and `verify:pack`. Run the full gate after any Rust change, since `test/contracts.test.js` checks the Node layer against Rust sources. If no `.rs` file, `Cargo.toml`, `Cargo.lock`, or `rust-toolchain.toml` changed, `npm run verify:node && npm run verify:pack` is enough.
+- `npm run verify` runs exactly what CI runs: `verify:rust` (fmt check, clippy, rustdoc, cargo test), `verify:node` (napi targets check, typecheck, build, native build, tests, tooling tests), and `verify:pack`. Run the full gate after any Rust change, since `test/contracts.test.js` checks the Node layer against Rust sources. If no `.rs` file, `Cargo.toml`, `Cargo.lock`, or `rust-toolchain.toml` changed, `npm run verify:node && npm run verify:pack` is enough.
 - If a step fails, fix it and re-run only that step. Re-run the full gate only if the fix could affect other steps.
 - Do not re-run a gate that passed if nothing has changed since.
 

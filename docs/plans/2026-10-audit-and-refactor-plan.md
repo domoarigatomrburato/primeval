@@ -64,7 +64,7 @@ The problems are concentrated at the edges: how binaries are built, how failures
 | 5 | REL-3 | `engines: ">=20"` is false: the loader `require()`s an ES module, which needs Node 20.19+ or 22.12+. Node 20 has been EOL since 2026-04-30. | High | Verified |
 | 6 | NODE-1, NODE-2 | Some errors are thrown synchronously and skip the error-class mapping; a throwing `onProgress` crashes the process. | High | Reproduced |
 | 7 | RT-5 | Memory is unbounded: a 258 KB PNG (9000×9000) peaks at 951 MB RSS; GIF at 2048 px peaks at 585 MB. | High | Reproduced, measured |
-| 8 | ENG-1 | The NEON code inside safe public functions can read out of bounds. There are 12 `unsafe` blocks and 0 `// SAFETY:` comments. | High | Verified |
+| 8 | ENG-1 | The NEON code inside safe public functions can read out of bounds. Their `// SAFETY:` comments (added in T1) say the invariant is assumed, not checked. | High | Verified |
 | 9 | ENG-2, ENG-3, ENG-4 | Quadratic strokes paint pixels twice (15.4% of shapes). PNG/JPG/GIF geometry differs from the SVG. "Deterministic" seeds depend on the CPU core count. | Medium | Reproduced, verified |
 | 10 | PERF-* | No benchmarks exist. Polygon and rotated-ellipse take 51% of the total time and are rasterization-bound (10–32 ns/pixel versus 2–4 for rectangles). | Medium | Measured |
 
@@ -473,10 +473,11 @@ The problems are concentrated at the edges: how binaries are built, how failures
   - The NEON code loads with `vld4_u8(c_pix.as_ptr().add(byte_index))` (around `score.rs:274-275` and `:357-358`).
   - The offsets are clipped against `target`'s dimensions only, and `current` is never checked.
   - `difference_full_raw` does assert equal dimensions.
-  - 12 `unsafe` sites, 0 `// SAFETY:` comments.
+  - Since T1 every `unsafe` block has a `// SAFETY:` comment; the two at these call sites state that `current`'s dimensions are assumed, not checked.
+  - The comments rely on the `Buffer` invariant `pixels.len() == width * height * 4`, which `Buffer::from_image` checks only with `debug_assert!`.
 - **Fix:**
   - `assert_eq!` dimensions at entry, or make these functions `pub(crate)` (API-1).
-  - Add `// SAFETY:` justifications; the edition 2024 migration (TOOL-2) forces explicit `unsafe {}` blocks anyway.
+  - Make the `Buffer` length invariant a hard check in `from_image`.
   - Add a NEON-vs-scalar parity test that runs in CI on arm64 (REL-5).
 
 ### ENG-2: Quadratic strokes paint pixels twice
@@ -619,7 +620,7 @@ Takeaways:
 - **Severity / status:** Medium on x86. Verified. `next: no`.
 - **Where:** the scalar loops (`score.rs:63-76`, `:130-165`) index `c_pix[i] ... t_pix[i + 3]` with a manual `i += 4`: about 8 bounds checks per pixel, which blocks auto-vectorization. Linux, Windows and macOS x64 users (most servers) run this path.
 - **Fix:**
-  - First slice each line once and iterate `chunks_exact(4)` / `as_chunks::<4>()`. This is also what clippy 1.99 asks for (TOOL-1).
+  - First slice each line once and iterate `as_chunks::<4>()`, as T1 already does in `difference_full_raw_pixels`.
   - Then, only if PERF-0 shows it is worth it, add AVX2/SSE4.1 kernels chosen at runtime (`multiversion`, or `std::arch` with `is_x86_feature_detected!` resolved once into a function table). Never through `target-cpu`.
 
 ### PERF-3: NEON reduces horizontally every 8 pixels
@@ -700,7 +701,7 @@ Takeaways:
 | API-4 | Low | Verified | yes | Alpha is a magic number: `alpha: i32` with 0 meaning auto (`model.rs:114`, `state.rs:14-15`), sent as a number from TypeScript, stringified (`src/index.ts` around `:290`) and re-parsed in Rust. | An `Alpha::{Auto, Fixed(u8)}` enum end to end; `alpha?: "auto" \| number` in TypeScript. |
 | API-5 | Low | Verified | no | Dead or vestigial code (see RM-9). | Delete. |
 | API-6 | Low | Verified | partial | `ShapeKind` keeps parallel name tables (`shapes.rs:194-254`: `variants()`, `FromStr`, display). | One `const` table. |
-| API-7 | Low | Measured | partial | Rustdoc: `RUSTDOCFLAGS=-D warnings cargo doc` **fails** (private links in `worker.rs` for `sample_xy` / `sample_xy_float` → `BIASED_SAMPLING_RATE`; unresolved links to `copy_and_draw_lines` and `difference_partial` in `score.rs`). 186 public items lack docs (`-W missing_docs`). Module docs are written with `///` on the first `use` (`error_grid.rs:1-5`, `rng.rs`, `score.rs`, `worker.rs`), so they never render. Some docs are wrong: `difference_full_raw` claims a normalised RMS but returns a raw `u64`; `raster.rs:8` and `:172` mention a "tiny-skia pipeline" that does not exist; `raster.rs:177` says "non-zero winding" while the code uses even-odd. | `//!` module docs, fix the links, `#![warn(missing_docs)]` on the public surface, `cargo doc -D warnings` in CI (TOOL-10). |
+| API-7 | Low | Measured | partial | 186 public items lack docs (`-W missing_docs`). Some docs are wrong: `difference_full_raw` claims a normalised RMS but returns a raw `u64`; `raster.rs:8` and `:172` mention a "tiny-skia pipeline" that does not exist; `raster.rs:177` says "non-zero winding" while the code uses even-odd. | `#![warn(missing_docs)]` on the public surface and fix the wrong docs. Broken links, module docs and the rustdoc gate landed in T1. |
 | API-8 | Medium | Measured | yes | Not publishable: `cargo publish --dry-run` warns "manifest has no description" for core and **fails** for render (path dependency without `version`). `rust-version`, `readme`, `keywords`, `categories` and `documentation` are missing. `binding` lacks `publish = false`. Crate versions (0.1.0) are not aligned with npm. | Decide whether the crates are public. If yes, add the metadata, versioned path deps and version alignment (REL-6); if not, `publish = false` everywhere. |
 | API-9 | Medium | Verified | yes | Render facade ergonomics: `RenderOptions` and `ApproximateError` are not `#[non_exhaustive]`; `ApproximateResult::Raster { format }` can hold `Svg`; `approximate(req, Option<&dyn Fn(ProgressInfo)>, &AtomicBool)` is positional and takes `Fn` rather than `FnMut`, forcing `Arc<Mutex<_>>` in callers; `ShapeKind` and `Color` appear in the API but are not re-exported (the binding imports `primeval_core::shapes::ShapeKind`); the binding helper parsers (`parse_alpha_str`, `parse_alpha_u32`, `parse_background_str`, `parse_seed_i64`) are public and return `String` errors. | A builder or options struct with `progress: Option<&mut dyn FnMut>` and a `CancellationToken`; re-export the types used in the API; move binding helpers behind `pub(crate)` or into the binding. |
 | API-10 | Low | Verified | yes | The binding merges defaults itself (`binding.rs:211-257`, `unwrap_or(defaults.x)`). This complies with `AGENTS.md`, since the defaults come from Rust, but every new surface would have to repeat it. | `RenderOptions::merge(partial)` in render. |
@@ -727,15 +728,7 @@ Takeaways:
 
 | Component | Pinned / locked | Latest (2026-10-01) | Note |
 | --- | --- | --- | --- |
-| Rust toolchain | 1.93.0 | 1.99.0 | Released 2026-10-01. |
-| `image` | 0.25.10 | 0.25.10 | Current. |
 | `gif` | 0.14.1 | 0.14.2 | Removed by RM-1. |
-| `rand` | 0.10.0 | 0.10.3 | RUSTSEC-2026-0097 (`rand::rng` with a custom logger; not called directly). |
-| `rand_chacha` / `rand_distr` | 0.10.0 / 0.6.0 | same | Transitive `chacha20 0.10.0` is **yanked**. |
-| `rayon` | 1.11.0 | 1.12.0 | |
-| `napi` / `napi-derive` / `napi-build` | 3.8.3 / 3.5.2 / 2.3.1 | 3.14.0 / 3.6.10 / 2.6.0 | |
-| `anyhow` (transitive) | 1.0.102 | ≥ 1.0.103 | RUSTSEC-2026-0190 (`downcast_mut` unsoundness; not called directly). |
-| `crossbeam-epoch` (transitive) | 0.9.18 | 0.9.21 | RUSTSEC-2026-0204 (`fmt::Pointer` invalid dereference). |
 | `approx` (dev) | 0.5.1 | 0.5.1 | Unused (RM-9). |
 | TypeScript | 5.9.3 | 7.0.2 | Major bump; do it as its own change. |
 | `@types/node` | 22.19.15 | 26.6.3 | Keep on the lowest supported major (22). |
@@ -746,21 +739,17 @@ Takeaways:
 | `crate-ci/typos` | v1.44.0 | v1.50.3 | |
 | `dtolnay/rust-toolchain` | `@stable` (branch) | n/a | A floating ref; redundant with `rust-toolchain.toml`. |
 
-The advisories come from querying OSV with every entry in `Cargo.lock` (103 crates) and `package-lock.json` (117 packages): 3 crate advisories, 0 npm advisories.
+At audit time OSV reported 3 crate advisories (`rand`, `anyhow`, `crossbeam-epoch`), a yanked `chacha20` and 0 npm advisories. T1 bumped the Rust toolchain and fixed all of them with `cargo update`. `gif` and `approx` go with their removals; the other rows are pending.
 
 ### Items
 
 | ID | Severity | Status | `next` | Finding | Fix |
 | --- | --- | --- | --- | --- | --- |
-| TOOL-1 | Medium | Measured | yes | Rust 1.99 clippy fails with 6 new errors: `chunks_exact` with a constant chunk size at `buffer.rs:139`, `buffer.rs:187`, `export.rs:179` and `score.rs:97` (×2), plus a manual slice fill at `error_grid.rs:66`. | Bump `rust-toolchain.toml` and CI to 1.99.0, use `as_chunks::<4>()` and `fill`. |
-| TOOL-2 | Low | Measured | yes | Edition 2024: 96 warnings, all `unsafe_op_in_unsafe_fn` in the NEON module. | Migrate all three crates and add `// SAFETY:` comments while wrapping (ENG-1). Add `rust-version` to `[workspace.package]`. |
-| TOOL-3 | Medium | Measured | yes | `cargo update` would update 52 crates, fixing the 3 advisories and the yanked `chacha20`. | Run `cargo update`; set `rand` `default-features = false` (thread RNG and OS RNG are unused). |
 | TOOL-4 | Medium | Verified | yes | npm dev dependencies lag (table above). | TypeScript 7 as an isolated change; `@napi-rs/cli` 3.10; `@types/node@22`. Regenerate the lockfile with npm and check with `npm ci`. |
 | TOOL-5 | Medium | Verified | yes | Actions are behind and **not pinned**, contrary to the `AGENTS.md` rule "Pin CI tooling versions". `dtolnay/rust-toolchain@stable` is a floating branch and is redundant: rustup reads `rust-toolchain.toml` on its own. | Pin by full SHA with a `# vX.Y.Z` comment; drop `dtolnay/rust-toolchain`; let Dependabot bump the SHAs. |
 | TOOL-7 | Medium | Verified | yes | No `.github/dependabot.yml`; only npm security updates arrive. | Weekly `npm`, `cargo` and `github-actions` updates, with patch and minor grouped. Nothing more (no Renovate, no scanner zoo). |
 | TOOL-8 | Medium | Verified absent | yes | No Rust supply-chain gate. | `cargo-deny` (advisories, licenses, bans for duplicate versions, sources) in the hygiene job, with a pinned version. |
 | TOOL-9 | Medium | Verified | yes | No TS/JS formatter or linter. Rust has rustfmt and `clippy -D warnings`; TS has only `tsc`. `scripts/generate-binding.mjs` is visibly unformatted. | **Biome** only, over `src/`, `scripts/` and `test/`: `npm run lint` / `format:check` in `verify:node`, autofix locally. |
-| TOOL-10 | Low | Measured | yes | Rustdoc is not checked (API-7). | `RUSTDOCFLAGS=-D warnings cargo doc --no-deps` in `verify:rust`. |
 | TOOL-11 | Low | Verified absent | yes | Workflows are not linted. | `actionlint` and `zizmor`, pinned, in hygiene. |
 | TOOL-12 | Low | Verified | yes | Config leftovers: `.editorconfig` sets **tabs for `*.yml`/`*.yaml`**, which makes YAML invalid, keeps `go` and `Makefile` sections and has nothing for rs, ts, js, json or toml. `.gitignore` keeps Python (`.venv`, `__pycache__`, `*.py[cod]`), `/bin/` and profiling entries, and lacks `/artifacts/` and `/npm/`. `.typos.toml` excludes `docs/readme/progression` and `docs/readme/thumbs`, which do not exist (the images live in `docs/images/`). | Rewrite `.editorconfig` for this stack; clean `.gitignore`; fix the excludes. |
 
@@ -833,14 +822,10 @@ Every code change follows the red-green-refactor rule in `AGENTS.md`. Tickets ar
 
 Mechanical; touches every file type, so doing it first keeps later diffs clean.
 
-- [ ] TOOL-1 Rust 1.99.0 and the clippy fixes
-- [ ] TOOL-2 Edition 2024 (wrap `unsafe`, add `// SAFETY:`), `rust-version`
-- [ ] TOOL-3 `cargo update`; `rand` `default-features = false`
 - [ ] TOOL-4 `@napi-rs/cli` 3.10, `@types/node@22`; TypeScript 7 as a separate commit
 - [ ] TOOL-9 Biome (format the repo in one commit, then enforce)
 - [ ] TOOL-5, TOOL-7, TOOL-11 Actions pinned by SHA, Dependabot, actionlint/zizmor
 - [ ] TOOL-8 `cargo-deny`
-- [ ] TOOL-10 `cargo doc -D warnings` (requires the API-7 link fixes)
 - [ ] TOOL-12 `.editorconfig`, `.gitignore`, `.typos.toml`
 - [ ] REL-4 `engines >=22.12`, CI matrix `[22, 24, 26]` (also fixes REL-3)
 
@@ -1039,9 +1024,9 @@ For the main use case (small SVG placeholders with 50–200 shapes) every shape 
 - **Machine:** Apple M3, 8 cores (4P + 4E), macOS (Darwin 27).
 - **Toolchains:** Node 24.18.1, npm 11.16.0, Rust 1.93.0 (pinned) and 1.99.0.
 - **Gate:** `npm run verify` exits 0 in 34.8 s (Rust 132 tests, package 34, tooling 17; pack 13.1 kB, 10 files).
-- **Rust 1.99 clippy:** `cargo +1.99.0 clippy --all-targets -- -D warnings`. Errors listed in TOOL-1.
+- **Rust 1.99 clippy:** `cargo +1.99.0 clippy --all-targets -- -D warnings`. 6 errors (fixed in T1).
 - **Edition 2024 lints:** `cargo +1.99.0 clippy --all-targets -- -A clippy::all -W rust-2024-compatibility` gives 96 warnings.
-- **Rustdoc:** `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace` fails (API-7).
+- **Rustdoc:** `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace` failed on 3 broken links (fixed in T1).
 - **Missing docs:** `RUSTFLAGS="-W missing_docs" cargo check -p primeval-core -p primeval-render` reports 186 items.
 - **Publish dry runs:** `cargo publish --dry-run -p primeval-core` / `-p primeval-render` (API-8).
 
