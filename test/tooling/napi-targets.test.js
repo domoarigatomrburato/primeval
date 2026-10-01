@@ -20,12 +20,16 @@ function parseRustToolchainVersion(source) {
   return match[1];
 }
 
-function parseWorkflowToolchainVersions(source, fileLabel) {
-  const matches = [...source.matchAll(/toolchain:\s*([0-9]+\.[0-9]+\.[0-9]+)/g)].map(
-    ([, version]) => version,
-  );
-  assert.ok(matches.length > 0, `missing toolchain entries in ${fileLabel}`);
-  return matches;
+function readWorkflows() {
+  const dir = path.join(process.cwd(), ".github", "workflows");
+  return fs
+    .readdirSync(dir)
+    .filter((name) => name.endsWith(".yml"))
+    .sort()
+    .map((name) => ({
+      label: `.github/workflows/${name}`,
+      source: fs.readFileSync(path.join(dir, name), "utf8"),
+    }));
 }
 
 test("optional dependencies are derived from napi targets", () => {
@@ -179,32 +183,39 @@ test("package scripts regenerate the binding loader before packing", () => {
   assert.match(pkg.scripts["build:node"], /generate:binding/);
 });
 
-test("rust toolchain pin matches workflows and contributing docs", () => {
+test("rust-toolchain.toml is the only rust toolchain pin", () => {
   const rustToolchain = fs.readFileSync(path.join(process.cwd(), "rust-toolchain.toml"), "utf8");
-  const qualityWorkflow = fs.readFileSync(
-    path.join(process.cwd(), ".github", "workflows", "quality.yml"),
-    "utf8",
-  );
-  const releaseWorkflow = fs.readFileSync(
-    path.join(process.cwd(), ".github", "workflows", "napi-prebuilds.yml"),
-    "utf8",
-  );
   const contributing = fs.readFileSync(path.join(process.cwd(), "CONTRIBUTING.md"), "utf8");
+  const workflows = readWorkflows();
+  assert.ok(workflows.length > 0, "missing workflows");
+
+  for (const { label, source } of workflows) {
+    assert.doesNotMatch(source, /dtolnay\/rust-toolchain/, `${label} uses dtolnay/rust-toolchain`);
+    assert.doesNotMatch(source, /^\s*toolchain:/m, `${label} pins a toolchain`);
+  }
 
   const version = parseRustToolchainVersion(rustToolchain);
-  assert.deepEqual(
-    [...new Set(parseWorkflowToolchainVersions(qualityWorkflow, ".github/workflows/quality.yml"))],
-    [version],
-  );
-  assert.deepEqual(
-    [
-      ...new Set(
-        parseWorkflowToolchainVersions(releaseWorkflow, ".github/workflows/napi-prebuilds.yml"),
-      ),
-    ],
-    [version],
-  );
   assert.match(contributing, new RegExp(`Rust stable \`${version.replace(/\./g, "\\.")}\``));
+});
+
+test("workflow actions are pinned by full sha or digest with a version comment", () => {
+  const workflows = readWorkflows();
+  assert.ok(workflows.length > 0, "missing workflows");
+
+  const pinned = [
+    /^\.\/\S+$/,
+    /^[\w.-]+\/[\w./-]+@[0-9a-f]{40} # v\d+\.\d+\.\d+$/,
+    /^docker:\/\/\S+@sha256:[0-9a-f]{64} # \S+$/,
+  ];
+  for (const { label, source } of workflows) {
+    const uses = [...source.matchAll(/^\s*(?:-\s+)?uses:\s*(.+?)\s*$/gm)].map(([, ref]) => ref);
+    for (const ref of uses) {
+      assert.ok(
+        pinned.some((pattern) => pattern.test(ref)),
+        `${label}: unpinned uses: ${ref}`,
+      );
+    }
+  }
 });
 
 test("package exposes canonical verify scripts and CI uses the split workflow", () => {

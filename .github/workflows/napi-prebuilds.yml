@@ -24,9 +24,11 @@ jobs:
       matrix: ${{ steps.targets.outputs.matrix }}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           cache: npm
@@ -45,11 +47,17 @@ jobs:
 
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    defaults:
+      run:
+        # The env-var references below must expand the same way on Windows.
+        shell: bash
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           cache: npm
@@ -57,20 +65,23 @@ jobs:
 
       - run: npm ci
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.99.0
-          targets: ${{ matrix.target }}
+      - run: rustup toolchain install
 
-      - uses: Swatinem/rust-cache@v2
+      - run: rustup target add "$TARGET"
+        env:
+          TARGET: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: ${{ matrix.target }}
 
       - name: Build native addon
-        run: npx napi build -p primeval-node --release --target ${{ matrix.target }} --platform --no-js --output-dir .
+        run: npx napi build -p primeval-node --release --target "$TARGET" --platform --no-js --output-dir .
+        env:
+          TARGET: ${{ matrix.target }}
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.target }}
           path: primeval-node.*.node
@@ -88,9 +99,11 @@ jobs:
       NPM_CONFIG_PROVENANCE: "true"
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           package-manager-cache: false
@@ -99,7 +112,7 @@ jobs:
       - run: npm ci
 
       - name: Download artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts
 
