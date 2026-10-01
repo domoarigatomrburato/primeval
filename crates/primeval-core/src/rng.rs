@@ -1,7 +1,8 @@
-/// Deterministic RNG support for reproducible shape generation.
-///
-/// Wraps `ChaCha8Rng` to provide a seedable, platform-independent
-/// random number generator.
+//! Deterministic RNG support for reproducible shape generation.
+//!
+//! Wraps `ChaCha8Rng` to provide a seedable, platform-independent
+//! random number generator.
+
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 

@@ -1,9 +1,10 @@
-/// Per-thread scratch state and shared round context for candidate evaluation.
-///
-/// [`WorkerCtx`] owns the mutable buffers needed to rasterize and score a
-/// candidate shape without touching shared state, while [`SearchRound`]
-/// borrows the read-only data that every worker needs during a single
-/// optimization round.
+//! Per-thread scratch state and shared round context for candidate evaluation.
+//!
+//! [`WorkerCtx`] owns the mutable buffers needed to rasterize and score a
+//! candidate shape without touching shared state, while [`SearchRound`]
+//! borrows the read-only data that every worker needs during a single
+//! optimization round.
+
 use crate::buffer::Buffer;
 use crate::error_grid::ErrorGrid;
 use crate::optimize::hill_climb;
@@ -141,7 +142,7 @@ pub fn merge_quadratic_profile_stats<'a>(
 impl<R: Rng> WorkerCtx<R> {
     /// Samples an integer pixel coordinate, biased toward high-error regions.
     ///
-    /// With probability [`BIASED_SAMPLING_RATE`], the coordinate is drawn
+    /// With probability `BIASED_SAMPLING_RATE`, the coordinate is drawn
     /// from the error grid's CDF; otherwise it is drawn uniformly.
     #[inline]
     pub fn sample_xy(&mut self, round: &SearchRound<'_>) -> (i32, i32) {
@@ -156,7 +157,7 @@ impl<R: Rng> WorkerCtx<R> {
 
     /// Samples a floating-point coordinate, biased toward high-error regions.
     ///
-    /// With probability [`BIASED_SAMPLING_RATE`], the coordinate is drawn
+    /// With probability `BIASED_SAMPLING_RATE`, the coordinate is drawn
     /// from the error grid's CDF; otherwise it is drawn uniformly.
     #[inline]
     pub fn sample_xy_float(&mut self, round: &SearchRound<'_>) -> (f64, f64) {

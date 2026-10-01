@@ -1,8 +1,9 @@
-/// Spatial error distribution grid for biased shape placement.
-///
-/// Divides the image into a grid of cells, measures per-cell error between
-/// the target and current approximation, and builds a cumulative distribution
-/// function so that random samples concentrate in high-error regions.
+//! Spatial error distribution grid for biased shape placement.
+//!
+//! Divides the image into a grid of cells, measures per-cell error between
+//! the target and current approximation, and builds a cumulative distribution
+//! function so that random samples concentrate in high-error regions.
+
 use crate::buffer::Buffer;
 use rand::{Rng, RngExt};
 

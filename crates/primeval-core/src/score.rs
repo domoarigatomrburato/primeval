@@ -1,8 +1,9 @@
-/// Scoring and blending routines for the energy minimization loop.
-///
-/// Integer arithmetic, truncation semantics, and accumulator widths match
-/// the Go original for reproducibility. On aarch64, hot paths use NEON
-/// intrinsics to process 8 pixels per iteration.
+//! Scoring and blending routines for the energy minimization loop.
+//!
+//! Integer arithmetic, truncation semantics, and accumulator widths match
+//! the Go original for reproducibility. On aarch64, hot paths use NEON
+//! intrinsics to process 8 pixels per iteration.
+
 use crate::buffer::Buffer;
 use crate::color::Color;
 use crate::scanline::{Scanline, clamp_line};
@@ -681,7 +682,7 @@ pub(crate) fn difference_partial(
     raw_score_to_normalized(total, target.width(), target.height())
 }
 
-/// Fused replacement for [`copy_and_draw_lines`] + [`difference_partial`].
+/// Fused replacement for `copy_and_draw_lines` + `difference_partial`.
 ///
 /// Computes the blended pixel for each covered scanline pixel on the fly
 /// (no write to any intermediate buffer) and accumulates the squared-difference
