@@ -47,7 +47,7 @@
     "test": "node --test test/index.test.js test/contracts.test.js test/native.test.js test/cli.test.js",
     "test:tooling": "node --test test/tooling/*.test.js",
     "prepack": "npm run prepare:package",
-    "lint": "biome check",
+    "lint": "biome check --error-on-warnings",
     "format": "biome check --write"
   },
   "optionalDependencies": {

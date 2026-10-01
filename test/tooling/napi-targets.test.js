@@ -225,7 +225,7 @@ test("package exposes canonical verify scripts and CI uses the split workflow", 
   assert.match(pkg.scripts["verify:rust"], /cargo clippy --all-targets -- -D warnings/);
   assert.match(pkg.scripts["verify:rust"], /cargo test/);
 
-  assert.equal(pkg.scripts.lint, "biome check");
+  assert.equal(pkg.scripts.lint, "biome check --error-on-warnings");
   assert.match(pkg.scripts["verify:node"], /^npm run lint && /);
   assert.match(pkg.scripts["verify:node"], /npm run check:napi-targets/);
   assert.match(pkg.scripts["verify:node"], /npm run typecheck/);
