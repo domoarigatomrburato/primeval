@@ -44,6 +44,8 @@ npm ci
 npm run verify
 ```
 
+`npm run verify` includes `npm run lint`, which runs Biome over `src/`, `scripts/`, and `test/` to check formatting, import order, and lint rules. Run `npm run format` to apply formatting, import order, and safe lint fixes.
+
 ## Pull Requests
 
 - Keep changes narrowly scoped.

@@ -204,7 +204,7 @@ test("rust toolchain pin matches workflows and contributing docs", () => {
     ],
     [version],
   );
-  assert.match(contributing, new RegExp("Rust stable `" + version.replace(/\./g, "\\.") + "`"));
+  assert.match(contributing, new RegExp(`Rust stable \`${version.replace(/\./g, "\\.")}\``));
 });
 
 test("package exposes canonical verify scripts and CI uses the split workflow", () => {
@@ -225,6 +225,8 @@ test("package exposes canonical verify scripts and CI uses the split workflow", 
   assert.match(pkg.scripts["verify:rust"], /cargo clippy --all-targets -- -D warnings/);
   assert.match(pkg.scripts["verify:rust"], /cargo test/);
 
+  assert.equal(pkg.scripts.lint, "biome check");
+  assert.match(pkg.scripts["verify:node"], /^npm run lint && /);
   assert.match(pkg.scripts["verify:node"], /npm run check:napi-targets/);
   assert.match(pkg.scripts["verify:node"], /npm run typecheck/);
   assert.match(pkg.scripts["verify:node"], /npm run build/);

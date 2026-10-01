@@ -1,7 +1,6 @@
 import {
   getNativeBinding,
   type NativeApproximateRequest,
-  type NativeApproximateResult,
   type NativeProgressInfo,
 } from "./native-binding.js";
 
@@ -255,11 +254,11 @@ function mapNativeError(error: unknown): Error {
   const [, name, detail] = nameMatch;
   switch (name) {
     case "ValidationError":
-      return new ValidationError(detail!);
+      return new ValidationError(detail);
     case "NotFoundError":
-      return new NotFoundError(detail!);
+      return new NotFoundError(detail);
     case "AbortError":
-      return new AbortError(detail!);
+      return new AbortError(detail);
     default:
       return new Error(detail);
   }
