@@ -203,7 +203,7 @@ test("workflow actions are pinned by full sha or digest with a version comment",
   assert.ok(workflows.length > 0, "missing workflows");
 
   const pinned = [
-    /^\.\/\S+$/,
+    /^\.\/\S+(?: # zizmor: ignore\[self-repository\])?$/,
     /^[\w.-]+\/[\w./-]+@[0-9a-f]{40} # v\d+\.\d+\.\d+$/,
     /^docker:\/\/\S+@sha256:[0-9a-f]{64} # \S+$/,
   ];

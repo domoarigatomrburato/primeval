@@ -82,5 +82,5 @@ Do not:
 - run `npm ci` as a check; run it only when `node_modules` is missing or `package.json`/`package-lock.json` changed.
 - simulate a clean checkout by deleting build dirs; `test/tooling/` covers the clean-checkout and packed-install paths.
 - run `cargo build --release` as verification; `npm run build:node` already builds the release addon.
-- install `typos` to check spelling; CI's hygiene job runs it with `.typos.toml`. Run it locally only if it is already installed.
+- install `typos`, `cargo-deny`, `actionlint` or `zizmor` just to check locally; CI's hygiene job runs them. Run them locally only if they are already installed.
 - repeat the gate locally after pushing to double-check, or poll CI; CI re-runs the same scripts.
