@@ -245,6 +245,23 @@ test("package exposes canonical verify scripts and CI uses the split workflow", 
   assert.match(releasing, /npm run verify/);
 });
 
+test("quality workflow runs once per pull request push", () => {
+  const qualityWorkflow = fs.readFileSync(
+    path.join(process.cwd(), ".github", "workflows", "quality.yml"),
+    "utf8",
+  );
+  const triggers = qualityWorkflow.match(/^on:\n((?:[ \t]+.*\n)+)/m);
+  assert.ok(triggers, "missing on: block in .github/workflows/quality.yml");
+
+  assert.match(triggers[1], /^ {2}pull_request:\s*$/m);
+  assert.match(triggers[1], /^ {2}workflow_call:\s*$/m);
+  assert.match(
+    triggers[1],
+    /^ {2}push:\n {4}branches: \[main\]\n/m,
+    "push must be limited to main, or PR branches and release tags run the workflow twice",
+  );
+});
+
 test("typescript build succeeds without generated binding files", () => {
   const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "primeval-tsc-"));
 

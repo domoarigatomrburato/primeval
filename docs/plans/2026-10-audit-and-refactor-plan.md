@@ -5,7 +5,7 @@
 | Audited commit | `3e872be` (`main`, 2026-10-01) |
 | Branch for the first refactoring | `refactor/audit-2026-10` |
 | Scope | Rust engine, render facade, napi binding, TypeScript wrapper, CLI, tests, CI/release, docs, repo hygiene |
-| Supersedes | `docs/pre-launch-audit.md` (stale; removal tracked as DOC-5) |
+| Supersedes | `docs/pre-launch-audit.md` (stale; deleted) |
 | Method | Full static review, runtime probes against a freshly built addon, disassembly of release artifacts, benchmarks, comparison with a second independent review shared by the maintainer |
 
 This document is the single source of truth for the refactoring work that starts on this branch. Per `AGENTS.md`, prune it as items land.
@@ -757,13 +757,12 @@ The advisories come from querying OSV with every entry in `Cargo.lock` (103 crat
 | TOOL-3 | Medium | Measured | yes | `cargo update` would update 52 crates, fixing the 3 advisories and the yanked `chacha20`. | Run `cargo update`; set `rand` `default-features = false` (thread RNG and OS RNG are unused). |
 | TOOL-4 | Medium | Verified | yes | npm dev dependencies lag (table above). | TypeScript 7 as an isolated change; `@napi-rs/cli` 3.10; `@types/node@22`. Regenerate the lockfile with npm and check with `npm ci`. |
 | TOOL-5 | Medium | Verified | yes | Actions are behind and **not pinned**, contrary to the `AGENTS.md` rule "Pin CI tooling versions". `dtolnay/rust-toolchain@stable` is a floating branch and is redundant: rustup reads `rust-toolchain.toml` on its own. | Pin by full SHA with a `# vX.Y.Z` comment; drop `dtolnay/rust-toolchain`; let Dependabot bump the SHAs. |
-| TOOL-6 | Low | Verified | yes | `quality.yml` triggers on `push` **and** `pull_request`, so PR branches run twice (visible in the run history for Dependabot branches). | `push: branches: [main]`, `pull_request`, `workflow_call`. |
 | TOOL-7 | Medium | Verified | yes | No `.github/dependabot.yml`; only npm security updates arrive. | Weekly `npm`, `cargo` and `github-actions` updates, with patch and minor grouped. Nothing more (no Renovate, no scanner zoo). |
 | TOOL-8 | Medium | Verified absent | yes | No Rust supply-chain gate. | `cargo-deny` (advisories, licenses, bans for duplicate versions, sources) in the hygiene job, with a pinned version. |
 | TOOL-9 | Medium | Verified | yes | No TS/JS formatter or linter. Rust has rustfmt and `clippy -D warnings`; TS has only `tsc`. `scripts/generate-binding.mjs` is visibly unformatted. | **Biome** only, over `src/`, `scripts/` and `test/`: `npm run lint` / `format:check` in `verify:node`, autofix locally. |
 | TOOL-10 | Low | Measured | yes | Rustdoc is not checked (API-7). | `RUSTDOCFLAGS=-D warnings cargo doc --no-deps` in `verify:rust`. |
 | TOOL-11 | Low | Verified absent | yes | Workflows are not linted. | `actionlint` and `zizmor`, pinned, in hygiene. |
-| TOOL-12 | Low | Verified | yes | Config leftovers: `.editorconfig` sets **tabs for `*.yml`/`*.yaml`**, which makes YAML invalid, keeps `go` and `Makefile` sections and has nothing for rs, ts, js, json or toml. `.gitignore` keeps Python (`.venv`, `__pycache__`, `*.py[cod]`), `/bin/` and profiling entries, and lacks `/artifacts/` and `/npm/`. `.typos.toml` excludes `docs/readme/progression` and `docs/readme/thumbs`, which do not exist (the images live in `docs/images/`). `AGENTS.md` describes `docs/readme/` as "README assets" and references `docs/plans/` as if it held content. | Rewrite `.editorconfig` for this stack; clean `.gitignore`; fix the excludes; update the `AGENTS.md` repo map. |
+| TOOL-12 | Low | Verified | yes | Config leftovers: `.editorconfig` sets **tabs for `*.yml`/`*.yaml`**, which makes YAML invalid, keeps `go` and `Makefile` sections and has nothing for rs, ts, js, json or toml. `.gitignore` keeps Python (`.venv`, `__pycache__`, `*.py[cod]`), `/bin/` and profiling entries, and lacks `/artifacts/` and `/npm/`. `.typos.toml` excludes `docs/readme/progression` and `docs/readme/thumbs`, which do not exist (the images live in `docs/images/`). | Rewrite `.editorconfig` for this stack; clean `.gitignore`; fix the excludes. |
 
 ---
 
@@ -775,7 +774,6 @@ The advisories come from querying OSV with every entry in `Cargo.lock` (103 crat
 | DOC-2 | Medium | Verified | yes | Missing operational documentation: minimum glibc, CPU baseline, memory sizing (per-format peaks), concurrency guidance for servers, untrusted-input guidance, the limits introduced by RT-5. | A "Deploying" section in the README. |
 | DOC-3 | Low | Verified | yes | The README examples read `docs/readme/originals/monalisa.jpg`, which does not exist for npm consumers. | Use `photo.jpg` with a note, or `process.argv[2]`. |
 | DOC-4 | Low | Verified | yes | The Benchmarks section cannot be reproduced (the script was removed in `e24492d`). | Replace with the PERF-0 script and its output, or remove the section. |
-| DOC-5 | Low | Verified | yes | `docs/pre-launch-audit.md` is stale: it reports a missing CONTRIBUTING, SECURITY, toolchain file and smoke test, which now exist. It is superseded by this document. | Delete it. |
 | DOC-6 | Medium | Verified | yes | **Licensing of sample images:** `docs/readme/originals/spongebob.jpg` (Nickelodeon artwork) and `kenna-fiume-po.jpg` (a Michael Kenna photograph), plus every derived gallery image, are copyrighted works in a public MIT repository. Mona Lisa and American Gothic are public domain. | Replace them with public-domain, CC0 or the maintainer's own photographs; regenerate the gallery; this corpus is also the benchmark corpus (PERF-0). |
 | DOC-7 | Low | Verified | yes | Package and repository metadata: `package.json` has a weak description ("TypeScript-first Node package...") and lacks `keywords`, `homepage`, `bugs` and `author`; there are no README badges (CI, licence); the GitHub repository has no topics. | Fill them in. |
 
@@ -840,10 +838,10 @@ Mechanical; touches every file type, so doing it first keeps later diffs clean.
 - [ ] TOOL-3 `cargo update`; `rand` `default-features = false`
 - [ ] TOOL-4 `@napi-rs/cli` 3.10, `@types/node@22`; TypeScript 7 as a separate commit
 - [ ] TOOL-9 Biome (format the repo in one commit, then enforce)
-- [ ] TOOL-5, TOOL-6, TOOL-7, TOOL-11 Actions pinned by SHA, trigger fix, Dependabot, actionlint/zizmor
+- [ ] TOOL-5, TOOL-7, TOOL-11 Actions pinned by SHA, Dependabot, actionlint/zizmor
 - [ ] TOOL-8 `cargo-deny`
 - [ ] TOOL-10 `cargo doc -D warnings` (requires the API-7 link fixes)
-- [ ] TOOL-12 `.editorconfig`, `.gitignore`, `.typos.toml`, `AGENTS.md` map
+- [ ] TOOL-12 `.editorconfig`, `.gitignore`, `.typos.toml`
 - [ ] REL-4 `engines >=22.12`, CI matrix `[22, 24, 26]` (also fixes REL-3)
 
 ### T2: Simplification and the engine boundary
@@ -913,7 +911,7 @@ Required in any case, because the current engine becomes the reference and basel
 
 Continuous: each ticket updates the README for the behaviour it changes. This ticket is the final pass.
 
-- [ ] DOC-1 to DOC-7, API-7
+- [ ] DOC-1 to DOC-4, DOC-6, DOC-7, API-7
 
 ---
 
