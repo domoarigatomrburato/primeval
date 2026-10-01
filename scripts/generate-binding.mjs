@@ -3,10 +3,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
-    readPackageMetadata,
-    requiredString,
-    runtimeTargetForTarget,
-    validatePackageMetadata,
+  readPackageMetadata,
+  requiredString,
+  runtimeTargetForTarget,
+  validatePackageMetadata,
 } from "./napi-targets.mjs";
 
 const SCRIPTS_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -268,9 +268,7 @@ export function writeBindingLoader(
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const packageJsonPath = process.argv[2]
-    ? path.resolve(process.argv[2])
-    : DEFAULT_PACKAGE_JSON;
+  const packageJsonPath = process.argv[2] ? path.resolve(process.argv[2]) : DEFAULT_PACKAGE_JSON;
   const outputPath = process.argv[3] ? path.resolve(process.argv[3]) : DEFAULT_OUTPUT;
   writeBindingLoader(packageJsonPath, outputPath);
   console.log(path.relative(process.cwd(), outputPath));

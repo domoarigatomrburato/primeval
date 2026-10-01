@@ -110,7 +110,7 @@ export function validatePackageLock(pkg, packageLock) {
   const { packageName, version, expectedOptionalDependencies } = validatePackageMetadata(pkg);
   const lockName = requiredString(packageLock.name, "package-lock.json name");
   const lockVersion = requiredString(packageLock.version, "package-lock.json version");
-  const rootPackage = requiredObject(packageLock.packages?.[""], "package-lock.json packages[\"\"]");
+  const rootPackage = requiredObject(packageLock.packages?.[""], 'package-lock.json packages[""]');
 
   if (lockName !== packageName) {
     throw new Error(
@@ -158,9 +158,7 @@ export function validatePackageLock(pkg, packageLock) {
     );
 
     if (dependencyPackage.version !== version) {
-      throw new Error(
-        `package-lock.json entry ${dependencyName} must use version ${version}`,
-      );
+      throw new Error(`package-lock.json entry ${dependencyName} must use version ${version}`);
     }
   }
 
@@ -198,7 +196,10 @@ export function bumpPackageVersion(
     : null;
 
   try {
-    const updatedPackage = updatePackageVersion(readPackageMetadata(resolvedPackageJsonPath), nextVersion);
+    const updatedPackage = updatePackageVersion(
+      readPackageMetadata(resolvedPackageJsonPath),
+      nextVersion,
+    );
     writeJsonFile(resolvedPackageJsonPath, updatedPackage);
     execFileSync(npmCommand(), ["install", "--package-lock-only", "--ignore-scripts"], {
       cwd: packageDir,
@@ -285,7 +286,9 @@ function normalizeDependencyMap(dependencies) {
 }
 
 function optionalDependencyVersionMap(optionalDependencies, version) {
-  return Object.fromEntries(optionalDependencies.map((dependencyName) => [dependencyName, version]));
+  return Object.fromEntries(
+    optionalDependencies.map((dependencyName) => [dependencyName, version]),
+  );
 }
 
 function writeJsonFile(filePath, value) {

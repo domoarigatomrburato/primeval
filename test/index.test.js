@@ -14,7 +14,7 @@ test("package root import resolves", async () => {
 test("toDataUri encodes svg results", () => {
   const uri = toDataUri({
     format: "svg",
-    data: "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
+    data: '<svg xmlns="http://www.w3.org/2000/svg"></svg>',
     mimeType: "image/svg+xml",
     width: 1,
     height: 1,
@@ -23,7 +23,7 @@ test("toDataUri encodes svg results", () => {
   assert.match(uri, /^data:image\/svg\+xml;base64,/);
   assert.equal(
     Buffer.from(uri.split(",")[1], "base64").toString("utf8"),
-    "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
+    '<svg xmlns="http://www.w3.org/2000/svg"></svg>',
   );
 });
 
@@ -61,8 +61,7 @@ test("approximate rejects non-function progress callbacks with ValidationError",
         }),
       ),
     (err) =>
-      err instanceof ValidationError &&
-      err.message === "execution.onProgress must be a function",
+      err instanceof ValidationError && err.message === "execution.onProgress must be a function",
   );
 });
 
@@ -78,7 +77,6 @@ test("approximate rejects invalid abort signals with ValidationError", () => {
         }),
       ),
     (err) =>
-      err instanceof ValidationError &&
-      err.message === "execution.signal must be an AbortSignal",
+      err instanceof ValidationError && err.message === "execution.signal must be an AbortSignal",
   );
 });

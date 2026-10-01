@@ -6,9 +6,7 @@ import vm from "node:vm";
 
 import { renderBindingLoader } from "../../scripts/generate-binding.mjs";
 
-const packageJson = JSON.parse(
-  fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8"),
-);
+const packageJson = JSON.parse(fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8"));
 
 function runGeneratedBindingLoader({ processMock, requireImpl }) {
   const source = renderBindingLoader(packageJson)
@@ -71,15 +69,12 @@ test("binding loader rejects linux musl before attempting gnu artifacts", () => 
     },
   });
 
-  assert.throws(
-    run,
-    (error) => {
-      assert.match(error.message, /Unsupported Linux runtime/i);
-      assert.match(error.message, /musl/i);
-      assert.match(error.message, /GNU libc/i);
-      return true;
-    },
-  );
+  assert.throws(run, (error) => {
+    assert.match(error.message, /Unsupported Linux runtime/i);
+    assert.match(error.message, /musl/i);
+    assert.match(error.message, /GNU libc/i);
+    return true;
+  });
 
   assert.deepEqual(requireCalls, []);
 });
@@ -94,18 +89,15 @@ test("binding loader reports both local and package load failures with install g
     },
   });
 
-  assert.throws(
-    run,
-    (error) => {
-      assert.match(error.message, /Failed to load native binding/i);
-      assert.match(error.message, /optional dependencies/i);
-      assert.match(error.message, /--omit=optional/i);
-      assert.match(error.message, /Node 22\.12\+/);
-      assert.match(error.message, /Local file error:/i);
-      assert.match(error.message, /Package error:/i);
-      return true;
-    },
-  );
+  assert.throws(run, (error) => {
+    assert.match(error.message, /Failed to load native binding/i);
+    assert.match(error.message, /optional dependencies/i);
+    assert.match(error.message, /--omit=optional/i);
+    assert.match(error.message, /Node 22\.12\+/);
+    assert.match(error.message, /Local file error:/i);
+    assert.match(error.message, /Package error:/i);
+    return true;
+  });
 
   assert.deepEqual(requireCalls, [
     "./primeval-node.linux-x64-gnu.node",

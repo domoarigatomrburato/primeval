@@ -39,8 +39,7 @@ function detectCurrentLinuxLibc() {
     Array.isArray(sharedObjects) &&
     sharedObjects.some(
       (entry) =>
-        typeof entry === "string" &&
-        (entry.includes("ld-musl-") || entry.includes("libc.musl-")),
+        typeof entry === "string" && (entry.includes("ld-musl-") || entry.includes("libc.musl-")),
     )
   ) {
     return "musl";
@@ -70,11 +69,7 @@ function run(command, args, options) {
   assert.equal(
     result.status,
     0,
-    [
-      `command failed: ${command} ${args.join(" ")}`,
-      result.stdout,
-      result.stderr,
-    ].join("\n"),
+    [`command failed: ${command} ${args.join(" ")}`, result.stdout, result.stderr].join("\n"),
   );
 
   return result;
@@ -83,7 +78,9 @@ function run(command, args, options) {
 function packRootPackage() {
   const result = run(npmCommand(), ["pack", "--json"], { cwd: repoRoot });
   const jsonStart = result.stdout.lastIndexOf("\n[");
-  const summaryText = (jsonStart === -1 ? result.stdout : result.stdout.slice(jsonStart + 1)).trim();
+  const summaryText = (
+    jsonStart === -1 ? result.stdout : result.stdout.slice(jsonStart + 1)
+  ).trim();
   const [summary] = JSON.parse(summaryText);
   return path.join(repoRoot, summary.filename);
 }
@@ -93,85 +90,83 @@ function writeFile(filePath, content) {
   fs.writeFileSync(filePath, content);
 }
 
-test(
-  "packed package can be installed and render in a consumer project",
-  {
-    skip:
-      currentTarget === null
-        ? `unsupported local runtime: ${process.platform}-${process.arch}`
-        : !fs.existsSync(currentBinaryPath)
-          ? `missing local native binary: ${currentBinaryPath}`
-          : false,
-  },
-  () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "primeval-packed-install-"));
-    const platformPackageDir = path.join(tempDir, "local-platform");
-    let tarballPath;
+test("packed package can be installed and render in a consumer project", {
+  skip:
+    currentTarget === null
+      ? `unsupported local runtime: ${process.platform}-${process.arch}`
+      : !fs.existsSync(currentBinaryPath)
+        ? `missing local native binary: ${currentBinaryPath}`
+        : false,
+}, () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "primeval-packed-install-"));
+  const platformPackageDir = path.join(tempDir, "local-platform");
+  let tarballPath;
 
-    try {
-      tarballPath = packRootPackage();
+  try {
+    tarballPath = packRootPackage();
 
-      writeFile(
-        path.join(tempDir, "package.json"),
-        `${JSON.stringify({
+    writeFile(
+      path.join(tempDir, "package.json"),
+      `${JSON.stringify(
+        {
           name: "primeval-consumer-smoke",
           private: true,
           type: "module",
-        }, null, 2)}\n`,
-      );
+        },
+        null,
+        2,
+      )}\n`,
+    );
 
-      fs.mkdirSync(platformPackageDir, { recursive: true });
-      fs.copyFileSync(
-        currentBinaryPath,
-        path.join(platformPackageDir, path.basename(currentBinaryPath)),
-      );
-      writeFile(
-        path.join(platformPackageDir, "package.json"),
-        `${JSON.stringify(
-          {
-            name: currentTarget.packageName,
-            version: packageJson.version,
-            main: "index.js",
-          },
-          null,
-          2,
-        )}\n`,
-      );
-      writeFile(
-        path.join(platformPackageDir, "index.js"),
-        `module.exports = require("./${path.basename(currentBinaryPath)}");\n`,
-      );
+    fs.mkdirSync(platformPackageDir, { recursive: true });
+    fs.copyFileSync(
+      currentBinaryPath,
+      path.join(platformPackageDir, path.basename(currentBinaryPath)),
+    );
+    writeFile(
+      path.join(platformPackageDir, "package.json"),
+      `${JSON.stringify(
+        {
+          name: currentTarget.packageName,
+          version: packageJson.version,
+          main: "index.js",
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    writeFile(
+      path.join(platformPackageDir, "index.js"),
+      `module.exports = require("./${path.basename(currentBinaryPath)}");\n`,
+    );
 
-      run(npmCommand(), ["install", "./local-platform"], { cwd: tempDir });
-      run(npmCommand(), ["install", tarballPath], { cwd: tempDir });
+    run(npmCommand(), ["install", "./local-platform"], { cwd: tempDir });
+    run(npmCommand(), ["install", tarballPath], { cwd: tempDir });
 
-      const fixturePath = path.join(repoRoot, "docs", "readme", "originals", "monalisa.jpg");
-      const smokeScript = [
-        'import { readFile } from "node:fs/promises";',
-        'import { approximate } from "@aleburato/primeval";',
-        `const input = await readFile(${JSON.stringify(fixturePath)});`,
-        "const result = await approximate({",
-        '  input: { kind: "bytes", data: input },',
-        '  output: "svg",',
-        '  render: { count: 4, resizeInput: 8, outputSize: 16, seed: 7 },',
-        "});",
-        'if (result.format !== "svg" || !result.data.startsWith("<svg")) {',
-        '  throw new Error("unexpected packed-install result");',
-        "}",
-        'process.stdout.write("ok\\n");',
-      ].join("\n");
+    const fixturePath = path.join(repoRoot, "docs", "readme", "originals", "monalisa.jpg");
+    const smokeScript = [
+      'import { readFile } from "node:fs/promises";',
+      'import { approximate } from "@aleburato/primeval";',
+      `const input = await readFile(${JSON.stringify(fixturePath)});`,
+      "const result = await approximate({",
+      '  input: { kind: "bytes", data: input },',
+      '  output: "svg",',
+      "  render: { count: 4, resizeInput: 8, outputSize: 16, seed: 7 },",
+      "});",
+      'if (result.format !== "svg" || !result.data.startsWith("<svg")) {',
+      '  throw new Error("unexpected packed-install result");',
+      "}",
+      'process.stdout.write("ok\\n");',
+    ].join("\n");
 
-      const smokeResult = run(
-        process.execPath,
-        ["--input-type=module", "-e", smokeScript],
-        { cwd: tempDir },
-      );
-      assert.match(smokeResult.stdout, /^ok$/m);
-    } finally {
-      if (tarballPath) {
-        fs.rmSync(tarballPath, { force: true });
-      }
-      fs.rmSync(tempDir, { recursive: true, force: true });
+    const smokeResult = run(process.execPath, ["--input-type=module", "-e", smokeScript], {
+      cwd: tempDir,
+    });
+    assert.match(smokeResult.stdout, /^ok$/m);
+  } finally {
+    if (tarballPath) {
+      fs.rmSync(tarballPath, { force: true });
     }
-  },
-);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});

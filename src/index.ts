@@ -267,9 +267,10 @@ function mapNativeError(error: unknown): Error {
 
 // --- Core API ---
 
-function startApproximate(
-  request: ApproximateRequest,
-): { promise: Promise<ApproximateResult>; cancel: () => void } {
+function startApproximate(request: ApproximateRequest): {
+  promise: Promise<ApproximateResult>;
+  cancel: () => void;
+} {
   const normalized = normalizeRequest(request);
   const nativeBinding = getNativeBinding();
   const onProgress =
@@ -285,9 +286,7 @@ function startApproximate(
     render: {
       ...(normalized.render.count === undefined ? {} : { count: normalized.render.count }),
       ...(normalized.render.shape === undefined ? {} : { shape: normalized.render.shape }),
-      ...(normalized.render.alpha === undefined
-        ? {}
-        : { alpha: String(normalized.render.alpha) }),
+      ...(normalized.render.alpha === undefined ? {} : { alpha: String(normalized.render.alpha) }),
       ...(normalized.render.repeat === undefined ? {} : { repeat: normalized.render.repeat }),
       ...(normalized.render.seed === undefined ? {} : { seed: normalized.render.seed }),
       ...(normalized.render.background === undefined
@@ -321,9 +320,7 @@ function startApproximate(
       if (result.format === "svg") {
         return {
           format: "svg",
-          data: Buffer.isBuffer(result.data)
-            ? result.data.toString("utf8")
-            : String(result.data),
+          data: Buffer.isBuffer(result.data) ? result.data.toString("utf8") : String(result.data),
           mimeType: result.mimeType as "image/svg+xml",
           width: result.width,
           height: result.height,

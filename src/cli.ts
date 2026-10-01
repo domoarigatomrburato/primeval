@@ -7,12 +7,12 @@ import process from "node:process";
 import { parseArgs } from "node:util";
 
 import {
-    AbortError,
-    approximate,
-    NotFoundError,
-    type OutputFormat,
-    type Shape,
-    ValidationError,
+  AbortError,
+  approximate,
+  NotFoundError,
+  type OutputFormat,
+  type Shape,
+  ValidationError,
 } from "./index.js";
 
 const require = createRequire(import.meta.url);
@@ -223,10 +223,7 @@ async function main(): Promise<void> {
     fail("stdout output currently supports only svg format");
   }
 
-  if (
-    values.shape !== undefined &&
-    !(VALID_SHAPES as readonly string[]).includes(values.shape)
-  ) {
+  if (values.shape !== undefined && !(VALID_SHAPES as readonly string[]).includes(values.shape)) {
     fail(`unknown shape: ${values.shape}`);
   }
 
@@ -251,24 +248,21 @@ async function main(): Promise<void> {
       ...(values.outputSize === undefined
         ? {}
         : { outputSize: parsePositiveInteger("output-size", values.outputSize, 1) }),
-      ...(values.seed === undefined
-        ? {}
-        : { seed: parsePositiveInteger("seed", values.seed, 0) }),
+      ...(values.seed === undefined ? {} : { seed: parsePositiveInteger("seed", values.seed, 0) }),
       ...(values.repeat === undefined
         ? {}
         : { repeat: parsePositiveInteger("repeat", values.repeat, 0) }),
     },
-    execution:
-      !showProgress
-        ? undefined
-        : {
-            onProgress(info) {
-              const elapsedSeconds = (Date.now() - start) / 1000;
-              process.stderr.write(
-                `${String(info.step).padStart(4, " ")}: elapsed=${elapsedSeconds.toFixed(3)}s score=${info.score.toFixed(6)}\n`,
-              );
-            },
+    execution: !showProgress
+      ? undefined
+      : {
+          onProgress(info) {
+            const elapsedSeconds = (Date.now() - start) / 1000;
+            process.stderr.write(
+              `${String(info.step).padStart(4, " ")}: elapsed=${elapsedSeconds.toFixed(3)}s score=${info.score.toFixed(6)}\n`,
+            );
           },
+        },
   });
 
   if (outputPath === "-") {
@@ -295,6 +289,8 @@ main().catch((error: unknown) => {
     process.exit(1);
   }
 
-  process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
+  process.stderr.write(
+    `${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`,
+  );
   process.exit(1);
 });

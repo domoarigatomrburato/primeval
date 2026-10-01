@@ -3,12 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
 
-import {
-  AbortError,
-  approximate,
-  NotFoundError,
-  ValidationError,
-} from "@aleburato/primeval";
+import { AbortError, approximate, NotFoundError, ValidationError } from "@aleburato/primeval";
 
 const FIXTURE_IMAGE = fs.readFileSync(
   path.join(process.cwd(), "docs", "readme", "originals", "monalisa.jpg"),

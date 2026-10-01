@@ -228,11 +228,16 @@ test("cli auto-derives output filename when --output is omitted", () => {
 
   const result = runCli([
     inputCopy,
-    "--count", "4",
-    "--resize-input", "8",
-    "--output-size", "16",
-    "--seed", "7",
-    "--progress", "off",
+    "--count",
+    "4",
+    "--resize-input",
+    "8",
+    "--output-size",
+    "16",
+    "--seed",
+    "7",
+    "--progress",
+    "off",
   ]);
 
   assert.equal(result.status, 0, result.stderr);
@@ -251,12 +256,18 @@ test("cli auto-derives output with correct format when --format is given", () =>
 
   const result = runCli([
     inputCopy,
-    "--format", "png",
-    "--count", "4",
-    "--resize-input", "8",
-    "--output-size", "16",
-    "--seed", "7",
-    "--progress", "off",
+    "--format",
+    "png",
+    "--count",
+    "4",
+    "--resize-input",
+    "8",
+    "--output-size",
+    "16",
+    "--seed",
+    "7",
+    "--progress",
+    "off",
   ]);
 
   assert.equal(result.status, 0, result.stderr);
@@ -277,11 +288,16 @@ test("cli fails with collision when auto-derived output already exists", () => {
 
   const result = runCli([
     inputCopy,
-    "--count", "4",
-    "--resize-input", "8",
-    "--output-size", "16",
-    "--seed", "7",
-    "--progress", "off",
+    "--count",
+    "4",
+    "--resize-input",
+    "8",
+    "--output-size",
+    "16",
+    "--seed",
+    "7",
+    "--progress",
+    "off",
   ]);
 
   assert.equal(result.status, 1);

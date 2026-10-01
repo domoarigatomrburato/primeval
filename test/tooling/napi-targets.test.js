@@ -30,16 +30,13 @@ function parseWorkflowToolchainVersions(source, fileLabel) {
 
 test("optional dependencies are derived from napi targets", () => {
   assert.deepEqual(
-    optionalDependencyNamesForTargets(
-      "@aleburato/primeval",
-      [
-        "aarch64-apple-darwin",
-        "x86_64-apple-darwin",
-        "aarch64-unknown-linux-gnu",
-        "x86_64-unknown-linux-gnu",
-        "x86_64-pc-windows-msvc",
-      ],
-    ),
+    optionalDependencyNamesForTargets("@aleburato/primeval", [
+      "aarch64-apple-darwin",
+      "x86_64-apple-darwin",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-unknown-linux-gnu",
+      "x86_64-pc-windows-msvc",
+    ]),
     [
       "@aleburato/primeval-darwin-arm64",
       "@aleburato/primeval-darwin-x64",
@@ -200,7 +197,11 @@ test("rust toolchain pin matches workflows and contributing docs", () => {
     [version],
   );
   assert.deepEqual(
-    [...new Set(parseWorkflowToolchainVersions(releaseWorkflow, ".github/workflows/napi-prebuilds.yml"))],
+    [
+      ...new Set(
+        parseWorkflowToolchainVersions(releaseWorkflow, ".github/workflows/napi-prebuilds.yml"),
+      ),
+    ],
     [version],
   );
   assert.match(contributing, new RegExp("Rust stable `" + version.replace(/\./g, "\\.") + "`"));
@@ -319,10 +320,7 @@ test("artifact verification accepts matching native payloads", () => {
   const artifactsDir = fs.mkdtempSync(path.join(os.tmpdir(), "primeval-artifacts-"));
   try {
     fs.writeFileSync(
-      path.join(
-        artifactsDir,
-        "aleburato-primeval-linux-x64-gnu.primeval-node.linux-x64-gnu.node",
-      ),
+      path.join(artifactsDir, "aleburato-primeval-linux-x64-gnu.primeval-node.linux-x64-gnu.node"),
       Buffer.alloc(0),
     );
 
@@ -381,10 +379,7 @@ test("artifact verification accepts napi package directories", () => {
         version: "0.1.0",
       }),
     );
-    fs.writeFileSync(
-      path.join(packageDir, "primeval-node.linux-x64-gnu.node"),
-      Buffer.alloc(0),
-    );
+    fs.writeFileSync(path.join(packageDir, "primeval-node.linux-x64-gnu.node"), Buffer.alloc(0));
 
     verifyArtifacts(artifactsDir, {
       name: "@aleburato/primeval",
@@ -414,10 +409,7 @@ test("artifact verification rejects wrong target payloads", () => {
         version: "0.1.0",
       }),
     );
-    fs.writeFileSync(
-      path.join(packageDir, "primeval-node.win32-x64-msvc.node"),
-      Buffer.alloc(0),
-    );
+    fs.writeFileSync(path.join(packageDir, "primeval-node.win32-x64-msvc.node"), Buffer.alloc(0));
 
     assert.throws(
       () =>
