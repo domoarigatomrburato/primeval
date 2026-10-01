@@ -136,7 +136,7 @@ impl Buffer {
         }
 
         let (mut r_sum, mut g_sum, mut b_sum) = (0u64, 0u64, 0u64);
-        for chunk in self.pixels.chunks_exact(4) {
+        for chunk in self.pixels.as_chunks::<4>().0 {
             r_sum += u64::from(chunk[0]);
             g_sum += u64::from(chunk[1]);
             b_sum += u64::from(chunk[2]);
@@ -184,8 +184,8 @@ mod tests {
         let c = Color::new(10, 20, 30, 255);
         let buf = Buffer::new_from_color(2, 2, c);
         assert_eq!(buf.pixels().len(), 2 * 2 * 4);
-        for chunk in buf.pixels().chunks_exact(4) {
-            assert_eq!(chunk, [10, 20, 30, 255]);
+        for chunk in buf.pixels().as_chunks::<4>().0 {
+            assert_eq!(*chunk, [10, 20, 30, 255]);
         }
     }
 

@@ -16,7 +16,7 @@ When behavior changes, keep `crates/primeval-render`, `binding`, `src/index.ts`,
 Prerequisites:
 
 - Node 20+
-- Rust stable `1.93.0` to match CI
+- Rust stable `1.99.0` to match CI
 
 Initial setup from the repository root:
 

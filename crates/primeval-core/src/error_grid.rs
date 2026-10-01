@@ -63,9 +63,7 @@ impl ErrorGrid {
     /// every pixel it covers. The last column and last row extend to the
     /// image boundary so that no pixels are missed.
     pub fn compute(&mut self, target: &Buffer, current: &Buffer) {
-        for e in &mut self.errors {
-            *e = 0.0;
-        }
+        self.errors.fill(0.0);
 
         let img_w = self.img_w;
         let img_h = self.img_h;

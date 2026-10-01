@@ -94,7 +94,9 @@ mod scalar {
 
     pub(super) fn difference_full_raw_pixels(a_pix: &[u8], b_pix: &[u8]) -> u64 {
         let mut total = 0_u64;
-        for (a_px, b_px) in a_pix.chunks_exact(4).zip(b_pix.chunks_exact(4)) {
+        let (a_px4, _) = a_pix.as_chunks::<4>();
+        let (b_px4, _) = b_pix.as_chunks::<4>();
+        for (a_px, b_px) in a_px4.iter().zip(b_px4) {
             let dr = i32::from(a_px[0]) - i32::from(b_px[0]);
             let dg = i32::from(a_px[1]) - i32::from(b_px[1]);
             let db = i32::from(a_px[2]) - i32::from(b_px[2]);
