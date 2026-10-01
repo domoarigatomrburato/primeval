@@ -61,12 +61,11 @@ The problems are concentrated at the edges: how binaries are built, how failures
 | 2 | RT-1 | `panic = "abort"` turns every Rust panic into the death of the host Node process. Switching to `unwind` costs nothing measurable. | Critical | Reproduced, measured |
 | 3 | RT-2, RT-3, RT-4 | Panics reachable from ordinary input: a 1-pixel working side (e.g. a 2000×5 banner), `background: "a€bc"`, a huge `outputSize`, GIF output wider than 65535 px. | Critical | Reproduced |
 | 4 | REL-2 | Linux prebuilds require glibc ≥ 2.34 (no Debian 11, Ubuntu 20.04, Amazon Linux 2, RHEL 8). | High | Verified |
-| 5 | REL-3 | `engines: ">=20"` is false: the loader `require()`s an ES module, which needs Node 20.19+ or 22.12+. Node 20 has been EOL since 2026-04-30. | High | Verified |
-| 6 | NODE-1, NODE-2 | Some errors are thrown synchronously and skip the error-class mapping; a throwing `onProgress` crashes the process. | High | Reproduced |
-| 7 | RT-5 | Memory is unbounded: a 258 KB PNG (9000×9000) peaks at 951 MB RSS; GIF at 2048 px peaks at 585 MB. | High | Reproduced, measured |
-| 8 | ENG-1 | The NEON code inside safe public functions can read out of bounds. Their `// SAFETY:` comments (added in T1) say the invariant is assumed, not checked. | High | Verified |
-| 9 | ENG-2, ENG-3, ENG-4 | Quadratic strokes paint pixels twice (15.4% of shapes). PNG/JPG/GIF geometry differs from the SVG. "Deterministic" seeds depend on the CPU core count. | Medium | Reproduced, verified |
-| 10 | PERF-* | No benchmarks exist. Polygon and rotated-ellipse take 51% of the total time and are rasterization-bound (10–32 ns/pixel versus 2–4 for rectangles). | Medium | Measured |
+| 5 | NODE-1, NODE-2 | Some errors are thrown synchronously and skip the error-class mapping; a throwing `onProgress` crashes the process. | High | Reproduced |
+| 6 | RT-5 | Memory is unbounded: a 258 KB PNG (9000×9000) peaks at 951 MB RSS; GIF at 2048 px peaks at 585 MB. | High | Reproduced, measured |
+| 7 | ENG-1 | The NEON code inside safe public functions can read out of bounds. Their `// SAFETY:` comments (added in T1) say the invariant is assumed, not checked. | High | Verified |
+| 8 | ENG-2, ENG-3, ENG-4 | Quadratic strokes paint pixels twice (15.4% of shapes). PNG/JPG/GIF geometry differs from the SVG. "Deterministic" seeds depend on the CPU core count. | Medium | Reproduced, verified |
+| 9 | PERF-* | No benchmarks exist. Polygon and rotated-ellipse take 51% of the total time and are rasterization-bound (10–32 ns/pixel versus 2–4 for rectangles). | Medium | Measured |
 
 **Carry-over:** of the 100 action items the audit identified, 65 carry over unchanged to a redesigned engine and 13 more partially (section 15, a snapshot taken at audit time). This argues for doing the transferable work first and capping the investment in performance tuning of the current engine.
 
@@ -145,30 +144,6 @@ The problems are concentrated at the edges: how binaries are built, how failures
   - Build Linux targets with `napi build --use-napi-cross`, or with a zig/cross toolchain targeting glibc 2.17.
   - Add the same ISA/symbol gate as REL-1, with a maximum `GLIBC_` version.
   - Document the minimum.
-
-### REL-3: `engines` does not match the loader
-
-- **Severity / status:** High. Verified; a reviewer probe ran Node 22.18 with `--no-experimental-require-module` and got `ERR_REQUIRE_ESM`. `next: yes`.
-- **Where:**
-  - `src/native-binding.ts:62` does `require("../binding.js")`.
-  - `scripts/generate-binding.mjs:63-65` emits ESM (`import { createRequire }`, `export const ...`).
-  - `package.json` declares `"node": ">=20"`.
-- **Impact:** `require(esm)` works unflagged only from Node 20.19 and 22.12. CI misses this because `node-version: 20` resolves to the latest 20.x.
-- **Fix:** set `"engines": { "node": ">=22.12" }` (see REL-4). Alternatively generate `binding.cjs`. Raising the floor is simpler, and Node 20 is EOL anyway.
-
-### REL-4: Node support window
-
-- **Severity / status:** Medium. Verified against the Node release schedule. `next: yes`.
-- **Schedule:**
-  - Node 20: EOL 2026-04-30.
-  - Node 22: maintenance until 2027-04-30.
-  - Node 24: active LTS, maintenance from 2026-10-20.
-  - Node 26: current, LTS from 2026-10-28.
-- **Fix:**
-  - `engines: ">=22.12"`.
-  - CI matrix `[22, 24, 26]`.
-  - Keep `@types/node` on the lowest supported major (22).
-  - Note that `@napi-rs/cli` 3.10 requires `^22.13` for development, which is fine for contributors.
 
 ### REL-5: Prebuilds are never executed on their own platform
 
@@ -730,9 +705,6 @@ Takeaways:
 | --- | --- | --- | --- |
 | `gif` | 0.14.1 | 0.14.2 | Removed by RM-1. |
 | `approx` (dev) | 0.5.1 | 0.5.1 | Unused (RM-9). |
-| TypeScript | 5.9.3 | 7.0.2 | Major bump; do it as its own change. |
-| `@types/node` | 22.19.15 | 26.6.3 | Keep on the lowest supported major (22). |
-| `@napi-rs/cli` | 3.5.1 | 3.10.6 | Requires Node `^20.17 \|\| ^22.13 \|\| >=23.5`. |
 | `actions/checkout` / `actions/setup-node` | v6 / v6 | v7.0.1 / v7.0.0 | |
 | `actions/upload-artifact` / `actions/download-artifact` | v7 / v8 | v7.0.1 / v8.0.1 | |
 | `Swatinem/rust-cache` | v2 | v2.9.2 | |
@@ -745,11 +717,9 @@ At audit time OSV reported 3 crate advisories (`rand`, `anyhow`, `crossbeam-epoc
 
 | ID | Severity | Status | `next` | Finding | Fix |
 | --- | --- | --- | --- | --- | --- |
-| TOOL-4 | Medium | Verified | yes | npm dev dependencies lag (table above). | TypeScript 7 as an isolated change; `@napi-rs/cli` 3.10; `@types/node@22`. Regenerate the lockfile with npm and check with `npm ci`. |
 | TOOL-5 | Medium | Verified | yes | Actions are behind and **not pinned**, contrary to the `AGENTS.md` rule "Pin CI tooling versions". `dtolnay/rust-toolchain@stable` is a floating branch and is redundant: rustup reads `rust-toolchain.toml` on its own. | Pin by full SHA with a `# vX.Y.Z` comment; drop `dtolnay/rust-toolchain`; let Dependabot bump the SHAs. |
 | TOOL-7 | Medium | Verified | yes | No `.github/dependabot.yml`; only npm security updates arrive. | Weekly `npm`, `cargo` and `github-actions` updates, with patch and minor grouped. Nothing more (no Renovate, no scanner zoo). |
 | TOOL-8 | Medium | Verified absent | yes | No Rust supply-chain gate. | `cargo-deny` (advisories, licenses, bans for duplicate versions, sources) in the hygiene job, with a pinned version. |
-| TOOL-9 | Medium | Verified | yes | No TS/JS formatter or linter. Rust has rustfmt and `clippy -D warnings`; TS has only `tsc`. `scripts/generate-binding.mjs` is visibly unformatted. | **Biome** only, over `src/`, `scripts/` and `test/`: `npm run lint` / `format:check` in `verify:node`, autofix locally. |
 | TOOL-11 | Low | Verified absent | yes | Workflows are not linted. | `actionlint` and `zizmor`, pinned, in hygiene. |
 | TOOL-12 | Low | Verified | yes | Config leftovers: `.editorconfig` sets **tabs for `*.yml`/`*.yaml`**, which makes YAML invalid, keeps `go` and `Makefile` sections and has nothing for rs, ts, js, json or toml. `.gitignore` keeps Python (`.venv`, `__pycache__`, `*.py[cod]`), `/bin/` and profiling entries, and lacks `/artifacts/` and `/npm/`. `.typos.toml` excludes `docs/readme/progression` and `docs/readme/thumbs`, which do not exist (the images live in `docs/images/`). | Rewrite `.editorconfig` for this stack; clean `.gitignore`; fix the excludes. |
 
@@ -822,12 +792,9 @@ Every code change follows the red-green-refactor rule in `AGENTS.md`. Tickets ar
 
 Mechanical; touches every file type, so doing it first keeps later diffs clean.
 
-- [ ] TOOL-4 `@napi-rs/cli` 3.10, `@types/node@22`; TypeScript 7 as a separate commit
-- [ ] TOOL-9 Biome (format the repo in one commit, then enforce)
 - [ ] TOOL-5, TOOL-7, TOOL-11 Actions pinned by SHA, Dependabot, actionlint/zizmor
 - [ ] TOOL-8 `cargo-deny`
 - [ ] TOOL-12 `.editorconfig`, `.gitignore`, `.typos.toml`
-- [ ] REL-4 `engines >=22.12`, CI matrix `[22, 24, 26]` (also fixes REL-3)
 
 ### T2: Simplification and the engine boundary
 
