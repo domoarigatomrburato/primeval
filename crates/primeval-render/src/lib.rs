@@ -431,12 +431,12 @@ fn validate_options(render: &RenderOptions) -> Result<(), ApproximateError> {
             "gif_frame_step must be at least 1",
         ));
     }
-    if let AlphaOption::Fixed(alpha) = render.alpha {
-        if alpha == 0 {
-            return Err(ApproximateError::validation(
-                "alpha must be 0..255 where 0 means auto",
-            ));
-        }
+    if let AlphaOption::Fixed(alpha) = render.alpha
+        && alpha == 0
+    {
+        return Err(ApproximateError::validation(
+            "alpha must be 0..255 where 0 means auto",
+        ));
     }
     Ok(())
 }

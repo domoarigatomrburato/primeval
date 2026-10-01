@@ -1,7 +1,7 @@
 use crate::{Buffer, Color};
 use gif::{Encoder, Frame, Repeat};
 use image::codecs::jpeg::JpegEncoder;
-use image::{imageops, DynamicImage, GenericImageView, ImageEncoder, RgbaImage};
+use image::{DynamicImage, GenericImageView, ImageEncoder, RgbaImage, imageops};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;

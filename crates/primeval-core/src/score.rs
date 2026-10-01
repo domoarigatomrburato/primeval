@@ -5,7 +5,7 @@
 /// intrinsics to process 8 pixels per iteration.
 use crate::buffer::Buffer;
 use crate::color::Color;
-use crate::scanline::{clamp_line, Scanline};
+use crate::scanline::{Scanline, clamp_line};
 
 const M: u32 = 0xFFFF;
 
@@ -33,7 +33,7 @@ fn blend_channel_scalar(current: u8, source: u32, ma: u32, a: u32) -> u8 {
 }
 
 mod scalar {
-    use super::{blend_channel_scalar, clamp_line, Buffer, Color, Scanline, M};
+    use super::{Buffer, Color, M, Scanline, blend_channel_scalar, clamp_line};
 
     #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
     pub(super) fn compute_color(
@@ -173,32 +173,51 @@ mod scalar {
 
 #[cfg(target_arch = "aarch64")]
 mod neon {
-    use super::{blend_channel_scalar, clamp_line, scalar, Buffer, Color, Scanline, M};
+    use super::{Buffer, Color, M, Scanline, blend_channel_scalar, clamp_line, scalar};
     use std::arch::aarch64::*;
 
+    /// # Safety
+    ///
+    /// Requires NEON, which every aarch64 target provides.
     unsafe fn div_by_m_u32x4(value: uint32x4_t) -> uint32x4_t {
-        let plus_one = vdupq_n_u32(1);
-        let adjusted = vaddq_u32(vaddq_u32(value, plus_one), vshrq_n_u32(value, 16));
-        vshrq_n_u32(adjusted, 16)
+        // SAFETY: register-only NEON intrinsics with no memory access. NEON is a
+        // baseline feature of every aarch64 target and this module only compiles
+        // for aarch64, so the required target feature is always available.
+        unsafe {
+            let plus_one = vdupq_n_u32(1);
+            let adjusted = vaddq_u32(vaddq_u32(value, plus_one), vshrq_n_u32(value, 16));
+            vshrq_n_u32(adjusted, 16)
+        }
     }
 
+    /// # Safety
+    ///
+    /// Requires NEON, which every aarch64 target provides.
     unsafe fn blend_vector_u8x8(current: uint8x8_t, source: u32, ma: u32, a: u32) -> uint8x8_t {
-        let current16 = vmovl_u8(current);
-        let source_term = vdupq_n_u32(source * ma);
+        // SAFETY: register-only NEON intrinsics with no memory access. NEON is a
+        // baseline feature of every aarch64 target and this module only compiles
+        // for aarch64, so the required target feature is always available.
+        unsafe {
+            let current16 = vmovl_u8(current);
+            let source_term = vdupq_n_u32(source * ma);
 
-        let current_low = vmovl_u16(vget_low_u16(current16));
-        let current_high = vmovl_u16(vget_high_u16(current16));
+            let current_low = vmovl_u16(vget_low_u16(current16));
+            let current_high = vmovl_u16(vget_high_u16(current16));
 
-        let blended_low = div_by_m_u32x4(vaddq_u32(vmulq_n_u32(current_low, a), source_term));
-        let blended_high = div_by_m_u32x4(vaddq_u32(vmulq_n_u32(current_high, a), source_term));
+            let blended_low = div_by_m_u32x4(vaddq_u32(vmulq_n_u32(current_low, a), source_term));
+            let blended_high = div_by_m_u32x4(vaddq_u32(vmulq_n_u32(current_high, a), source_term));
 
-        let blended16 = vcombine_u16(
-            vmovn_u32(vshrq_n_u32(blended_low, 8)),
-            vmovn_u32(vshrq_n_u32(blended_high, 8)),
-        );
-        vmovn_u16(blended16)
+            let blended16 = vcombine_u16(
+                vmovn_u32(vshrq_n_u32(blended_low, 8)),
+                vmovn_u32(vshrq_n_u32(blended_high, 8)),
+            );
+            vmovn_u16(blended16)
+        }
     }
 
+    /// # Safety
+    ///
+    /// Requires NEON, which every aarch64 target provides.
     #[cfg(test)]
     pub(super) unsafe fn blend_chunk_u8x8(
         current: [u8; 8],
@@ -206,46 +225,72 @@ mod neon {
         ma: u32,
         a: u32,
     ) -> [u8; 8] {
-        let current_vec = vld1_u8(current.as_ptr());
-        let blended = blend_vector_u8x8(current_vec, source, ma, a);
         let mut out = [0_u8; 8];
-        vst1_u8(out.as_mut_ptr(), blended);
+        // SAFETY: `vld1_u8` reads and `vst1_u8` writes exactly 8 bytes, and both
+        // pointers come from local `[u8; 8]` arrays. The remaining calls are
+        // register-only NEON operations; NEON is a baseline aarch64 feature.
+        unsafe {
+            let current_vec = vld1_u8(current.as_ptr());
+            let blended = blend_vector_u8x8(current_vec, source, ma, a);
+            vst1_u8(out.as_mut_ptr(), blended);
+        }
         out
     }
 
+    /// # Safety
+    ///
+    /// Requires NEON, which every aarch64 target provides.
     unsafe fn sum_squared_diff_u8x8(lhs: uint8x8_t, rhs: uint8x8_t) -> u64 {
-        let lhs16 = vreinterpretq_s16_u16(vmovl_u8(lhs));
-        let rhs16 = vreinterpretq_s16_u16(vmovl_u8(rhs));
-        let diff = vsubq_s16(lhs16, rhs16);
-        let low = vmull_s16(vget_low_s16(diff), vget_low_s16(diff));
-        let high = vmull_s16(vget_high_s16(diff), vget_high_s16(diff));
-        u64::from(vaddvq_u32(vreinterpretq_u32_s32(low)))
-            + u64::from(vaddvq_u32(vreinterpretq_u32_s32(high)))
+        // SAFETY: register-only NEON intrinsics with no memory access. NEON is a
+        // baseline feature of every aarch64 target and this module only compiles
+        // for aarch64, so the required target feature is always available.
+        unsafe {
+            let lhs16 = vreinterpretq_s16_u16(vmovl_u8(lhs));
+            let rhs16 = vreinterpretq_s16_u16(vmovl_u8(rhs));
+            let diff = vsubq_s16(lhs16, rhs16);
+            let low = vmull_s16(vget_low_s16(diff), vget_low_s16(diff));
+            let high = vmull_s16(vget_high_s16(diff), vget_high_s16(diff));
+            u64::from(vaddvq_u32(vreinterpretq_u32_s32(low)))
+                + u64::from(vaddvq_u32(vreinterpretq_u32_s32(high)))
+        }
     }
 
+    /// # Safety
+    ///
+    /// Requires NEON, which every aarch64 target provides.
     unsafe fn accumulate_color_channel(target: uint8x8_t, current: uint8x8_t, alpha: i32) -> i64 {
-        let target16 = vreinterpretq_s16_u16(vmovl_u8(target));
-        let current16_signed = vreinterpretq_s16_u16(vmovl_u8(current));
-        let diff16 = vsubq_s16(target16, current16_signed);
-        let current16 = vmovl_u8(current);
+        // SAFETY: register-only NEON intrinsics with no memory access. NEON is a
+        // baseline feature of every aarch64 target and this module only compiles
+        // for aarch64, so the required target feature is always available.
+        unsafe {
+            let target16 = vreinterpretq_s16_u16(vmovl_u8(target));
+            let current16_signed = vreinterpretq_s16_u16(vmovl_u8(current));
+            let diff16 = vsubq_s16(target16, current16_signed);
+            let current16 = vmovl_u8(current);
 
-        let diff_low = vmovl_s16(vget_low_s16(diff16));
-        let diff_high = vmovl_s16(vget_high_s16(diff16));
-        let current_low = vmovl_u16(vget_low_u16(current16));
-        let current_high = vmovl_u16(vget_high_u16(current16));
+            let diff_low = vmovl_s16(vget_low_s16(diff16));
+            let diff_high = vmovl_s16(vget_high_s16(diff16));
+            let current_low = vmovl_u16(vget_low_u16(current16));
+            let current_high = vmovl_u16(vget_high_u16(current16));
 
-        let low = vaddq_s32(
-            vmulq_n_s32(diff_low, alpha),
-            vreinterpretq_s32_u32(vmulq_n_u32(current_low, 0x101)),
-        );
-        let high = vaddq_s32(
-            vmulq_n_s32(diff_high, alpha),
-            vreinterpretq_s32_u32(vmulq_n_u32(current_high, 0x101)),
-        );
+            let low = vaddq_s32(
+                vmulq_n_s32(diff_low, alpha),
+                vreinterpretq_s32_u32(vmulq_n_u32(current_low, 0x101)),
+            );
+            let high = vaddq_s32(
+                vmulq_n_s32(diff_high, alpha),
+                vreinterpretq_s32_u32(vmulq_n_u32(current_high, 0x101)),
+            );
 
-        i64::from(vaddvq_s32(low)) + i64::from(vaddvq_s32(high))
+            i64::from(vaddvq_s32(low)) + i64::from(vaddvq_s32(high))
+        }
     }
 
+    /// # Safety
+    ///
+    /// `current` must have the same width and height as `target`. Scanlines are
+    /// clipped against `target` only, and the 8-pixel loads read both buffers
+    /// at the same byte offsets.
     pub(super) unsafe fn compute_color(
         target: &Buffer,
         current: &Buffer,
@@ -273,12 +318,28 @@ mod neon {
             let chunk_pixels = pixel_count / 8;
 
             for _ in 0..chunk_pixels {
-                let target_channels = vld4_u8(t_pix.as_ptr().add(byte_index));
-                let current_channels = vld4_u8(c_pix.as_ptr().add(byte_index));
+                // SAFETY: `clamp_line` keeps `line.y` and `x1..=x2` inside
+                // `target`. Each `vld4_u8` reads 8 pixels (32 bytes) starting at
+                // `byte_index`, and this loop runs `pixel_count / 8` times from
+                // pixel `x1`, so the last pixel read is at most `x2`: the read
+                // from `t_pix` stays inside `target.pixels()` (length
+                // `width * height * 4` by the `Buffer` invariant). The read from
+                // `c_pix` at the same offset relies on this function's contract
+                // that `current` has `target`'s dimensions.
+                let (target_channels, current_channels) = unsafe {
+                    (
+                        vld4_u8(t_pix.as_ptr().add(byte_index)),
+                        vld4_u8(c_pix.as_ptr().add(byte_index)),
+                    )
+                };
 
-                rsum += accumulate_color_channel(target_channels.0, current_channels.0, weight);
-                gsum += accumulate_color_channel(target_channels.1, current_channels.1, weight);
-                bsum += accumulate_color_channel(target_channels.2, current_channels.2, weight);
+                // SAFETY: these helpers only run register-only NEON operations
+                // (no memory access); NEON is a baseline aarch64 feature.
+                unsafe {
+                    rsum += accumulate_color_channel(target_channels.0, current_channels.0, weight);
+                    gsum += accumulate_color_channel(target_channels.1, current_channels.1, weight);
+                    bsum += accumulate_color_channel(target_channels.2, current_channels.2, weight);
+                }
                 count += 8;
                 byte_index += 32;
             }
@@ -309,6 +370,9 @@ mod neon {
         Color::new(r as u8, g as u8, b as u8, alpha as u8)
     }
 
+    /// # Safety
+    ///
+    /// `a` and `b` must have the same width and height.
     pub(super) unsafe fn difference_full_raw(a: &Buffer, b: &Buffer) -> u64 {
         let a_pix = a.pixels();
         let b_pix = b.pixels();
@@ -317,18 +381,31 @@ mod neon {
         let mut byte_index = 0_usize;
 
         while byte_index < chunk_bytes {
-            let a_channels = vld4_u8(a_pix.as_ptr().add(byte_index));
-            let b_channels = vld4_u8(b_pix.as_ptr().add(byte_index));
-            total += sum_squared_diff_u8x8(a_channels.0, b_channels.0);
-            total += sum_squared_diff_u8x8(a_channels.1, b_channels.1);
-            total += sum_squared_diff_u8x8(a_channels.2, b_channels.2);
-            total += sum_squared_diff_u8x8(a_channels.3, b_channels.3);
+            // SAFETY: `byte_index + 32 <= chunk_bytes <= a_pix.len()`. By this
+            // function's contract `b` has `a`'s dimensions, so by the `Buffer`
+            // invariant (`len == width * height * 4`) `b_pix.len() == a_pix.len()`
+            // and the read from `b_pix` is in bounds too. The remaining calls
+            // are register-only NEON operations; NEON is a baseline aarch64
+            // feature.
+            unsafe {
+                let a_channels = vld4_u8(a_pix.as_ptr().add(byte_index));
+                let b_channels = vld4_u8(b_pix.as_ptr().add(byte_index));
+                total += sum_squared_diff_u8x8(a_channels.0, b_channels.0);
+                total += sum_squared_diff_u8x8(a_channels.1, b_channels.1);
+                total += sum_squared_diff_u8x8(a_channels.2, b_channels.2);
+                total += sum_squared_diff_u8x8(a_channels.3, b_channels.3);
+            }
             byte_index += 32;
         }
 
         total + scalar::difference_full_raw_pixels(&a_pix[chunk_bytes..], &b_pix[chunk_bytes..])
     }
 
+    /// # Safety
+    ///
+    /// `current` must have the same width and height as `target`. Scanlines are
+    /// clipped against `target` only, and the 8-pixel loads read both buffers
+    /// at the same byte offsets.
     pub(super) unsafe fn energy_from_lines_raw(
         target: &Buffer,
         current: &Buffer,
@@ -356,23 +433,35 @@ mod neon {
             let chunk_pixels = pixel_count / 8;
 
             for _ in 0..chunk_pixels {
-                let target_channels = vld4_u8(t_pix.as_ptr().add(byte_index));
-                let current_channels = vld4_u8(c_pix.as_ptr().add(byte_index));
+                // SAFETY: same bounds argument as in `compute_color`: the loads
+                // stay inside the clipped row of `target`, and the read from
+                // `c_pix` relies on this function's contract that `current` has
+                // `target`'s dimensions.
+                let (target_channels, current_channels) = unsafe {
+                    (
+                        vld4_u8(t_pix.as_ptr().add(byte_index)),
+                        vld4_u8(c_pix.as_ptr().add(byte_index)),
+                    )
+                };
 
-                total -= sum_squared_diff_u8x8(target_channels.0, current_channels.0);
-                total -= sum_squared_diff_u8x8(target_channels.1, current_channels.1);
-                total -= sum_squared_diff_u8x8(target_channels.2, current_channels.2);
-                total -= sum_squared_diff_u8x8(target_channels.3, current_channels.3);
+                // SAFETY: these helpers only run register-only NEON operations
+                // (no memory access); NEON is a baseline aarch64 feature.
+                unsafe {
+                    total -= sum_squared_diff_u8x8(target_channels.0, current_channels.0);
+                    total -= sum_squared_diff_u8x8(target_channels.1, current_channels.1);
+                    total -= sum_squared_diff_u8x8(target_channels.2, current_channels.2);
+                    total -= sum_squared_diff_u8x8(target_channels.3, current_channels.3);
 
-                let after_r = blend_vector_u8x8(current_channels.0, sr, ma, a);
-                let after_g = blend_vector_u8x8(current_channels.1, sg, ma, a);
-                let after_b = blend_vector_u8x8(current_channels.2, sb, ma, a);
-                let after_a = blend_vector_u8x8(current_channels.3, sa, ma, a);
+                    let after_r = blend_vector_u8x8(current_channels.0, sr, ma, a);
+                    let after_g = blend_vector_u8x8(current_channels.1, sg, ma, a);
+                    let after_b = blend_vector_u8x8(current_channels.2, sb, ma, a);
+                    let after_a = blend_vector_u8x8(current_channels.3, sa, ma, a);
 
-                total += sum_squared_diff_u8x8(target_channels.0, after_r);
-                total += sum_squared_diff_u8x8(target_channels.1, after_g);
-                total += sum_squared_diff_u8x8(target_channels.2, after_b);
-                total += sum_squared_diff_u8x8(target_channels.3, after_a);
+                    total += sum_squared_diff_u8x8(target_channels.0, after_r);
+                    total += sum_squared_diff_u8x8(target_channels.1, after_g);
+                    total += sum_squared_diff_u8x8(target_channels.2, after_b);
+                    total += sum_squared_diff_u8x8(target_channels.3, after_a);
+                }
                 byte_index += 32;
             }
 
@@ -424,6 +513,10 @@ mod neon {
 pub fn compute_color(target: &Buffer, current: &Buffer, lines: &[Scanline], alpha: i32) -> Color {
     #[cfg(target_arch = "aarch64")]
     {
+        // SAFETY: NOT fully upheld yet (ENG-1). `neon::compute_color` requires
+        // `current` to have `target`'s dimensions; this safe function assumes it
+        // but does not check it, so a smaller `current` causes out-of-bounds
+        // reads. `target`-side bounds are enforced by `clamp_line`.
         unsafe { neon::compute_color(target, current, lines, alpha) }
     }
 
@@ -502,6 +595,8 @@ pub fn difference_full_raw(a: &Buffer, b: &Buffer) -> u64 {
 
     #[cfg(target_arch = "aarch64")]
     {
+        // SAFETY: the `assert_eq!`s above guarantee `a` and `b` have the same
+        // dimensions, which is the contract of `neon::difference_full_raw`.
         unsafe { neon::difference_full_raw(a, b) }
     }
 
@@ -602,6 +697,10 @@ pub fn energy_from_lines_raw(
 ) -> u64 {
     #[cfg(target_arch = "aarch64")]
     {
+        // SAFETY: NOT fully upheld yet (ENG-1). `neon::energy_from_lines_raw` requires
+        // `current` to have `target`'s dimensions; this safe function assumes it
+        // but does not check it, so a smaller `current` causes out-of-bounds
+        // reads. `target`-side bounds are enforced by `clamp_line`.
         unsafe { neon::energy_from_lines_raw(target, current, lines, color, score) }
     }
 
@@ -671,6 +770,8 @@ mod tests {
                 let ma = alpha * 0x101;
                 let a = (0xFFFF - ma) * 0x101;
 
+                // SAFETY: only requires NEON, a baseline aarch64 feature; the
+                // test is compiled for aarch64 only.
                 let simd = unsafe { neon::blend_chunk_u8x8(current, expanded, ma, a) };
                 for lane in 0..8 {
                     let scalar = blend_channel_scalar(current[lane], expanded, ma, a);

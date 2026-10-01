@@ -60,11 +60,7 @@ pub fn clamp_line(line: &Scanline, w: i32, h: i32) -> Option<(i32, i32)> {
     }
     let x1 = line.x1.clamp(0, w - 1);
     let x2 = line.x2.clamp(0, w - 1);
-    if x1 <= x2 {
-        Some((x1, x2))
-    } else {
-        None
-    }
+    if x1 <= x2 { Some((x1, x2)) } else { None }
 }
 
 #[cfg(test)]

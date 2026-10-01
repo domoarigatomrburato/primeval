@@ -333,9 +333,9 @@ impl<R: Rng> WorkerCtx<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Color;
     use crate::shapes::ShapeKind;
     use crate::state::State;
-    use crate::Color;
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
 

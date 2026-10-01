@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
     "crates/primeval-core",
     "crates/primeval-render",
@@ -10,6 +10,7 @@ members = [
 homepage = "https://github.com/domoarigatomrburato/primeval"
 repository = "https://github.com/domoarigatomrburato/primeval"
 license = "MIT"
+rust-version = "1.99"
 
 [workspace.lints.rust]
 unreachable_pub = "deny"

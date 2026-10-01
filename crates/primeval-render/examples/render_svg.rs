@@ -1,5 +1,5 @@
 use primeval_render::{
-    approximate, ApproximateRequest, ApproximateResult, InputSource, OutputFormat, RenderOptions,
+    ApproximateRequest, ApproximateResult, InputSource, OutputFormat, RenderOptions, approximate,
 };
 use std::sync::atomic::AtomicBool;
 

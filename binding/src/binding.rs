@@ -4,8 +4,9 @@ use napi::{Env, Status};
 use napi_derive::napi;
 use primeval_core::shapes::ShapeKind;
 use primeval_render::{
-    approximate, parse_alpha_str, parse_background_str, parse_seed_i64, ApproximateError,
-    ApproximateRequest, ApproximateResult, InputSource, OutputFormat, ProgressInfo, RenderOptions,
+    ApproximateError, ApproximateRequest, ApproximateResult, InputSource, OutputFormat,
+    ProgressInfo, RenderOptions, approximate, parse_alpha_str, parse_background_str,
+    parse_seed_i64,
 };
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU32;
@@ -200,7 +201,7 @@ fn normalize_request(
             return Err(napi_error(
                 "ValidationError",
                 format!("unknown input kind: {other}"),
-            ))
+            ));
         }
     };
 
@@ -302,7 +303,7 @@ impl From<ApproximateResult> for NativeApproximateResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     fn render_options(shape: &str) -> NativeRenderOptions {
         NativeRenderOptions {

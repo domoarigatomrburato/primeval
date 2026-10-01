@@ -660,7 +660,10 @@ impl RotatedRectangle {
     }
 
     fn svg_element(&self, attrs: &str) -> String {
-        format!("<g transform=\"translate({} {}) rotate({}) scale({} {})\"><rect {} x=\"-0.5\" y=\"-0.5\" width=\"1\" height=\"1\" /></g>", self.x, self.y, self.angle, self.sx, self.sy, attrs)
+        format!(
+            "<g transform=\"translate({} {}) rotate({}) scale({} {})\"><rect {} x=\"-0.5\" y=\"-0.5\" width=\"1\" height=\"1\" /></g>",
+            self.x, self.y, self.angle, self.sx, self.sy, attrs
+        )
     }
 }
 
@@ -927,7 +930,10 @@ impl Quadratic {
 
     fn svg_element(&self, attrs: &str) -> String {
         let attrs = attrs.replace("fill", "stroke");
-        format!("<path {} fill=\"none\" d=\"M {:.6} {:.6} Q {:.6} {:.6}, {:.6} {:.6}\" stroke-width=\"{:.6}\" />", attrs, self.x1, self.y1, self.x2, self.y2, self.x3, self.y3, self.width)
+        format!(
+            "<path {} fill=\"none\" d=\"M {:.6} {:.6} Q {:.6} {:.6}, {:.6} {:.6}\" stroke-width=\"{:.6}\" />",
+            attrs, self.x1, self.y1, self.x2, self.y2, self.x3, self.y3, self.width
+        )
     }
 }
 
@@ -988,7 +994,10 @@ impl RotatedEllipse {
     }
 
     fn svg_element(&self, attrs: &str) -> String {
-        format!("<g transform=\"translate({:.6} {:.6}) rotate({:.6}) scale({:.6} {:.6})\"><ellipse {} cx=\"0\" cy=\"0\" rx=\"1\" ry=\"1\" /></g>", self.x, self.y, self.angle, self.rx, self.ry, attrs)
+        format!(
+            "<g transform=\"translate({:.6} {:.6}) rotate({:.6}) scale({:.6} {:.6})\"><ellipse {} cx=\"0\" cy=\"0\" rx=\"1\" ry=\"1\" /></g>",
+            self.x, self.y, self.angle, self.rx, self.ry, attrs
+        )
     }
 }
 

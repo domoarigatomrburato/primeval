@@ -3,7 +3,7 @@ use crate::optimize::hill_climb;
 use crate::score;
 use crate::shapes::{Shape, ShapeKind};
 use crate::state::State;
-use crate::worker::{merge_quadratic_profile_stats, QuadraticProfileStats, SearchRound, WorkerCtx};
+use crate::worker::{QuadraticProfileStats, SearchRound, WorkerCtx, merge_quadratic_profile_stats};
 use crate::{Buffer, Color};
 use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
