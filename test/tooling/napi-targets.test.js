@@ -262,6 +262,24 @@ test("quality workflow runs once per pull request push", () => {
   );
 });
 
+test("node support window matches engines and the CI matrix", () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8"));
+  assert.equal(pkg.engines?.node, ">=22.12", "require(esm) in the loader needs Node 22.12+");
+
+  const qualityWorkflow = fs.readFileSync(
+    path.join(process.cwd(), ".github", "workflows", "quality.yml"),
+    "utf8",
+  );
+  const packageChecks = qualityWorkflow.match(/^ {2}package-checks:\n((?:(?: {4,}.*)?\n)+)/m);
+  assert.ok(packageChecks, "missing package-checks job in .github/workflows/quality.yml");
+  const matrix = packageChecks[1].match(/^ {8}node-version: \[([^\]]*)\]\s*$/m);
+  assert.ok(matrix, "missing node-version matrix in package-checks job");
+  assert.deepEqual(
+    matrix[1].split(",").map((version) => version.trim()),
+    ["22", "24", "26"],
+  );
+});
+
 test("typescript build succeeds without generated binding files", () => {
   const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "primeval-tsc-"));
 

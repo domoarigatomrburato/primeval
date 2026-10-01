@@ -15,7 +15,7 @@ When behavior changes, keep `crates/primeval-render`, `binding`, `src/index.ts`,
 
 Prerequisites:
 
-- Node 20+
+- Node 22.13+ for development (`@napi-rs/cli` requires it; the published package supports Node 22.12+)
 - Rust stable `1.99.0` to match CI
 
 Initial setup from the repository root:

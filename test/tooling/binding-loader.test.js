@@ -100,6 +100,7 @@ test("binding loader reports both local and package load failures with install g
       assert.match(error.message, /Failed to load native binding/i);
       assert.match(error.message, /optional dependencies/i);
       assert.match(error.message, /--omit=optional/i);
+      assert.match(error.message, /Node 22\.12\+/);
       assert.match(error.message, /Local file error:/i);
       assert.match(error.message, /Package error:/i);
       return true;

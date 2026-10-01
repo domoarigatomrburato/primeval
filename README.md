@@ -42,7 +42,7 @@ Browse the full example gallery in [`docs/gallery.md`](docs/gallery.md).
 npm install @aleburato/primeval
 ```
 
-Prebuilt native addons are provided for macOS (arm64, x64), Linux GNU libc (arm64, x64), and Windows (x64). Node 20+ is required.
+Prebuilt native addons are provided for macOS (arm64, x64), Linux GNU libc (arm64, x64), and Windows (x64). Node 22.12+ is required.
 
 > Install notes
 >
@@ -112,13 +112,13 @@ primeval --help
 ## Troubleshooting
 
 - `Unsupported Linux runtime: linux-<arch>-musl`: published Linux binaries currently target GNU libc only. Alpine and other musl-based environments are not supported yet.
-- `Failed to load native binding ...`: reinstall without omitting optional dependencies, make sure you are on Node 20+, and verify that your OS/CPU pair is one of the published targets listed above.
+- `Failed to load native binding ...`: reinstall without omitting optional dependencies, make sure you are on Node 22.12+, and verify that your OS/CPU pair is one of the published targets listed above.
 - `invalid image data ...`: `primeval` accepts JPEG and PNG inputs only. Convert HEIC, WebP, TIFF, or other formats before rendering.
 - `... does not exist or is not readable`: the CLI and Node API accept filesystem paths, but the path must exist and be readable from the current process.
 
 ## Node Package
 
-The npm package is **ESM-only** and targets **Node 20+**.
+The npm package is **ESM-only** and targets **Node 22.12+**.
 
 ```js
 import { approximate } from "@aleburato/primeval";

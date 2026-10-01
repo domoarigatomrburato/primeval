@@ -243,7 +243,7 @@ function loadNativeBinding() {
       [
         \`Failed to load native binding for \${target.localFile}.\`,
         \`Tried local file \${target.localFile} and package \${target.packageName}.\`,
-        'Make sure optional dependencies were installed (do not use --omit=optional or equivalent settings) and that you are running Node 20+ on a supported platform.',
+        'Make sure optional dependencies were installed (do not use --omit=optional or equivalent settings) and that you are running Node 22.12+ on a supported platform.',
         \`Local file error: \${describeLoadError(localError)}\`,
         \`Package error: \${describeLoadError(packageError)}\`,
       ].join(' '),

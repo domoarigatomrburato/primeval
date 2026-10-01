@@ -24,7 +24,7 @@ Generated output (gitignored; never edit by hand):
 
 ## Repo Direction
 
-- The npm package is ESM-only and targets Node 20+.
+- The npm package is ESM-only and targets Node 22.12+.
 - Browser/WASM support is explicitly out of scope.
 - CommonJS support is explicitly out of scope.
 - Rust is the runtime source of truth for accepted vocabularies, defaults, and validation semantics.
