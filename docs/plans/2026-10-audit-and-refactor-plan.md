@@ -68,7 +68,7 @@ The problems are concentrated at the edges: how binaries are built, how failures
 | 9 | ENG-2, ENG-3, ENG-4 | Quadratic strokes paint pixels twice (15.4% of shapes). PNG/JPG/GIF geometry differs from the SVG. "Deterministic" seeds depend on the CPU core count. | Medium | Reproduced, verified |
 | 10 | PERF-* | No benchmarks exist. Polygon and rotated-ellipse take 51% of the total time and are rasterization-bound (10–32 ns/pixel versus 2–4 for rectangles). | Medium | Measured |
 
-**Carry-over:** 65 of the 100 action items in this plan carry over unchanged to a redesigned engine, and 13 more partially (section 15). This argues for doing the transferable work first and capping the investment in performance tuning of the current engine.
+**Carry-over:** of the 100 action items the audit identified, 65 carry over unchanged to a redesigned engine and 13 more partially (section 15, a snapshot taken at audit time). This argues for doing the transferable work first and capping the investment in performance tuning of the current engine.
 
 ---
 
@@ -919,7 +919,7 @@ Continuous: each ticket updates the README for the behaviour it changes. This ti
 
 **Question:** how much of this plan still applies if the optimization algorithm is redesigned from scratch (section 16)?
 
-Each of the 100 action items above (REL 7, RT 6, NODE 10, CLI 4, ENG 16, PERF 12, API 11, TEST 6, TOOL 12, DOC 7, RM 9) carries a `next` tag.
+This section is a **snapshot taken at audit time**. It counts all 100 action items the audit identified (REL 7, RT 6, NODE 10, CLI 4, ENG 16, PERF 12, API 11, TEST 6, TOOL 12, DOC 7, RM 9), each tagged `next`. As items land they are pruned from the sections above, as `AGENTS.md` requires, but they stay in these counts. Do not recompute the table on each prune; the git history shows what has landed.
 
 | Area | Items | Carry over fully | Partially | Not at all |
 | --- | ---: | ---: | ---: | ---: |
