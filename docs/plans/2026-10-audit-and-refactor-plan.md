@@ -59,11 +59,9 @@ The problems are concentrated at the edges: how binaries are built, how failures
 
 | # | ID | Finding | Severity | Status |
 | --- | --- | --- | --- | --- |
-| 1 | REL-1 | `target-cpu=native` leaks into release prebuilds. The Windows x64 DLL contains AVX-512 and the Linux arm64 addon contains SVE, so both crash with an illegal-instruction signal on common CPUs. On ARM the flag gives zero speedup. | Critical | Reproduced, measured |
-| 2 | REL-2 | Linux prebuilds require glibc ≥ 2.34 (no Debian 11, Ubuntu 20.04, Amazon Linux 2, RHEL 8). | High | Verified |
-| 3 | ENG-1 | The NEON code inside safe public functions can read out of bounds. Their `// SAFETY:` comments (added in T1) say the invariant is assumed, not checked. | High | Verified |
-| 4 | ENG-2, ENG-3, ENG-4 | Quadratic strokes paint pixels twice (15.4% of shapes). Three engine rasterizers are coarser than the geometry they optimise. "Deterministic" seeds depend on the CPU core count. | Medium | Reproduced, verified |
-| 5 | PERF-* | No benchmarks exist. Polygon and rotated-ellipse take 51% of the total time and are rasterization-bound (10–32 ns/pixel versus 2–4 for rectangles). | Medium | Measured |
+| 1 | ENG-1 | The NEON code inside safe public functions can read out of bounds. Their `// SAFETY:` comments (added in T1) say the invariant is assumed, not checked. | High | Verified |
+| 2 | ENG-2, ENG-3, ENG-4 | Quadratic strokes paint pixels twice (15.4% of shapes). Three engine rasterizers are coarser than the geometry they optimise. "Deterministic" seeds depend on the CPU core count. | Medium | Reproduced, verified |
+| 3 | PERF-* | No benchmarks exist. Polygon and rotated-ellipse take 51% of the total time and are rasterization-bound (10–32 ns/pixel versus 2–4 for rectangles). | Medium | Measured |
 
 **Carry-over:** of the 100 action items the audit identified, 65 carry over unchanged to a redesigned engine and 13 more partially (section 15, a snapshot taken at audit time). This argues for doing the transferable work first and capping the investment in performance tuning of the current engine.
 
@@ -110,64 +108,19 @@ The problems are concentrated at the edges: how binaries are built, how failures
 
 ## 2. Release and distribution (REL)
 
-### REL-1: `target-cpu=native` is compiled into the published binaries
+REL-1, REL-2, REL-5 and REL-6 landed in T4:
 
-- **Severity / status:** Critical. Reproduced (disassembly), measured. `next: yes`.
-- **Where:**
-  - `.cargo/config.toml:2` sets `rustflags = ["-C", "target-cpu=native"]` for every build.
-  - `.github/workflows/napi-prebuilds.yml` builds with `npx napi build ... --release --target <triple>` and sets no `RUSTFLAGS`.
-  - `@napi-rs/cli` only sets `RUSTFLAGS` for musl targets or `--strip`, so the config value applies.
-- **Why it matters:** the binaries are compiled for the CPU of whichever runner built them. The quality CI runs on the same runner class, so it can never catch the problem.
-- **Evidence:** v0.1.1 artifacts, `objdump -d --no-show-raw-insn`.
+- no `target-cpu` anywhere (`.cargo/config.toml` is gone; `CONTRIBUTING.md` documents the local opt-in);
+- `scripts/check-artifact.mjs` fails a release artifact on AVX-512 (x86_64), SVE (aarch64) or a `GLIBC_` symbol above 2.17 (Linux gnu, built with `--use-napi-cross`);
+- `scripts/smoke-test-addon.mjs` loads each artifact on its own runner and renders SVG and PNG; the quality workflow runs `verify:rust` on `macos-15` too, so the NEON paths are tested;
+- the Cargo version is shared with npm (`bump:version` updates both; `check-package` fails on drift); publishing skips versions already on the registry, publishes the root package last, verifies with `npm view`, and creates the GitHub Release.
 
-  | Artifact | AVX-512: `zmm` / k-mask / `vpternlog` / `vmovdqu8/16/32/64` | AVX/AVX2 (`ymm`) | Notes |
-  | --- | --- | --- | --- |
-  | `win32-x64-msvc` | 582 / 577 / 132 / 1084 | 59,609 | Crashes on any CPU without AVX-512 (most Intel Core 12th–14th gen, AMD Zen 1–3). |
-  | `linux-x64-gnu` | 0 | 30,706 | AVX2 everywhere; crashes on pre-Haswell CPUs, some Atom/Celeron parts and VMs with masked CPUID. |
-  | `darwin-x64` | 0 | 749 | Cross-compiled on an arm64 runner, so `native` was ignored. The 749 come from runtime-dispatched code in dependencies. This is the portable baseline. |
-  | `linux-arm64-gnu` | n/a | n/a | About 843 SVE instructions (`z` registers, `ptrue`, `whilelo`), 224 LSE atomics, 88 `ldapr`. Crashes on Graviton2, Ampere Altra, Raspberry Pi and Docker on Apple Silicon. |
+**Only CI can confirm** (first release run, and the first PR run for the quality matrix): `--use-napi-cross` on both Linux runners, `llvm-objdump` from `llvm-tools` on every runner, the smoke test on all five runners (`macos-15-intel` for x86_64 macOS), and the publish/verify/release steps.
 
-- **Benefit measured on the M3:** none. Over 9 shapes at 200 steps, the portable build took 26.8 s and the native build 27.6 s, with identical output hashes. On aarch64 NEON is baseline and already hand-written. On x86 the hot loops are scalar and bounds-checked (PERF-2), so the gain would be small there too.
-- **Fix:**
-  1. Delete `.cargo/config.toml`, or replace it with nothing global. Document local opt-in instead: `RUSTFLAGS="-C target-cpu=native" cargo build --profile profiling`.
-  2. If a raised baseline is ever wanted, set an explicit and documented one (e.g. `x86-64-v2`) per target, never `native`.
-  3. Add a CI gate on release artifacts that fails if `objdump` finds `zmm` or SVE registers.
-  4. Optionally run each artifact under `qemu-x86_64 -cpu Nehalem` or `qemu-aarch64 -cpu cortex-a72`.
+**Maintainer actions:**
 
-### REL-2: Linux prebuilds require glibc 2.34
-
-- **Severity / status:** High. Verified (`objdump -T` shows a maximum of `GLIBC_2.34`). `next: yes`.
-- **Impact:** the addon fails to load on Debian 11, Ubuntu 20.04, Amazon Linux 2, RHEL/Alma/Rocky 8 and `node:*-bullseye` images. The README does not state a minimum.
-- **Fix:**
-  - Build Linux targets with `napi build --use-napi-cross`, or with a zig/cross toolchain targeting glibc 2.17.
-  - Add the same ISA/symbol gate as REL-1, with a maximum `GLIBC_` version.
-  - Document the minimum.
-
-### REL-5: Prebuilds are never executed on their own platform
-
-- **Severity / status:** High. Verified. `next: yes`.
-- **Where:**
-  - `quality.yml` runs only on `ubuntu-latest` x64.
-  - The release `build` job compiles and uploads, but never loads the `.node` file.
-  - As a consequence the aarch64 NEON code paths (`score.rs`, `#[cfg(target_arch = "aarch64")]`) are never tested in CI. The scalar fallbacks are compiled out on aarch64.
-- **Fix:**
-  - After each target build, run a smoke test on the target's native runner: load the addon, render a tiny fixture to SVG and PNG, assert non-empty output and exit code 0. Run `x86_64-apple-darwin` under Rosetta on `macos-14`.
-  - Add a `macos-14` (arm64) leg to the Rust test job so NEON is tested.
-
-### REL-6: Release process gaps
-
-- **Severity / status:** Medium. Verified. `next: yes`.
-- **Gaps:**
-  - No CHANGELOG and no GitHub Release creation.
-  - `npm run bump:version` updates `package.json` and the lockfile but not the Cargo crate versions. They are 0.1.0 while npm is 0.1.1.
-  - Publishing is not idempotent. Platform packages are published before the root package, so a partial failure leaves a state a re-run cannot fix.
-  - The `v0.1.1` tag exists and its `publish` job is green, yet no `@aleburato/*` package exists on the registry. The maintainer confirms nothing was ever published. The run logs have expired (HTTP 410), so the cause cannot be determined now.
-- **Fix:**
-  - Generate release notes (`gh release create --generate-notes`, or a CHANGELOG checked by CI).
-  - Have `bump:version` also bump the Cargo versions and validate them.
-  - Make publish re-runnable (skip versions already published).
-  - Add a post-publish verification step (`npm view <pkg>@<version>`) so a green job proves a published package.
-  - Delete the `v0.1.1` tag and restart versioning at the first real release.
+- Delete the `v0.1.1` tag (never published); versioning restarts at the first real release.
+- npm trusted publishing (OIDC) may not be able to create a package that does not exist yet: the first publish of each platform package may need a token or pre-created packages. This may also explain why the `v0.1.1` run published nothing.
 
 ### REL-7: No musl targets
 
@@ -425,11 +378,7 @@ Takeaways:
 
 | ID | Severity | Status | `next` | Finding | Fix |
 | --- | --- | --- | --- | --- | --- |
-| TEST-1 | Medium | Verified | yes | `test/contracts.test.js` checks contracts by regex over source files. It compares `src/index.ts` arrays with `variants()`, which is used nowhere else and can drift from `FromStr`. It greps for `?? 100`-style defaults but misses `\|\|`, destructuring, `cli.ts` and the README. It checks binding parsers by name only. It missed real drift: the `jpeg` alias, `--alpha auto`, NODE-1. | Replace with **runtime, table-driven** tests that run one table of inputs and expected outcomes through the API, the binding and the CLI (omitted = explicit default, boundaries, error class and code). No code generation (section 13). Then delete `ShapeKind::variants()` and `OutputFormat::variants()`, which only the regex tests still use. |
-| TEST-3 | Medium | Reproduced | yes | Missing negative tests, each of which corresponds to a bug in this plan: invalid `background` mapping, throwing `onProgress`, thin/1×1/multi-byte/huge inputs, u32 overflow, JPG via the API, concurrency, already-aborted signals, CLI `--background` / `--version` / unknown option / write failure, README examples. | Add them with the fixes (red-green per `AGENTS.md`). |
 | TEST-4 | Medium | Verified | partial | Engine tests (112) have gaps: some are weak or circular (`worker.rs:521-548` asserts nothing; a "keeps radius equal" test only checks r ≥ 1; the replay test in `model.rs` is circular; a score test only checks > 0). Missing: tiny images, per-shape score parity, NEON vs scalar parity, seed determinism, PNG vs SVG geometry. | Add `proptest`: rasterizer invariants (in bounds, `x1 ≤ x2`, alpha ≤ 0xFFFF, no duplicate pixels, odd and tiny sizes), fused energy = full recomputation after drawing, the blend bound, `clamp_line` vs `crop_scanlines`, hex colour round-trip, error-grid samples in bounds. |
-| TEST-5 | Medium | Verified absent | yes | No fuzzing. RT-2 and RT-3 are exactly what a fuzzer finds in minutes. | `cargo-fuzz` targets for `Color::from_hex` / background parsing and for render on small arbitrary images and options (bounded `count`). |
-| TEST-6 | Low | Verified | yes | `test/tooling/packed-install.test.js` is good (real `npm pack`), but its fake platform package (`main: index.js`) does not match the napi-generated package shape, it never runs the tarball's `bin`, it renders only SVG from bytes, and it runs only on linux-x64. `test/cli.test.js` never removes its `mkdtempSync` directories. | Mirror the real platform package shape, run the `bin`, and clean up temp directories. |
 
 ---
 
@@ -508,20 +457,14 @@ Done. GIF/JPG output, GIF input, path input, `repeat` and the Rust-only knobs ar
 
 ### T3: Runtime robustness
 
-Landed: every RT and NODE item, API-2, TEST-2.
-
-- [ ] TEST-1, TEST-3, TEST-5, TEST-6
+Done. Every RT and NODE item, API-2, and TEST-1, TEST-2, TEST-3, TEST-5 and TEST-6 landed. TEST-5 uses seeded randomized tests on stable Rust (`crates/primeval-render/tests/robustness.rs`) instead of `cargo-fuzz`, which needs nightly. The runtime contract table also aligned the keyword and number spellings: `auto` is exact lowercase and alpha strings are plain digits on every surface.
 
 ### T4: Portable native builds and release
 
-- [ ] REL-1 Remove `target-cpu=native`; ISA gate on artifacts
-- [ ] REL-2 glibc 2.17 baseline; symbol gate
-- [ ] REL-5 Per-target smoke tests; Rust tests on macOS arm64
-- [ ] REL-6 Release notes, Cargo version bumps, idempotent publish with post-publish verification, retire the `v0.1.1` tag
+REL-1, REL-2, REL-5 and REL-6 landed (section 2 lists what only CI can confirm and the maintainer actions).
+
 - [ ] REL-7 Decide on musl
 - [ ] API-8 Crate publishability decision
-
-REL-1 is a one-line change and can land at any time. It sits here only because the gate that keeps it fixed belongs to this ticket.
 
 ### T5: Engine correctness
 
