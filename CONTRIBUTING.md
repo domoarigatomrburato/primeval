@@ -102,7 +102,7 @@ Engine changes use the engine runner, on the same corpus:
 cargo run --release -p primeval-render --features lab --example engine > engine.md
 ```
 
-It runs one search per image and shape kind and records checkpoints along it (50, 100, 200 and 500 steps by default; `--steps LIST` changes them). Each row adds SSIM and the SVG size to the score and PNG RMSE, and a summary table at the end gives the means per checkpoint. The doc comment in `crates/primeval-render/examples/engine.rs` defines the metrics.
+It runs one search per image and shape kind and records checkpoints along it (50, 100, 200 and 500 steps by default; `--steps LIST` changes them). Each row adds to the engine's score the RMSE of the exported PNG against the same working-resolution target and their relative gap, SSIM at 128 px and at the 1024 px default output size, and the SVG size; two summary tables at the end give means and medians per checkpoint and per shape kind and checkpoint. The doc comment in `crates/primeval-render/examples/engine.rs` defines the metrics.
 
 The README's comparison with the Go [`primitive`](https://github.com/fogleman/primitive) CLI comes from `cargo run --release -p primeval-render --example versus_go > versus-go.md` (about 45 minutes with the defaults on an Apple M3). It needs the Go tool (`go install github.com/fogleman/primitive@latest`), is not part of any gate, and its doc comment in `crates/primeval-render/examples/versus_go.rs` defines the settings and metrics.
 

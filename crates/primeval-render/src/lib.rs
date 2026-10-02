@@ -503,17 +503,32 @@ fn working_target(
     render: &RenderOptions,
     check_cancelled: impl Fn() -> Result<(), ApproximateError>,
 ) -> Result<(Buffer, Color), ApproximateError> {
+    let (working, background) = working_image(input, render, check_cancelled)?;
+    let (width, height) = working.dimensions();
+    let target = Buffer::from_rgb(width, height, working.into_raw())
+        .ok_or_else(|| ApproximateError::internal("working image has an invalid pixel length"))?;
+    Ok((target, background))
+}
+
+/// [`working_target`]'s steps up to the thumbnail: the working image and
+/// its resolved background, before they become the engine's [`Buffer`].
+/// `lab::working_image` calls this too.
+fn working_image(
+    input: impl AsRef<[u8]>,
+    render: &RenderOptions,
+    check_cancelled: impl Fn() -> Result<(), ApproximateError>,
+) -> Result<(RgbImage, Color), ApproximateError> {
     validate_options(render)?;
 
     check_cancelled()?;
     let image = decode_input(input.as_ref())?;
     drop(input);
     check_cancelled()?;
-    let (working, background) = prepare_target(image, render.background, render.resize_input);
-    let (width, height) = working.dimensions();
-    let target = Buffer::from_rgb(width, height, working.into_raw())
-        .ok_or_else(|| ApproximateError::internal("working image has an invalid pixel length"))?;
-    Ok((target, background))
+    Ok(prepare_target(
+        image,
+        render.background,
+        render.resize_input,
+    ))
 }
 
 fn encode_output(

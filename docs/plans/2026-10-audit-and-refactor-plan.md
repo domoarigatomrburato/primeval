@@ -448,23 +448,44 @@ For the main use case (small SVG placeholders with 50–200 shapes) every shape 
 
 ### Progress
 
-The protocol's runner is `examples/engine.rs` in `primeval-render` (feature `lab`, see `CONTRIBUTING.md`). It runs one search per image and kind and records checkpoints along it. All numbers below are from it on the M3 (seed 42, the PERF-0 corpus of 5 images × 9 kinds, means over the 45 rows; score is the engine's RGB RMSE, lower is better).
+The protocol's runner is `examples/engine.rs` in `primeval-render` (feature `lab`, see `CONTRIBUTING.md`; its doc comment defines the metrics). It runs one search per image and kind and records checkpoints along it. All numbers below are from it on the M3, with seed 42 and the PERF-0 corpus of 5 images × 9 kinds (45 rows per checkpoint).
 
-**Baseline (greedy, `5cb04d0`):**
+**Metrics.** Lower is better for every metric except SSIM.
+- `score` is the engine's RGB RMSE on its own canvas.
+- `rmse256` is the RMSE of the exported PNG at the 256 px working size against the same target. It measures what users get, so new work is judged on it.
+- `gap` is `rmse256 / score − 1`.
+- `ssim128` is SSIM at a placeholder-like 128 px. SSIM at the 1024 output barely moves (0.631 to 0.658 over 10× the shapes), so it is no longer used.
 
-| Shapes | Score | SSIM | Search s (total) | SVG bytes |
-| ---: | ---: | ---: | ---: | ---: |
-| 50 | 0.0941 | 0.631 | 24.5 | 5,229 |
-| 100 | 0.0786 | 0.637 | 41.0 | 10,322 |
-| 200 | 0.0649 | 0.639 | 71.1 | 20,542 |
-| 500 | 0.0474 | 0.658 | 149.2 | 51,252 |
+Medians matter because `quadratic` scores 2–4× worse than the other kinds and drags every mean.
 
-Greedy score falls roughly as `shapes^-0.34` between 200 and 500 shapes, so 10% more shapes buys about 3%.
+**Greedy baseline** (`5cb04d0` search):
 
-**A1, refit passes (`Model::refine`, `refine.rs`; not used by `approximate` yet).**
+| Shapes | Mean score | Median score | Median rmse256 | Median gap | Mean ssim128 | SVG bytes | Search s (all rows) |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 50 | 0.0941 | 0.0659 | 0.0661 | +0.3% | 0.678 | 5,229 | 24.5 |
+| 100 | 0.0786 | 0.0512 | 0.0495 | +0.4% | 0.732 | 10,322 | 41.0 |
+| 200 | 0.0649 | 0.0407 | 0.0394 | +1.0% | 0.778 | 20,542 | 71.1 |
+| 500 | 0.0474 | 0.0290 | 0.0298 | +4.6% | 0.849 | 51,252 | 149.2 |
 
-- **Method.** A top-down pass re-optimises each shape at its own layer, against an affine model of the layers above. That model includes the integer pipeline's mean truncation. The pass is then verified on the exact canvas and reverted if it does not improve. It is deterministic across thread counts. Tuned constants: 4 climbs per layer, age 50.
-- **Score change** against greedy at the same shape count, with refine time as a share of greedy time:
+Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.34` between 200 and 500 shapes, so 10% more shapes buys about 3%.
+
+**Engine canvas against export.**
+- At 100 and 200 shapes the median gap is below 5% for every kind, and below 2% for all but `quadratic` (2.0% and 4.1%).
+- The kinds the engine rasterizes with anti-aliasing (polygon, rotated ellipse) show no smaller gap than the binary kinds. Circle, ellipse, triangle and rotated rectangle are often negative: the anti-aliased export fits slightly better than the engine believes.
+- Binary coverage therefore costs no fidelity at placeholder counts. Neither B's smooth coverage nor anti-aliased engine rasterizers have a fidelity payoff.
+- The gap grows with the layer count: +4.6% at 500 shapes, with polygon at +5.3% and `quadratic` at +7.8%. A refit pass widens it further (see below). A likely cause is the engine's per-layer integer rounding, which the exporter does not share; this is unverified.
+
+**A1, refit passes (`Model::refine`, `refine.rs`).**
+
+- **Method.**
+  - A top-down pass re-optimises each shape at its own layer, against an affine model of the layers above. That model includes the integer pipeline's mean truncation.
+  - The pass is then verified on the exact canvas and reverted if it does not improve.
+  - It is deterministic across thread counts.
+  - Tuned constants: 4 climbs per layer, age 50.
+- **Adopted** (`192714e`). `approximate` ends with one pass, cancellable between layers (`Model::refine_unless`).
+  - The progress contract changed accordingly: the streamed shapes are the greedy preview, and the result keeps their number, order and kind but may revise them.
+  - The demo shows "Refining" after the last step, then replaces the preview with the final SVG.
+- **Mean score change** against greedy at the same shape count, with refine time as a share of greedy time:
 
 | Shapes | 1 pass at the end | 2 passes at the end | 1 pass every 50 shapes |
 | ---: | --- | --- | --- |
@@ -473,37 +494,48 @@ Greedy score falls roughly as `shapes^-0.34` between 200 and 500 shapes, so 10% 
 | 200 | −2.8% / 0.11 | −4.2% / 0.23 | −5.1% / 0.35 |
 | 500 | −3.6% / 0.09 | −5.4% / 0.17 | −10.1% / 0.58 |
 
+- **One pass at the end in the export-side metrics** (what `approximate` now does; median rmse256 change / ssim128 change):
+
+| Shapes | All kinds | `any` | `triangle` |
+| ---: | --- | --- | --- |
+| 50 | −3.0% / +0.009 | −4.2% / +0.012 | −3.8% / +0.008 |
+| 100 | −4.7% / +0.010 | −5.7% / +0.014 | −2.8% / +0.006 |
+| 200 | −3.6% / +0.008 | −5.1% / +0.008 | −2.9% / +0.006 |
+| 500 | −3.4% / +0.007 | −4.1% / +0.005 | −2.6% / +0.004 |
+
 - **Results.**
-  - Every row improves in score, and SSIM rises by about 0.002–0.005.
-  - Triangles and ellipses gain most; `quadratic` gains least (about 2%).
-  - At a fixed shape count, A1 is a real but modest gain.
-  - Per second of compute, it is no better than adding greedy shapes. It therefore matters only where the shape count is fixed, which is the placeholder case.
-- **Still open:** whether and how `approximate` uses it. Refits change shapes already reported through `ProgressInfo`, so the progress contract (each step's shape is the SVG's line) needs a decision first.
+  - Every row improves.
+  - Triangles and ellipses gain most in score; `quadratic` gains least (about 2%).
+  - At 500 shapes only part of the score gain reaches the export: the median score falls 6.0% but rmse256 only 3.4%, and the gap rises from 4.6% to 5.8%. The pass partly fits the engine's own rounding.
+  - At a fixed shape count, A1 is a real but modest gain. Per second of compute, it is no better than adding greedy shapes, so it matters only where the shape count is fixed, which is the placeholder case.
 
-**Next, in order** (decided after an independent review; B is not next):
+**Done:** 1, the measurement fix (runner metrics and summaries); 2, A1 in `approximate` (`192714e`).
 
-1. **Fix the measurement.**
-   - **Problem:** `quadratic` (0.10–0.20 against 0.03–0.05) is about a fifth of the mean score and compresses every relative gain. SSIM at the 1024 output barely moves (0.027 over 10× the shapes).
-   - **Change:** add a per-kind summary with medians (`any`, the default kind, and `triangle` first), PNG RMSE at the 256 px working size, and SSIM at a placeholder-like 128 px.
-   - **Diagnostic:** compare the engine canvas with the exported PNG at 256 px. A gap above about 15% means anti-aliased rasterizers for every kind are worth more than B. A gap below 5% means B has no fidelity payoff.
-2. **Adopt A1 in `approximate`.**
-   - One pass at the end, with no new option.
-   - The progress contract becomes: the streamed shapes are the greedy preview, and the result's SVG may revise them.
-   - The demo replaces the preview with the final SVG.
+**Next, in order.** This order was decided after an independent review; B is not next. Success and kill thresholds are on median rmse256, overall and for `any` and `triangle`.
+
 3. **Fine, step-adapted moves in the refit climb.**
    - **Problem:** today's moves are `N(0, 16 px)` and `N(0, 32°)` with no step adaptation, so a climb proposes very few one-pixel moves.
    - **Change:** alternate a small move, or adapt σ by the 1/5th rule.
-   - **Success:** at least 1.5× the gain of the current refit at about the same time. **Kill:** less than one extra point, which also weakens B's premise.
+   - **Success:** at least 1.5× the gain of the current pass at about the same time. **Kill:** less than one extra point, which also weakens B's premise.
 4. **Remove and re-add the weakest shapes.**
    - A1's per-layer bar already gives each shape's leave-one-out energy.
    - Re-add the lowest-contributing 10% by greedy steps.
    - **Success:** a further 3%, with unchanged bytes. **Kill:** less than 1%.
-5. **B pilot, only if step 3 shows that fine polish pays.**
+5. **Engine and export agreement at high counts.**
+   - **Check:** does the per-layer rounding explain the gap's growth with the layer count? Compare the engine's integer blend with the exporter's compositing on a long stack of layers.
+   - **Change, if it does:** make the engine round as the export does, so that the search optimises what it exports.
+   - **Success:** the 500-shape median gap falls below 2% and rmse256 improves. **Kill:** the gap has another cause.
+6. **B pilot, only if step 3 shows that fine polish pays.**
+   - The gap diagnosis removed the fidelity argument for smooth coverage, so B must win on search quality alone.
    - **Design:** triangles only; colour stays the closed-form fit; Adam on geometry and alpha; coordinates quantised to 0.25 px at export; then snap, exact verify, and one cheap A1 pass.
    - **Baseline:** the best A1 at equal time, not greedy.
    - **Success:** at least 3 points better, at most +10% SVG bytes, and at most 2× greedy time in single-threaded wasm.
    - **Context:** the literature (ES-CLIP; Optimize & Reduce, AAAI 2024) shows step-adapted joint search matching gradient descent at this shape count, and has no greedy-plus-gradient comparison.
-6. **Fix `quadratic`.** Its stroke width is a constant 1 px; 1.5 px measured about 6% better.
+7. **Fix `quadratic`.** Its stroke width is a constant 1 px; 1.5 px measured about 6% better. It also has the largest gaps, and its ssim128 falls from 50 to 100 shapes.
+
+**Before merging the branch:**
+- regenerate the gallery, the README comparison images and the versus-Go numbers (`CONTRIBUTING.md`), which output changes make stale;
+- check by hand in the demo that "Refining" stays visible during a long single-threaded pass, and that Stop during it keeps the preview.
 
 ---
 

@@ -26,6 +26,16 @@ pub fn working_target(
     crate::working_target(input, render, || Ok(()))
 }
 
+/// The pixels of the target [`working_target`] returns, as an image, from
+/// the same steps: [`primeval_core::Buffer`] does not expose its pixels.
+///
+/// # Errors
+///
+/// The errors of [`working_target`].
+pub fn working_image(input: &[u8], render: &RenderOptions) -> Result<RgbImage, ApproximateError> {
+    crate::working_image(input, render, || Ok(())).map(|(image, _)| image)
+}
+
 /// Encodes `drawing` as [`crate::approximate`] encodes its final drawing.
 ///
 /// # Errors
