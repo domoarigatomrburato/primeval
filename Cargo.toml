@@ -13,6 +13,9 @@ homepage = "https://github.com/domoarigatomrburato/primeval"
 repository = "https://github.com/domoarigatomrburato/primeval"
 license = "MIT"
 rust-version = "1.99"
+# The npm package is the product; the crates are not published to crates.io
+# while their API is expected to change.
+publish = false
 
 [workspace.lints.rust]
 unreachable_pub = "deny"
