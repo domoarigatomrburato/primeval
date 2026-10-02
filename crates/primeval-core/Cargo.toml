@@ -11,6 +11,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+divan = { version = "0.1.21", optional = true }
 rand = { version = "0.10", default-features = false }
 rand_chacha = "0.10"
 rand_distr = "0.6"
@@ -18,3 +19,17 @@ rayon = "1.10"
 
 [dev-dependencies]
 tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
+
+[features]
+# Compiles the in-crate Divan benchmarks (`src/benches.rs`) so they can reach
+# crate-private items. Never enabled by dependents; see CONTRIBUTING.md.
+bench = ["dep:divan"]
+
+[lib]
+# The library has no libtest benchmarks; `cargo bench` runs only `benches/`.
+bench = false
+
+[[bench]]
+name = "core"
+harness = false
+required-features = ["bench"]

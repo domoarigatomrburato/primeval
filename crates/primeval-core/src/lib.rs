@@ -9,6 +9,8 @@
 //! takes ([`Buffer`], [`Color`]), and the [`Drawing`] it produces.
 
 mod alpha;
+#[cfg(feature = "bench")]
+mod benches;
 mod buffer;
 mod color;
 mod drawing;

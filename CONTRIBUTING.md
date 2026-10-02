@@ -46,6 +46,28 @@ npm run verify
 
 `npm run verify` includes `npm run lint`, which runs Biome over `src/`, `scripts/`, and `test/` to check formatting, import order, and lint rules. Run `npm run format` to apply formatting, import order, and safe lint fixes.
 
+## Benchmarks
+
+Engine changes that affect speed or output quality should include before and after numbers from both tools below, run on the same machine with nothing else heavy running. Neither is part of `npm run verify`; the gate only compiles and lints them.
+
+Micro-benchmarks use [Divan](https://docs.rs/divan). They live inside each crate behind its `bench` feature, so they can reach crate-private kernels without widening the public API:
+
+```bash
+cargo bench -p primeval-core --features bench --bench core      # rasterizers, colour and energy kernels, Model::step
+cargo bench -p primeval-render --features bench --bench render  # SVG and PNG writers at 1024 px
+```
+
+Append a filter to run a subset, for example `-- rasterize` or `-- model_step`.
+
+The end-to-end runner records wall time and quality (the engine's score and the RMSE of the PNG at output size) for every image, shape kind and step count, with seed 42 and default options, and prints a sorted Markdown table with the commit and machine in its header:
+
+```bash
+cargo run --release -p primeval-render --example quality -- --quick > quick.md  # seconds
+cargo run --release -p primeval-render --example quality > baseline.md          # several minutes
+```
+
+Its corpus is the public-domain images in `docs/readme/originals/` plus generated images. Use `--image PATH` (repeatable), `--no-synthetic`, `--shapes LIST` and `--steps LIST` to change it; the doc comment in `crates/primeval-render/examples/quality.rs` defines the metrics. Diff two tables to compare runs; quality numbers are comparable only between machines with the same number of logical cores.
+
 ## Profiling
 
 Builds target each architecture's portable baseline; the repository sets no `target-cpu`, and the release workflow rejects artifacts that use AVX-512 or SVE. To profile with every instruction your own CPU supports, opt in for that build only and keep the output in a separate target directory:

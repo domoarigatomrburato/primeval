@@ -40,6 +40,8 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+#[cfg(feature = "bench")]
+mod benches;
 mod error;
 mod input;
 mod output;

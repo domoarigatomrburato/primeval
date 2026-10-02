@@ -41,7 +41,7 @@
     "build:node": "napi build -p primeval-node --release --platform --no-js --dts binding.d.ts --output-dir . && npm run generate:binding",
     "check:napi-targets": "node scripts/napi-targets.mjs check-package",
     "bump:version": "node scripts/napi-targets.mjs bump-version",
-    "verify:rust": "cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo doc --no-deps --workspace && cargo test",
+    "verify:rust": "cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo clippy --all-targets --all-features -- -D warnings && cargo doc --no-deps --workspace && cargo test",
     "verify:node": "npm run lint && npm run check:napi-targets && npm run typecheck && npm run build && npm run build:node && npm test && npm run test:tooling",
     "verify:pack": "npm run prepare:package && npm pack --dry-run --ignore-scripts",
     "verify": "npm run verify:rust && npm run verify:node && npm run verify:pack",

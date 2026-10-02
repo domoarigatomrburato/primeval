@@ -28,7 +28,7 @@ allow = [
 multiple-versions = "deny"
 skip = [
   { crate = "miniz_oxide@0.8.9", reason = "png 0.18 depends on it directly while its flate2 dependency already uses miniz_oxide 0.9" },
-  { crate = "syn@2.0.119", reason = "napi-derive and napi-derive-backend still use syn 2 while futures-macro moved to syn 3" },
+  { crate = "syn@2.0.119", reason = "napi-derive, napi-derive-backend and divan-macros (benchmarks only) still use syn 2 while futures-macro moved to syn 3" },
 ]
 
 [sources]
