@@ -62,7 +62,7 @@ Run the package CLI (no Rust build required):
 npx @aleburato/primeval photo.jpg --count 100
 ```
 
-This writes `photo_primitive.svg` next to the input file (a PNG input writes `<stem>_primitive.png`; any other input writes SVG). Use `--output` to choose a different path or format:
+This writes `photo.svg` next to the input file. Use `--output` to choose a different path; the output format comes from its extension (`.svg` or `.png`):
 
 ```bash
 npx @aleburato/primeval photo.jpg --output output/result.svg --count 100
@@ -93,13 +93,14 @@ primeval photo.jpg --output result.png --count 300 --resize-input 128 --output-s
 ```
 
 - `--seed <N>` for deterministic output
-- `--format svg|png` optional output format override
-- `--progress auto|plain|off` progress reporting mode (default `auto`)
+- `--force` to overwrite an existing output file
+- `--quiet` to silence progress and notices on stderr
 
-Write SVG output to stdout (explicit `--output -` required, SVG only):
+Write SVG output to stdout with `--output -`, or read the input from stdin with `-`:
 
 ```bash
 primeval photo.jpg --output - --count 200 > out.svg
+cat photo.jpg | primeval - --count 200 > out.svg
 ```
 
 See the full CLI help with:
@@ -268,11 +269,16 @@ The images below use identical settings (`shape: any`, `count: 200`, `seed: 42`)
 
 ## CLI Reference
 
+```text
+primeval <input> [options]
+```
+
 `primeval` accepts:
 
-- `input` (required positional): path to a JPEG, PNG, or WebP image
-- `--output <PATH>` (optional): output file path. Defaults to `<input-stem>_primitive.<ext>` next to the input file, where `<ext>` is `--format` if given, otherwise `png` for a `.png` input and `svg` for any other input. Use `-` to write SVG to stdout.
-- `--format svg|png` output format. If omitted, format is inferred from `--output`'s extension (an unsupported extension such as `.jpg` is an error), or from the input extension when `--output` is also omitted.
+- `input` (required positional): path to a JPEG, PNG, or WebP image, or `-` to read the image from stdin. Only regular files are read (not directories, FIFOs, or devices).
+- `-o, --output <PATH>`: output file path. The format comes from the extension only: `.svg` writes SVG and `.png` writes PNG (case-insensitive); any other extension, or none, is an error. Use `-` to write SVG to stdout (PNG cannot be written to stdout). Defaults to `<input-stem>.svg` next to the input file, or to stdout when the input is `-`.
+- `-f, --force`: overwrite an existing output file.
+- `-q, --quiet`: print no progress and no notices on stderr.
 - `--count <N>` optimization steps. Higher values improve quality. Default: `100`.
 - `--shape any|triangle|rectangle|ellipse|circle|rotated-rectangle|quadratic|rotated-ellipse|polygon`. Default: `any`.
 - `--alpha <N>` shape opacity. Accepted values: `0..255` where `0` means auto-detect. Default: `0`.
@@ -280,13 +286,17 @@ The images below use identical settings (`shape: any`, `count: 200`, `seed: 42`)
 - `--resize-input <N>` resolution used during optimization. Smaller values run faster but capture less detail; the final output is always rendered at `--output-size` resolution. Default: `256`.
 - `--output-size <N>` resolution of the final exported image. Default: `1024`.
 - `--seed <N>` deterministic RNG seed (non-negative integer). If omitted, Rust selects a random seed.
-- `--progress auto|plain|off` write per-step progress to stderr. `auto` enables it only when stderr is a TTY. Default: `auto`.
-- `--version` print the package version and exit.
-- `-h, --help` print usage and exit.
+- `-v, --version` print the package version and exit.
+- `-h, --help` print usage to stdout and exit.
 
 CLI notes:
 
-- When `--output` is omitted and the derived output file already exists, the CLI exits with an error. Use `--output` to specify a different path.
+- The CLI never overwrites an existing file, whether the path was derived or given with `--output`, unless you pass `--force`. It checks the output path before rendering, so an existing file or a directory fails immediately. Missing parent directories are created.
+- When the output path is derived, the CLI prints `output: <path>` on stderr (unless `--quiet`).
+- Progress is shown only when stderr is a terminal: a single line, updated in place, with the step, the total, the score, and the elapsed time.
+- Ctrl-C cancels the render and exits without writing the output; a second Ctrl-C exits immediately.
+- Errors go to stderr; stdout carries only the SVG for `--output -`, `--help`, and `--version`.
+- Exit codes: `0` success, `1` runtime error (unreadable input, invalid image data or option values rejected by the renderer, existing output, write failure), `2` usage error (unknown option, missing or extra arguments, invalid numeric value or shape, unsupported output extension, empty output path), `130` interrupted by Ctrl-C.
 
 ## Benchmarks
 

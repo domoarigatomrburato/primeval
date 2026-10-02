@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -9,10 +9,17 @@ const repoRoot = process.cwd();
 const fixturePath = path.join(repoRoot, "docs", "readme", "originals", "monalisa.jpg");
 const cliPath = path.join(repoRoot, "dist", "cli.js");
 
-function runCli(args) {
+const RENDER_ARGS = ["--count", "4", "--resize-input", "8", "--output-size", "16", "--seed", "7"];
+// Long enough (tens of seconds) that finishing quickly proves no render ran.
+const LONG_RENDER_ARGS = ["--count", "20000", "--resize-input", "16", "--output-size", "16"];
+const USAGE_HINT = "Run 'primeval --help' for usage.";
+
+function runCli(args, options = {}) {
   return spawnSync(process.execPath, [cliPath, ...args], {
     cwd: repoRoot,
     encoding: "utf8",
+    timeout: 60_000,
+    ...options,
   });
 }
 
@@ -20,182 +27,347 @@ function makeTmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "primeval-node-cli-test-"));
 }
 
-test("cli writes svg output file", () => {
-  const tmpDir = makeTmpDir();
-  const output = path.join(tmpDir, "out.svg");
+function copyFixture(tmpDir, name = "monalisa.jpg") {
+  const input = path.join(tmpDir, name);
+  fs.copyFileSync(fixturePath, input);
+  return input;
+}
 
-  const result = runCli([
-    fixturePath,
-    "--output",
-    output,
-    "--count",
-    "4",
-    "--resize-input",
-    "8",
-    "--output-size",
-    "16",
-    "--seed",
-    "7",
-    "--progress",
-    "off",
-  ]);
+function assertNoStack(stderr) {
+  assert.doesNotMatch(stderr, /\n\s+at /, "stderr should not contain a stack trace");
+}
 
-  assert.equal(result.status, 0, result.stderr);
-  const svg = fs.readFileSync(output, "utf8");
-  assert.match(svg, /^<svg\b/);
-});
+function assertUsageError(result, pattern) {
+  assert.equal(result.error, undefined, "cli should exit without timing out");
+  assert.equal(result.status, 2, result.stderr);
+  assert.equal(result.stdout, "", "usage errors must not write to stdout");
+  assert.match(result.stderr, pattern);
+  assert.ok(result.stderr.endsWith(`${USAGE_HINT}\n`), result.stderr);
+  assertNoStack(result.stderr);
+}
 
-test("cli supports stdout output", () => {
-  const result = runCli([
-    fixturePath,
-    "--output",
-    "-",
-    "--count",
-    "4",
-    "--resize-input",
-    "8",
-    "--output-size",
-    "16",
-    "--seed",
-    "7",
-    "--progress",
-    "off",
-  ]);
+function assertRuntimeError(result, pattern) {
+  assert.equal(result.error, undefined, "cli should exit without timing out");
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(result.stdout, "");
+  assert.match(result.stderr, pattern);
+  assertNoStack(result.stderr);
+}
+
+function isPng(bytes) {
+  return bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47;
+}
+
+test("cli writes svg output for a .svg output path", () => {
+  const output = path.join(makeTmpDir(), "out.svg");
+
+  const result = runCli([fixturePath, "--output", output, ...RENDER_ARGS]);
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /^<svg\b/);
+  assert.match(fs.readFileSync(output, "utf8"), /^<svg\b/);
 });
 
-test("cli suppresses progress with --progress off", () => {
-  const tmpDir = makeTmpDir();
-  const output = path.join(tmpDir, "out.svg");
+test("cli writes png output for a .png output path", () => {
+  const output = path.join(makeTmpDir(), "out.png");
 
-  const result = runCli([
-    fixturePath,
-    "--output",
-    output,
-    "--count",
-    "4",
-    "--resize-input",
-    "8",
-    "--output-size",
-    "16",
-    "--seed",
-    "7",
-    "--progress",
-    "off",
-  ]);
+  const result = runCli([fixturePath, "-o", output, ...RENDER_ARGS]);
 
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stderr.trim(), "");
+  assert.ok(isPng(fs.readFileSync(output)));
 });
 
-test("cli suppresses progress with --progress auto when stderr is not a tty", () => {
-  const tmpDir = makeTmpDir();
-  const output = path.join(tmpDir, "out.svg");
+test("cli infers the format from an upper-case extension", () => {
+  const output = path.join(makeTmpDir(), "OUT.PNG");
 
-  const result = runCli([
-    fixturePath,
-    "--output",
-    output,
-    "--count",
-    "4",
-    "--resize-input",
-    "8",
-    "--output-size",
-    "16",
-    "--seed",
-    "7",
-    "--progress",
-    "auto",
-  ]);
+  const result = runCli([fixturePath, "-o", output, ...RENDER_ARGS]);
 
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stderr.trim(), "");
+  assert.ok(isPng(fs.readFileSync(output)));
 });
 
-test("cli treats --alpha 0 as auto", () => {
-  const tmpDir = makeTmpDir();
-  const output = path.join(tmpDir, "out.svg");
-
-  const result = runCli([
-    fixturePath,
-    "--output",
-    output,
-    "--count",
-    "4",
-    "--alpha",
-    "0",
-    "--resize-input",
-    "8",
-    "--output-size",
-    "16",
-    "--seed",
-    "7",
-    "--progress",
-    "off",
-  ]);
-
-  assert.equal(result.status, 0, result.stderr);
-  const svg = fs.readFileSync(output, "utf8");
-  assert.match(svg, /^<svg\b/);
-});
-
-const RENDER_ARGS = [
-  "--count",
-  "4",
-  "--resize-input",
-  "8",
-  "--output-size",
-  "16",
-  "--seed",
-  "7",
-  "--progress",
-  "off",
-];
-
-test("cli rejects removed output formats inferred from --output", () => {
+test("cli rejects unsupported output extensions", () => {
   const tmpDir = makeTmpDir();
 
-  for (const extension of ["jpg", "jpeg", "gif"]) {
+  for (const extension of ["jpg", "jpeg", "gif", "webp"]) {
     const output = path.join(tmpDir, `out.${extension}`);
     const result = runCli([fixturePath, "--output", output, ...RENDER_ARGS]);
 
-    assert.equal(result.status, 1, `expected failure for .${extension}`);
-    assert.match(result.stderr, new RegExp(`unknown output format: ${extension}\\b`));
+    assertUsageError(
+      result,
+      new RegExp(`^unsupported output extension: \\.${extension} \\(use \\.svg or \\.png\\)\n`),
+    );
     assert.equal(fs.existsSync(output), false);
   }
 });
 
-test("cli rejects removed --format values", () => {
-  const tmpDir = makeTmpDir();
-  const output = path.join(tmpDir, "out.bin");
+test("cli rejects an output path without an extension", () => {
+  const output = path.join(makeTmpDir(), "out");
 
-  for (const format of ["jpg", "jpeg", "gif"]) {
-    const result = runCli([fixturePath, "--output", output, "--format", format, ...RENDER_ARGS]);
+  const result = runCli([fixturePath, "--output", output, ...RENDER_ARGS]);
 
-    assert.equal(result.status, 1, `expected failure for --format ${format}`);
-    assert.match(result.stderr, new RegExp(`unknown output format: ${format}\\b`));
-    assert.equal(fs.existsSync(output), false);
-  }
+  assertUsageError(result, /^output path has no extension \(use \.svg or \.png\)\n/);
+  assert.equal(fs.existsSync(output), false);
 });
 
-test("cli prints help", () => {
+test("cli rejects --format as an unknown option", () => {
+  const output = path.join(makeTmpDir(), "out.svg");
+
+  const result = runCli([fixturePath, "--output", output, "--format", "png", ...RENDER_ARGS]);
+
+  assertUsageError(result, /Unknown option '--format'/);
+  assert.equal(fs.existsSync(output), false);
+});
+
+test("cli rejects --progress as an unknown option", () => {
+  const result = runCli([fixturePath, "-o", "-", "--progress", "off", ...RENDER_ARGS]);
+
+  assertUsageError(result, /Unknown option '--progress'/);
+});
+
+test("cli rejects an unknown option", () => {
+  const result = runCli([fixturePath, "--nope"]);
+
+  assertUsageError(result, /Unknown option '--nope'/);
+});
+
+test("cli rejects an empty output path", () => {
+  const result = runCli([fixturePath, "--output", "", ...RENDER_ARGS]);
+
+  assertUsageError(result, /^output path must not be empty\n/);
+});
+
+test("cli rejects extra positional arguments", () => {
+  const result = runCli([fixturePath, fixturePath, "-o", "-"]);
+
+  assertUsageError(result, /^unexpected positional arguments: /);
+});
+
+test("cli rejects invalid numeric options as usage errors", () => {
+  const result = runCli([fixturePath, "-o", "-", "--count", "abc"]);
+
+  assertUsageError(result, /^count must be an integer\n/);
+});
+
+test("cli rejects an unknown shape as a usage error", () => {
+  const result = runCli([fixturePath, "-o", "-", "--shape", "hexagon"]);
+
+  assertUsageError(result, /^unknown shape: hexagon\n/);
+});
+
+test("cli reports a missing input without writing to stdout", () => {
+  const result = runCli(["-o", "-"]);
+
+  assertUsageError(result, /^missing input path\n/);
+});
+
+test("cli prints help on stdout", () => {
   const result = runCli(["--help"]);
+
   assert.equal(result.status, 0);
-  assert.match(result.stdout, /Usage:/);
+  assert.match(result.stdout, /^Usage: primeval <input> \[options\]/);
+  assert.match(result.stdout, /-f, --force/);
+  assert.match(result.stdout, /-q, --quiet/);
+  assert.doesNotMatch(result.stdout, /--format|--progress/);
+  assert.equal(result.stderr, "");
 });
 
-test("cli exits non-zero with missing args", () => {
-  const result = runCli([]);
-  assert.equal(result.status, 1);
+test("cli prints the version with -v and --version", () => {
+  const { version } = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
+
+  for (const flag of ["-v", "--version"]) {
+    const result = runCli([flag]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, `${version}\n`);
+  }
 });
 
-function assertCleanFailure(result, pattern) {
-  assert.equal(result.status, 1, result.stderr);
-  assert.match(result.stderr, pattern);
-  assert.doesNotMatch(result.stderr, /\n\s+at /, "stderr should not contain a stack trace");
-}
+test("cli writes svg to stdout with -o -", () => {
+  const result = runCli([fixturePath, "--output", "-", ...RENDER_ARGS]);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^<svg\b/);
+  assert.equal(result.stderr, "");
+});
+
+test("cli prints no progress when stderr is not a tty", () => {
+  const output = path.join(makeTmpDir(), "out.svg");
+
+  const result = runCli([fixturePath, "--output", output, ...RENDER_ARGS]);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, "");
+});
+
+test("cli treats --alpha 0 as auto", () => {
+  const output = path.join(makeTmpDir(), "out.svg");
+
+  const result = runCli([fixturePath, "--output", output, "--alpha", "0", ...RENDER_ARGS]);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(fs.readFileSync(output, "utf8"), /^<svg\b/);
+});
+
+test("cli derives <input-stem>.svg next to the input when --output is omitted", () => {
+  const tmpDir = makeTmpDir();
+  const input = copyFixture(tmpDir);
+
+  const result = runCli([input, ...RENDER_ARGS]);
+
+  assert.equal(result.status, 0, result.stderr);
+  const expected = path.join(tmpDir, "monalisa.svg");
+  assert.match(fs.readFileSync(expected, "utf8"), /^<svg\b/);
+  assert.equal(result.stderr, `output: ${expected}\n`);
+  assert.equal(result.stdout, "");
+});
+
+test("cli derives svg output for a .png input", () => {
+  const tmpDir = makeTmpDir();
+  const input = path.join(tmpDir, "monalisa.png");
+  fs.copyFileSync(
+    path.join(repoRoot, "docs", "readme", "comparisons", "monalisa-any-200-alpha-128.png"),
+    input,
+  );
+
+  const result = runCli([input, "--quiet", ...RENDER_ARGS]);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(fs.readFileSync(path.join(tmpDir, "monalisa.svg"), "utf8"), /^<svg\b/);
+  assert.deepEqual(fs.readdirSync(tmpDir).sort(), ["monalisa.png", "monalisa.svg"]);
+});
+
+test("cli suppresses the output notice with --quiet and -q", () => {
+  for (const flag of ["--quiet", "-q"]) {
+    const tmpDir = makeTmpDir();
+    const input = copyFixture(tmpDir);
+
+    const result = runCli([input, flag, ...RENDER_ARGS]);
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(fs.existsSync(path.join(tmpDir, "monalisa.svg")));
+    assert.equal(result.stderr, "");
+  }
+});
+
+test("cli refuses to overwrite an existing derived output", () => {
+  const tmpDir = makeTmpDir();
+  const input = copyFixture(tmpDir);
+  const derived = path.join(tmpDir, "monalisa.svg");
+  fs.writeFileSync(derived, "placeholder");
+
+  const result = runCli([input, ...LONG_RENDER_ARGS], { timeout: 10_000 });
+
+  assertRuntimeError(
+    result,
+    /^output file already exists: .*monalisa\.svg \(use --force to overwrite\)\n$/,
+  );
+  assert.equal(fs.readFileSync(derived, "utf8"), "placeholder");
+});
+
+test("cli refuses to overwrite an existing explicit output without rendering", () => {
+  const output = path.join(makeTmpDir(), "keep.svg");
+  fs.writeFileSync(output, "placeholder");
+
+  const result = runCli([fixturePath, "-o", output, ...LONG_RENDER_ARGS], { timeout: 10_000 });
+
+  assertRuntimeError(
+    result,
+    /^output file already exists: .*keep\.svg \(use --force to overwrite\)\n$/,
+  );
+  assert.equal(fs.readFileSync(output, "utf8"), "placeholder");
+});
+
+test("cli overwrites an existing output with --force and -f", () => {
+  for (const flag of ["--force", "-f"]) {
+    const output = path.join(makeTmpDir(), "keep.svg");
+    fs.writeFileSync(output, "placeholder");
+
+    const result = runCli([fixturePath, "-o", output, flag, ...RENDER_ARGS]);
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(fs.readFileSync(output, "utf8"), /^<svg\b/);
+  }
+});
+
+test("cli rejects an output path that is a directory without rendering", () => {
+  const output = path.join(makeTmpDir(), "dir.svg");
+  fs.mkdirSync(output);
+
+  for (const extra of [[], ["--force"]]) {
+    const result = runCli([fixturePath, "-o", output, ...extra, ...LONG_RENDER_ARGS], {
+      timeout: 10_000,
+    });
+
+    assertRuntimeError(result, /^output is a directory: .*dir\.svg\n$/);
+  }
+});
+
+test("cli creates missing output parent directories", () => {
+  const output = path.join(makeTmpDir(), "nested", "deeper", "out.svg");
+
+  const result = runCli([fixturePath, "-o", output, ...RENDER_ARGS]);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(fs.readFileSync(output, "utf8"), /^<svg\b/);
+});
+
+test("cli reads stdin with - and writes svg to stdout by default", () => {
+  const result = runCli(["-", ...RENDER_ARGS], { input: fs.readFileSync(fixturePath) });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^<svg\b/);
+  assert.equal(result.stderr, "");
+});
+
+test("cli reads stdin with - and writes to an output file", () => {
+  const output = path.join(makeTmpDir(), "from-stdin.png");
+
+  const result = runCli(["-", "-o", output, ...RENDER_ARGS], {
+    input: fs.readFileSync(fixturePath),
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(isPng(fs.readFileSync(output)));
+  assert.equal(result.stdout, "");
+});
+
+test("cli reports invalid image data from stdin as a runtime error", () => {
+  const result = runCli(["-", ...RENDER_ARGS], { input: Buffer.from("not an image") });
+
+  assertRuntimeError(result, /^invalid image data/);
+});
+
+test("cli exits 130 on SIGINT without writing the output", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("POSIX signals are not available on Windows");
+    return;
+  }
+  const output = path.join(makeTmpDir(), "interrupted.svg");
+  const child = spawn(process.execPath, [cliPath, fixturePath, "-o", output, ...LONG_RENDER_ARGS], {
+    cwd: repoRoot,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  const exited = new Promise((resolve) => {
+    child.on("exit", (code, signal) => resolve({ code, signal }));
+  });
+  const killer = setTimeout(() => child.kill("SIGKILL"), 30_000);
+
+  await new Promise((resolve) => child.on("spawn", resolve));
+  // Let the CLI load the native addon and start rendering.
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  child.kill("SIGINT");
+  const { code, signal } = await exited;
+  clearTimeout(killer);
+
+  assert.equal(signal, null, `cli was killed by ${signal}; stderr: ${stderr}`);
+  assert.equal(code, 130, stderr);
+  assert.equal(fs.existsSync(output), false);
+  assertNoStack(stderr);
+});
 
 test("cli reports a missing input file", () => {
   const tmpDir = makeTmpDir();
@@ -204,7 +376,7 @@ test("cli reports a missing input file", () => {
 
   const result = runCli([input, "--output", output, ...RENDER_ARGS]);
 
-  assertCleanFailure(result, /^input file not found: .*does-not-exist\.jpg\n$/);
+  assertRuntimeError(result, /^input file not found: .*does-not-exist\.jpg\n$/);
   assert.equal(fs.existsSync(output), false);
 });
 
@@ -214,7 +386,7 @@ test("cli reports a directory input", () => {
 
   const result = runCli([tmpDir, "--output", output, ...RENDER_ARGS]);
 
-  assertCleanFailure(result, /^input is a directory: /);
+  assertRuntimeError(result, /^input is a directory: /);
   assert.equal(fs.existsSync(output), false);
 });
 
@@ -232,14 +404,9 @@ test("cli rejects a FIFO input without blocking", (t) => {
   }
   const output = path.join(tmpDir, "out.svg");
 
-  const result = spawnSync(process.execPath, [cliPath, fifo, "--output", output, ...RENDER_ARGS], {
-    cwd: repoRoot,
-    encoding: "utf8",
-    timeout: 10_000,
-  });
+  const result = runCli([fifo, "--output", output, ...RENDER_ARGS], { timeout: 10_000 });
 
-  assert.equal(result.error, undefined, "cli should not block on a FIFO");
-  assertCleanFailure(result, /^input is not a regular file: .*input\.fifo\n$/);
+  assertRuntimeError(result, /^input is not a regular file: .*input\.fifo\n$/);
 });
 
 test("cli reports an unreadable input file", (t) => {
@@ -255,118 +422,17 @@ test("cli reports an unreadable input file", (t) => {
 
   const result = runCli([input, "--output", output, ...RENDER_ARGS]);
 
-  assertCleanFailure(result, /^permission denied reading input: .*locked\.jpg\n$/);
+  assertRuntimeError(result, /^permission denied reading input: .*locked\.jpg\n$/);
 });
 
 test("cli reports an invalid background without a stack trace", () => {
-  const tmpDir = makeTmpDir();
-  const output = path.join(tmpDir, "out.svg");
+  const output = path.join(makeTmpDir(), "out.svg");
 
   const result = runCli([fixturePath, "--output", output, "--background", "a€bc", ...RENDER_ARGS]);
 
-  assertCleanFailure(
+  assertRuntimeError(
     result,
     /^background must be auto or an opaque hex color \(RGB or RRGGBB\)\n$/,
   );
-});
-
-test("cli auto-derives output filename when --output is omitted", () => {
-  const tmpDir = makeTmpDir();
-  // Copy fixture into tmpDir so auto-derived file lands alongside it
-  const inputCopy = path.join(tmpDir, "monalisa.jpg");
-  fs.copyFileSync(fixturePath, inputCopy);
-
-  const result = runCli([
-    inputCopy,
-    "--count",
-    "4",
-    "--resize-input",
-    "8",
-    "--output-size",
-    "16",
-    "--seed",
-    "7",
-    "--progress",
-    "off",
-  ]);
-
-  assert.equal(result.status, 0, result.stderr);
-  const expected = path.join(tmpDir, "monalisa_primitive.svg");
-  assert.ok(fs.existsSync(expected), `expected output file ${expected} to exist`);
-  // JPEG is not an output format, so a .jpg input derives an SVG output.
-  assert.match(fs.readFileSync(expected, "utf8"), /^<svg\b/);
-  assert.equal(fs.existsSync(path.join(tmpDir, "monalisa_primitive.jpg")), false);
-});
-
-test("cli auto-derives png output from a .png input", () => {
-  const tmpDir = makeTmpDir();
-  const pngInput = path.join(tmpDir, "monalisa.png");
-  fs.copyFileSync(
-    path.join(repoRoot, "docs", "readme", "comparisons", "monalisa-any-200-alpha-128.png"),
-    pngInput,
-  );
-
-  const result = runCli([pngInput, ...RENDER_ARGS]);
-
-  assert.equal(result.status, 0, result.stderr);
-  const expected = path.join(tmpDir, "monalisa_primitive.png");
-  assert.ok(fs.existsSync(expected), `expected output file ${expected} to exist`);
-  const bytes = fs.readFileSync(expected);
-  assert.equal(bytes[0], 0x89);
-  assert.equal(bytes[1], 0x50);
-});
-
-test("cli auto-derives output with correct format when --format is given", () => {
-  const tmpDir = makeTmpDir();
-  const inputCopy = path.join(tmpDir, "monalisa.jpg");
-  fs.copyFileSync(fixturePath, inputCopy);
-
-  const result = runCli([
-    inputCopy,
-    "--format",
-    "png",
-    "--count",
-    "4",
-    "--resize-input",
-    "8",
-    "--output-size",
-    "16",
-    "--seed",
-    "7",
-    "--progress",
-    "off",
-  ]);
-
-  assert.equal(result.status, 0, result.stderr);
-  const expected = path.join(tmpDir, "monalisa_primitive.png");
-  assert.ok(fs.existsSync(expected), `expected output file ${expected} to exist`);
-  const bytes = fs.readFileSync(expected);
-  // PNG magic bytes
-  assert.equal(bytes[0], 0x89);
-  assert.equal(bytes[1], 0x50);
-});
-
-test("cli fails with collision when auto-derived output already exists", () => {
-  const tmpDir = makeTmpDir();
-  const inputCopy = path.join(tmpDir, "monalisa.jpg");
-  fs.copyFileSync(fixturePath, inputCopy);
-  // Pre-create the would-be output file (svg, derived for a .jpg input)
-  fs.writeFileSync(path.join(tmpDir, "monalisa_primitive.svg"), "placeholder");
-
-  const result = runCli([
-    inputCopy,
-    "--count",
-    "4",
-    "--resize-input",
-    "8",
-    "--output-size",
-    "16",
-    "--seed",
-    "7",
-    "--progress",
-    "off",
-  ]);
-
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /already exists/);
+  assert.equal(fs.existsSync(output), false);
 });
