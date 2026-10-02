@@ -19,6 +19,7 @@ tiny-skia = { version = "0.12", default-features = false, features = ["std", "si
 [dev-dependencies]
 rand = { version = "0.10", default-features = false }
 rand_chacha = "0.10"
+rayon = "1.10"
 
 [features]
 # Compiles the in-crate Divan benchmarks (`src/benches.rs`) so they can reach

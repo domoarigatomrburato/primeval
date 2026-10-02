@@ -16,6 +16,9 @@ struct CommittedShape {
     color: Color,
 }
 
+/// Independent search rounds per [`Model::step`]; the best one is painted.
+const SEARCH_ROUNDS: u64 = 16;
+
 /// Search settings for a [`Model`].
 ///
 /// Construct with [`ModelOptions::default`] and set the fields you need.
@@ -23,9 +26,10 @@ struct CommittedShape {
 #[derive(Clone, Copy, Debug)]
 pub struct ModelOptions {
     /// Deterministic RNG seed. `None` seeds from the system clock.
+    ///
+    /// The same seed gives the same output for the same version on the same
+    /// platform, whatever the number of threads.
     pub seed: Option<u64>,
-    /// Number of parallel search workers; `0` is treated as `1`.
-    pub workers: usize,
     /// Columns of the error grid that biases sampling; `0` is treated as `1`.
     pub grid_cols: u32,
     /// Rows of the error grid that biases sampling; `0` is treated as `1`.
@@ -36,7 +40,6 @@ impl Default for ModelOptions {
     fn default() -> Self {
         Self {
             seed: None,
-            workers: 1,
             grid_cols: 16,
             grid_rows: 16,
         }
@@ -53,7 +56,9 @@ pub struct Model {
     score: u64,
     history: Vec<CommittedShape>,
     error_grid: ErrorGrid,
-    workers: Vec<WorkerCtx<ChaCha8Rng>>,
+    seed: u64,
+    /// Scratch for rasterizing the shape that [`Model::add`] paints.
+    scratch: WorkerCtx<ChaCha8Rng>,
 }
 
 impl Model {
@@ -79,17 +84,12 @@ impl Model {
         );
         let current = Buffer::new_from_color(target_width, target_height, background);
         let score = score::difference_full_raw(&target, &current);
-        let worker_count = options.workers.max(1);
         let seed = options.seed.unwrap_or_else(crate::util::system_clock_seed);
-        let workers = (0..worker_count)
-            .map(|index| {
-                WorkerCtx::new(
-                    target_width as i32,
-                    target_height as i32,
-                    crate::rng::create_rng(seed + index as u64),
-                )
-            })
-            .collect();
+        let scratch = WorkerCtx::new(
+            target_width as i32,
+            target_height as i32,
+            crate::rng::round_rng(seed, 0, 0),
+        );
 
         Self {
             background,
@@ -103,65 +103,65 @@ impl Model {
                 options.grid_cols,
                 options.grid_rows,
             ),
-            workers,
+            seed,
+            scratch,
         }
     }
 
     /// Searches for the best next shape of `kind` and paints it.
     ///
+    /// Every step runs 16 independent search rounds as rayon tasks in the
+    /// current pool: the global pool, unless the caller runs `step` inside
+    /// [`rayon::ThreadPool::install`]. Each round draws from its own random
+    /// stream, derived from the seed, the step index and the round index,
+    /// and the best round wins, ties going to the lowest round index, so the
+    /// result does not depend on the number of threads or on scheduling.
+    ///
     /// Returns the number of candidate evaluations the search made.
     pub fn step(&mut self, kind: ShapeKind, alpha: Alpha) -> u64 {
-        let evaluations_before: u64 = self.workers.iter().map(|worker| worker.evaluations).sum();
         self.error_grid.compute(&self.target, &self.current);
 
-        let score = self.score;
-        let target = &self.target;
-        let current = &self.current;
-        let error_grid = &self.error_grid;
-        let workers = &mut self.workers;
         let round = SearchRound {
-            target,
-            current,
-            error_grid,
-            score,
+            target: &self.target,
+            current: &self.current,
+            error_grid: &self.error_grid,
+            score: self.score,
         };
-        let worker_count = workers.len().max(1);
-        let worker_rounds = 16_usize.div_ceil(worker_count);
+        let (width, height) = (self.target.width() as i32, self.target.height() as i32);
+        let seed = self.seed;
+        // Each step commits exactly one shape, so this is the step index.
+        let step = self.history.len() as u64;
         let (candidate_count, hill_climb_age) = Self::search_params(kind);
-        let states: Vec<State> = workers
-            .par_iter_mut()
-            .map(|worker| {
-                worker.best_hill_climb_state(
-                    &round,
-                    kind,
-                    alpha,
-                    candidate_count,
-                    hill_climb_age,
-                    worker_rounds,
-                )
-            })
+        let results: Vec<(State, u64)> = (0..SEARCH_ROUNDS)
+            .into_par_iter()
+            .map_init(
+                || WorkerCtx::new(width, height, crate::rng::round_rng(seed, step, 0)),
+                |worker, index| {
+                    worker.rng = crate::rng::round_rng(seed, step, index);
+                    let evaluations_before = worker.evaluations;
+                    let state =
+                        worker.search_round(&round, kind, alpha, candidate_count, hill_climb_age);
+                    (state, worker.evaluations - evaluations_before)
+                },
+            )
             .collect();
 
-        let best = states
+        let evaluations = results.iter().map(|(_, evaluations)| evaluations).sum();
+        // `collect` keeps round order and `min_by_key` returns the first of
+        // equal minima, so ties go to the lowest round index.
+        let (best, _) = results
             .into_iter()
-            .min_by(|left, right| {
-                let left_energy = left.cached_energy.unwrap_or(u64::MAX);
-                let right_energy = right.cached_energy.unwrap_or(u64::MAX);
-                left_energy.cmp(&right_energy)
-            })
-            .expect("a model always has at least one worker");
+            .min_by_key(|(state, _)| state.cached_energy.unwrap_or(u64::MAX))
+            .expect("a step always runs at least one round");
 
         self.add(best.shape, best.alpha);
-
-        let evaluations_after: u64 = self.workers.iter().map(|worker| worker.evaluations).sum();
-        evaluations_after - evaluations_before
+        evaluations
     }
 
     /// Paints `shape` at `alpha`, which must be `1..=255`.
     fn add(&mut self, shape: Shape, alpha: u8) {
         debug_assert!(alpha > 0, "alpha must be non-zero");
-        let worker = &mut self.workers[0];
-        let lines = shape.rasterize(worker);
+        let lines = shape.rasterize(&mut self.scratch);
         let color =
             crate::score::compute_color(&self.target, &self.current, lines, i32::from(alpha));
         let score = crate::score::energy_from_lines_raw(
@@ -273,7 +273,7 @@ mod tests {
     }
 
     #[test]
-    fn step_reports_only_incremental_evaluations() {
+    fn every_step_runs_all_search_rounds() {
         let target = Buffer::new_from_color(8, 8, Color::new(255, 255, 255, 255));
         let mut model = Model::new(
             target,
@@ -283,14 +283,15 @@ mod tests {
                 ..ModelOptions::default()
             },
         );
+        let (candidates, age) = Model::search_params(ShapeKind::Triangle);
+        // Each round samples every candidate and then hill-climbs for at
+        // least `age` evaluations.
+        let minimum = SEARCH_ROUNDS * (candidates + age) as u64;
 
-        let _ = model.step(ShapeKind::Triangle, fixed_alpha(128));
-        let first_total: u64 = model.workers.iter().map(|worker| worker.evaluations).sum();
-
-        let second_reported = model.step(ShapeKind::Triangle, fixed_alpha(128));
-        let second_total: u64 = model.workers.iter().map(|worker| worker.evaluations).sum();
-
-        assert_eq!(second_reported, second_total - first_total);
+        for step in 0..2 {
+            let evaluations = model.step(ShapeKind::Triangle, fixed_alpha(128));
+            assert!(evaluations >= minimum, "step {step}: {evaluations}");
+        }
     }
 
     #[test]
@@ -305,7 +306,6 @@ mod tests {
                     Color::new(0, 0, 0, 255),
                     ModelOptions {
                         seed: Some(11),
-                        workers: 2,
                         ..ModelOptions::default()
                     },
                 );
@@ -340,5 +340,60 @@ mod tests {
         let evaluations = model.step(ShapeKind::Triangle, fixed_alpha(128));
 
         assert!(evaluations > 0);
+    }
+
+    /// Runs `steps` seeded `Any` steps on a 16 x 12 noise target inside a
+    /// dedicated rayon pool of `threads` threads.
+    fn seeded_drawing(seed: u64, threads: usize, steps: usize) -> Drawing {
+        use rand::{RngExt, SeedableRng};
+
+        let (width, height) = (16, 12);
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0x5eed);
+        let mut pixels = vec![0_u8; (width * height * 4) as usize];
+        rng.fill(&mut pixels[..]);
+        let target = Buffer::from_rgba(width, height, pixels).expect("valid length");
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("test thread pool");
+        pool.install(|| {
+            let mut model = Model::new(
+                target,
+                Color::new(0, 0, 0, 255),
+                ModelOptions {
+                    seed: Some(seed),
+                    ..ModelOptions::default()
+                },
+            );
+            for _ in 0..steps {
+                model.step(ShapeKind::Any, Alpha::Auto);
+            }
+            model.drawing()
+        })
+    }
+
+    #[test]
+    fn seeded_output_is_independent_of_the_thread_count() {
+        let reference = seeded_drawing(42, 1, 4);
+        for threads in [2, 3, 8] {
+            assert_eq!(
+                seeded_drawing(42, threads, 4),
+                reference,
+                "{threads} threads"
+            );
+        }
+    }
+
+    #[test]
+    fn different_seeds_give_different_output() {
+        assert_ne!(seeded_drawing(1, 4, 4), seeded_drawing(2, 4, 4));
+    }
+
+    #[test]
+    fn seeds_near_the_top_of_the_range_do_not_overflow() {
+        for seed in [u64::MAX, u64::MAX - 1] {
+            let drawing = seeded_drawing(seed, 3, 2);
+            assert_eq!(drawing.shapes.len(), 2, "seed {seed}");
+        }
     }
 }

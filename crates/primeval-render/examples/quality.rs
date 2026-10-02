@@ -290,8 +290,10 @@ fn print_header() {
     );
     println!(
         "- options: seed {SEED}, resize_input {}, output_size {}, alpha auto, background auto, \
-         workers = logical cores",
-        defaults.resize_input, defaults.output_size
+         {} threads",
+        defaults.resize_input,
+        defaults.output_size,
+        rayon::current_num_threads()
     );
     println!();
 }

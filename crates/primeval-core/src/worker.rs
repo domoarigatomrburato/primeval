@@ -35,7 +35,7 @@ pub(crate) struct WorkerCtx<R> {
     pub(crate) rect_min: Vec<i32>,
     /// Reusable storage for per-scanline max bounds during rectangle tracking.
     pub(crate) rect_max: Vec<i32>,
-    /// The worker's own RNG instance.
+    /// The RNG of the search round this context is running.
     pub(crate) rng: R,
     /// Running count of energy evaluations performed by this worker.
     pub(crate) evaluations: u64,
@@ -216,31 +216,27 @@ impl<R: Rng> WorkerCtx<R> {
         states
     }
 
-    pub(crate) fn best_hill_climb_state(
+    /// Runs one search round: samples `n` random candidates, hill-climbs
+    /// the best (the best two for quadratics) until `age` consecutive moves
+    /// fail to improve it, and returns the result with its energy cached.
+    pub(crate) fn search_round(
         &mut self,
         round: &SearchRound<'_>,
         kind: ShapeKind,
         alpha: Alpha,
         n: usize,
         age: usize,
-        m: usize,
     ) -> State {
-        assert!(m > 0, "best_hill_climb_state requires at least one round");
-
         if kind == ShapeKind::Quadratic {
             let mut best_state = None;
             let mut best_energy = u64::MAX;
 
-            for _ in 0..m {
-                for seed in
-                    self.best_random_states(round, kind, alpha, n, QUADRATIC_HILL_CLIMB_SEEDS)
-                {
-                    let mut state = hill_climb(&seed, self, round, age);
-                    let energy = state.energy(self, round);
-                    if energy < best_energy {
-                        best_energy = energy;
-                        best_state = Some(state);
-                    }
+            for seed in self.best_random_states(round, kind, alpha, n, QUADRATIC_HILL_CLIMB_SEEDS) {
+                let mut state = hill_climb(&seed, self, round, age);
+                let energy = state.energy(self, round);
+                if energy < best_energy {
+                    best_energy = energy;
+                    best_state = Some(state);
                 }
             }
 
@@ -253,18 +249,7 @@ impl<R: Rng> WorkerCtx<R> {
             round,
             age,
         );
-        let mut best_energy = best_state.energy(self, round);
-
-        for _ in 1..m {
-            let state = self.best_random_state(round, kind, alpha, n);
-            let mut state = hill_climb(&state, self, round, age);
-            let energy = state.energy(self, round);
-            if energy < best_energy {
-                best_energy = energy;
-                best_state = state;
-            }
-        }
-
+        let _ = best_state.energy(self, round);
         best_state
     }
 }

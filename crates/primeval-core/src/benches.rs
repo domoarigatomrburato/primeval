@@ -209,18 +209,21 @@ fn difference_full_raw(bencher: Bencher<'_, '_>) {
     });
 }
 
-/// The first search step of a fresh, seeded, single-worker model.
+/// The first search step of a fresh, seeded model on a one-thread pool.
 #[divan::bench(args = ALL_KINDS, sample_count = 20, sample_size = 1)]
 fn model_step(bencher: Bencher<'_, '_>, kind: ShapeKind) {
     let target = synthetic_target();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .expect("one-thread pool");
     bencher
         .with_inputs(|| {
             let options = ModelOptions {
                 seed: Some(SEED),
-                workers: 1,
                 ..ModelOptions::default()
             };
             Model::new(target.clone(), CANVAS, options)
         })
-        .bench_local_refs(|model| model.step(kind, Alpha::Auto));
+        .bench_local_refs(|model| pool.install(|| model.step(kind, Alpha::Auto)));
 }

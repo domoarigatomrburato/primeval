@@ -66,7 +66,7 @@ cargo run --release -p primeval-render --example quality -- --quick > quick.md  
 cargo run --release -p primeval-render --example quality > baseline.md          # several minutes
 ```
 
-Its corpus is the public-domain images in `docs/readme/originals/` plus generated images. Use `--image PATH` (repeatable), `--no-synthetic`, `--shapes LIST` and `--steps LIST` to change it; the doc comment in `crates/primeval-render/examples/quality.rs` defines the metrics. Diff two tables to compare runs; quality numbers are comparable only between machines with the same number of logical cores.
+Its corpus is the public-domain images in `docs/readme/originals/` plus generated images. Use `--image PATH` (repeatable), `--no-synthetic`, `--shapes LIST` and `--steps LIST` to change it; the doc comment in `crates/primeval-render/examples/quality.rs` defines the metrics. Diff two tables to compare runs. Quality numbers are reproducible for the same commit on the same platform whatever the thread count; set `RAYON_NUM_THREADS` to measure scaling, which changes only the times.
 
 ## Profiling
 

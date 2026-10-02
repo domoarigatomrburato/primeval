@@ -527,6 +527,7 @@ dependencies = [
  "primeval-core",
  "rand",
  "rand_chacha",
+ "rayon",
  "tiny-skia",
 ]
 

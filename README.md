@@ -29,7 +29,7 @@ Browse the full example gallery in [`docs/gallery.md`](docs/gallery.md).
 
 ## Highlights
 
-- Fast hill-climbing search with multi-threaded worker contexts
+- Fast multi-threaded hill-climbing search whose seeded output does not depend on the number of CPU cores
 - Nine shape modes in the CLI: mixed (`any`), triangle, rectangle, ellipse, circle, rotated rectangle, quadratic curve, rotated ellipse, and polygon
 - Small working-resolution optimization with high-resolution output replay
 - Vector export via SVG, plus raster output as PNG
@@ -92,7 +92,7 @@ These two options are independent: you can optimize at low resolution for speed 
 primeval photo.jpg --output result.png --count 300 --resize-input 128 --output-size 2048
 ```
 
-- `--seed <N>` for deterministic output
+- `--seed <N>` for reproducible output: the same seed gives the same image with the same primeval version on the same platform
 - `--force` to overwrite an existing output file
 - `--quiet` to silence progress and notices on stderr
 
@@ -151,7 +151,7 @@ Render options:
 - `count?: number` optimization steps, an integer `1..100000`. Higher values improve quality. Default: `100`.
 - `shape?: "any" | "triangle" | "rectangle" | "ellipse" | "circle" | "rotated-rectangle" | "quadratic" | "rotated-ellipse" | "polygon"`. Default: `"any"`.
 - `alpha?: "auto" | number` shape opacity. Use `"auto"` to let the optimizer choose each shape's opacity, or a fixed integer `1..255`. Any other value, including `0`, rejects with a `ValidationError`. Default: `"auto"`.
-- `seed?: number | bigint` deterministic RNG seed, an integer `0..2^64 - 1`. A `number` seed must be a safe integer (at most `Number.MAX_SAFE_INTEGER`); pass larger seeds as a `bigint`. Omit it to let Rust choose a non-deterministic seed.
+- `seed?: number | bigint` deterministic RNG seed, an integer `0..2^64 - 1`. A `number` seed must be a safe integer (at most `Number.MAX_SAFE_INTEGER`); pass larger seeds as a `bigint`. Omit it to let Rust choose a non-deterministic seed. The same seed and options give the same output with the same primeval version on the same platform, whatever the number of CPU cores; results can differ across platforms because floating-point math libraries differ.
 - `background?: "auto" | string` opaque background color. Use `"auto"` (the alpha-weighted mean color of the input, or white for a fully transparent input) or a hex color in `RGB` or `RRGGBB` form, with optional leading `#`. Transparent inputs are flattened onto the background before rendering, so the output is always opaque. Default: `"auto"`.
 - `resizeInput?: number` resolution used during optimization, an integer `2..2048`. Smaller values run faster but capture less detail. Default: `256`.
 - `outputSize?: number` resolution of the final exported image, an integer `2..8192`. Default: `1024`.
@@ -299,7 +299,7 @@ primeval <input> [options]
 - `--background <VALUE>` opaque background color. Use `auto` (the alpha-weighted mean color of the input, or white for a fully transparent input) or a hex color in `RGB` or `RRGGBB` form, with optional leading `#`. Transparent inputs are flattened onto the background, so the output is always opaque. Default: `auto`.
 - `--resize-input <N>` resolution used during optimization, `2..2048`. Smaller values run faster but capture less detail; the final output is always rendered at `--output-size` resolution. Default: `256`.
 - `--output-size <N>` resolution of the final exported image, `2..8192`. Default: `1024`.
-- `--seed <N>` deterministic RNG seed, `0..18446744073709551615`. If omitted, Rust selects a random seed.
+- `--seed <N>` deterministic RNG seed, `0..18446744073709551615`. If omitted, Rust selects a random seed. The same seed and options give the same output with the same primeval version on the same platform, whatever the number of CPU cores; results can differ across platforms.
 - `-v, --version` print the package version and exit.
 - `-h, --help` print usage to stdout and exit.
 

@@ -414,7 +414,6 @@ pub fn approximate(
         .ok_or_else(|| ApproximateError::internal("working image has an invalid pixel length"))?;
     let mut options = ModelOptions::default();
     options.seed = render.seed;
-    options.workers = default_worker_count();
     let mut model = Model::new(target, background, options);
 
     for step in 0..render.count {
@@ -559,13 +558,6 @@ fn flatten_onto(image: &mut RgbaImage, background: Color) {
     }
 }
 
-/// Choose the worker count from available system parallelism.
-fn default_worker_count() -> usize {
-    std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(1)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -698,6 +690,44 @@ mod tests {
         .expect("second render");
 
         assert_eq!(first, second);
+    }
+
+    /// Renders the fixture as SVG with `seed` inside a dedicated pool of
+    /// `threads` threads.
+    fn svg_on_threads(seed: u64, threads: usize) -> Vec<u8> {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("test thread pool");
+        let mut request = request(fixture_bytes(), OutputFormat::Svg);
+        request.render.shape = ShapeKind::Any;
+        request.render.alpha = Alpha::Auto;
+        request.render.count = 4;
+        request.render.seed = Some(seed);
+        pool.install(|| approximate(request, Execution::new()))
+            .expect("render")
+            .into_bytes()
+    }
+
+    #[test]
+    fn same_seed_svg_is_identical_across_thread_counts() {
+        let reference = svg_on_threads(42, 1);
+        for threads in [2, 3, 8] {
+            assert!(
+                svg_on_threads(42, threads) == reference,
+                "{threads} threads changed the SVG"
+            );
+        }
+    }
+
+    #[test]
+    fn different_seeds_render_different_svgs() {
+        assert_ne!(svg_on_threads(1, 2), svg_on_threads(2, 2));
+    }
+
+    #[test]
+    fn the_largest_seed_renders() {
+        assert!(!svg_on_threads(u64::MAX, 3).is_empty());
     }
 
     fn encoded_fixture(format: ImageFormat) -> Vec<u8> {
