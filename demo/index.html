@@ -124,10 +124,22 @@
           <div class="drop-veil" aria-hidden="true"><span>Drop to rebuild</span></div>
         </div>
 
-        <p id="caption" class="caption" hidden>
-          <span id="caption-title" class="caption-title"></span>
-          <span id="caption-meta" class="caption-meta"></span>
-        </p>
+        <div id="caption" class="caption" hidden>
+          <p class="caption-text">
+            <span id="caption-title" class="caption-title"></span>
+            <span id="caption-meta" class="caption-meta"></span>
+          </p>
+          <div class="exports">
+            <button id="download-svg" class="button button-secondary" type="button" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m-5-5 5 5 5-5M5 19.5h14" /></svg>
+              Download SVG
+            </button>
+            <button id="download-png" class="button button-secondary" type="button" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m-5-5 5 5 5-5M5 19.5h14" /></svg>
+              Download PNG
+            </button>
+          </div>
+        </div>
 
         <section class="status" aria-label="Status">
           <div class="status-head">
@@ -140,8 +152,8 @@
             <div><dt>Elapsed</dt><dd id="elapsed">–</dd></div>
             <div><dt>Shapes/s</dt><dd id="rate">–</dd></div>
           </dl>
-          <p id="announcer" class="visually-hidden" role="status" aria-live="polite"></p>
         </section>
+        <p id="announcer" class="visually-hidden" role="status" aria-live="polite"></p>
 
         <div class="samples">
           <h2 id="samples-heading" class="section-label">Or try a sample</h2>
@@ -240,7 +252,7 @@
 
         <div class="group">
           <div class="field-head">
-            <label id="count-label" class="section-label" for="count-range">Shapes</label>
+            <label id="count-label" class="section-label" for="count-range">Number of shapes</label>
             <input id="count" class="number" type="number" min="1" max="100000" step="1" value="200" inputmode="numeric" aria-labelledby="count-label" />
           </div>
           <input id="count-range" class="range" type="range" min="10" max="2000" step="10" value="200" />
@@ -303,11 +315,6 @@
         <div id="error" class="error" role="alert" hidden>
           <p id="error-title" class="error-title"></p>
           <p id="error-detail" class="error-detail"></p>
-        </div>
-
-        <div class="group exports">
-          <button id="download-svg" class="button button-secondary" type="button" disabled>Download SVG</button>
-          <button id="download-png" class="button button-secondary" type="button" disabled>Download PNG</button>
         </div>
       </form>
     </main>

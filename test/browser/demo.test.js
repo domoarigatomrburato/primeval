@@ -423,6 +423,33 @@ describe("demo, cross-origin isolated by headers", () => {
     }
   });
 
+  test("before an image only the drop zone and samples show, then the result's own controls", async () => {
+    const { context, page } = await openDemo(server.origin);
+    try {
+      const status = page.getByRole("region", { name: "Status" });
+      const svgButton = page.getByRole("button", { name: "Download SVG" });
+      assert.equal(await status.isVisible(), false, "no status before an image");
+      assert.equal(await svgButton.isVisible(), false, "no downloads before an image");
+      assert.equal(await page.getByRole("button", { name: SAMPLE }).isVisible(), true);
+
+      await setControls(page, { count: 4, resolution: 128 });
+      await page.getByRole("button", { name: SAMPLE }).click();
+      await waitForRun(page, 0);
+      assert.equal(await status.isVisible(), true);
+      // The downloads belong to the picture: they sit in its caption.
+      assert.equal(
+        await page.locator("#caption").getByRole("button", { name: "Download SVG" }).isEnabled(),
+        true,
+      );
+      assert.equal(
+        await page.locator("#caption").getByRole("button", { name: "Download PNG" }).isEnabled(),
+        true,
+      );
+    } finally {
+      await context.close();
+    }
+  });
+
   test("every control has an accessible name", async () => {
     const { context, page } = await openDemo(server.origin);
     try {
@@ -464,7 +491,9 @@ describe("demo, cross-origin isolated by headers", () => {
       assert.equal(await page.getByRole("slider", { name: "Shapes" }).count(), 1);
       assert.equal(await page.getByRole("slider", { name: "Opacity" }).count(), 1);
       assert.equal(await page.getByRole("textbox", { name: "Seed" }).count(), 1);
-      assert.equal(await page.getByRole("progressbar", { name: "Progress" }).count(), 1);
+      // The status shows once there is an image; its name is set before.
+      const progress = page.getByRole("progressbar", { name: "Progress", includeHidden: true });
+      assert.equal(await progress.count(), 1);
       assert.equal(await page.getByRole("button", { name: "Choose image" }).count(), 1);
       assert.equal(await page.getByRole("switch", { name: "Auto-run" }).count(), 1);
     } finally {
@@ -508,7 +537,7 @@ describe("demo, served without isolation headers", () => {
       const threads = await page.evaluate(() => navigator.hardwareConcurrency);
       assert.equal(
         (await page.locator("#threads").textContent()).trim(),
-        `${threads} ${threads === 1 ? "thread" : "threads"} · cross-origin isolated`,
+        `${threads} ${threads === 1 ? "thread" : "threads"}`,
       );
 
       await setControls(page, { count: 4, resolution: 128 });

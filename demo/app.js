@@ -79,11 +79,9 @@ const state = {
 // per logical core; one thread otherwise.
 function showThreads() {
   const isolated = globalThis.crossOriginIsolated === true;
-  const threads = navigator.hardwareConcurrency;
+  const threads = isolated ? navigator.hardwareConcurrency : 1;
   ui.threads.dataset.isolated = String(isolated);
-  ui.threads.textContent = isolated
-    ? `${threads} ${threads === 1 ? "thread" : "threads"} · cross-origin isolated`
-    : "1 thread";
+  ui.threads.textContent = `${threads} ${threads === 1 ? "thread" : "threads"}`;
   ui.threads.title = isolated
     ? "The page is cross-origin isolated, so the render uses a thread per core."
     : "The page is not cross-origin isolated, so the render runs on one thread.";
