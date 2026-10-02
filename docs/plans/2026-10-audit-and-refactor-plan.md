@@ -480,6 +480,31 @@ Greedy score falls roughly as `shapes^-0.34` between 200 and 500 shapes, so 10% 
   - Per second of compute, it is no better than adding greedy shapes. It therefore matters only where the shape count is fixed, which is the placeholder case.
 - **Still open:** whether and how `approximate` uses it. Refits change shapes already reported through `ProgressInfo`, so the progress contract (each step's shape is the SVG's line) needs a decision first.
 
+**Next, in order** (decided after an independent review; B is not next):
+
+1. **Fix the measurement.**
+   - **Problem:** `quadratic` (0.10–0.20 against 0.03–0.05) is about a fifth of the mean score and compresses every relative gain. SSIM at the 1024 output barely moves (0.027 over 10× the shapes).
+   - **Change:** add a per-kind summary with medians (`any`, the default kind, and `triangle` first), PNG RMSE at the 256 px working size, and SSIM at a placeholder-like 128 px.
+   - **Diagnostic:** compare the engine canvas with the exported PNG at 256 px. A gap above about 15% means anti-aliased rasterizers for every kind are worth more than B. A gap below 5% means B has no fidelity payoff.
+2. **Adopt A1 in `approximate`.**
+   - One pass at the end, with no new option.
+   - The progress contract becomes: the streamed shapes are the greedy preview, and the result's SVG may revise them.
+   - The demo replaces the preview with the final SVG.
+3. **Fine, step-adapted moves in the refit climb.**
+   - **Problem:** today's moves are `N(0, 16 px)` and `N(0, 32°)` with no step adaptation, so a climb proposes very few one-pixel moves.
+   - **Change:** alternate a small move, or adapt σ by the 1/5th rule.
+   - **Success:** at least 1.5× the gain of the current refit at about the same time. **Kill:** less than one extra point, which also weakens B's premise.
+4. **Remove and re-add the weakest shapes.**
+   - A1's per-layer bar already gives each shape's leave-one-out energy.
+   - Re-add the lowest-contributing 10% by greedy steps.
+   - **Success:** a further 3%, with unchanged bytes. **Kill:** less than 1%.
+5. **B pilot, only if step 3 shows that fine polish pays.**
+   - **Design:** triangles only; colour stays the closed-form fit; Adam on geometry and alpha; coordinates quantised to 0.25 px at export; then snap, exact verify, and one cheap A1 pass.
+   - **Baseline:** the best A1 at equal time, not greedy.
+   - **Success:** at least 3 points better, at most +10% SVG bytes, and at most 2× greedy time in single-threaded wasm.
+   - **Context:** the literature (ES-CLIP; Optimize & Reduce, AAAI 2024) shows step-adapted joint search matching gradient descent at this shape count, and has no greedy-plus-gradient comparison.
+6. **Fix `quadratic`.** Its stroke width is a constant 1 px; 1.5 px measured about 6% better.
+
 ---
 
 ## Appendix A: measurements and reproduction
