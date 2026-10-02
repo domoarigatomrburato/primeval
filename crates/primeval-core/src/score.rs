@@ -1,7 +1,8 @@
 //! Scoring and blending routines for the energy minimization loop.
 //!
-//! Integer arithmetic, truncation semantics, and accumulator widths match
-//! the Go original for reproducibility. On aarch64, hot paths use NEON
+//! Blending and scoring keep the Go original's integer arithmetic,
+//! truncation semantics, and accumulator widths; the colour fit weights
+//! pixels by coverage instead. On aarch64, hot paths use NEON
 //! intrinsics to process 8 pixels per iteration.
 
 use crate::buffer::Buffer;
@@ -55,8 +56,137 @@ fn blend_channel_scalar(current: u8, source: u32, ma: u32, a: u32) -> u8 {
     (div_by_m(value) >> 8) as u8
 }
 
+/// Weighted least-squares fit of a shape's colour, accumulated one scanline
+/// at a time.
+///
+/// Drawing channel value `s` with weight `w` turns `c` into
+/// `c · (1 − w) + s · w`, so the `s` that brings the shape's pixels closest
+/// to the target `t` minimises `Σ (t − c · (1 − w) − s · w)²`, which gives
+/// `s* = Σ w · (t − (1 − w) · c) / Σ w²`. The weight is
+/// `w = (alpha / 255) · (coverage / M)`, held in the blend's own fixed
+/// point: [`draw_lines`] scales the canvas by `M − k` with
+/// `k = (alpha · 0x101) · coverage / M` (rounded down), so `w = k / M`.
+/// Multiplying through by `M²` keeps every sum an integer:
+/// `s* = (M · Σ k · (t − c) + Σ k² · c) / Σ k²`. Coverage is constant along
+/// a scanline, so each line contributes through its per-channel sums of `t`
+/// and `c` alone.
+///
+/// Bounds: `k <= M < 2^16`, so a line of `n` pixels adds less than
+/// `2^24 · n` to `Σ k · (t − c)`, `2^40 · n` to `Σ k² · c` and `2^32 · n` to
+/// `Σ k²`. Lines are summed in 64-bit batches of fewer than
+/// [`Self::BATCH_PIXELS`] pixels, which keeps every batch below `2^62`, and
+/// each batch is added to `i128` totals that no pixel count can overflow.
+struct ColorFit {
+    batch: FitSums<i64, u64>,
+    batch_pixels: u64,
+    total: FitSums<i128, i128>,
+}
+
+/// `Σ k · (t − c)` and `Σ k² · c` per channel, and `Σ k²` over every pixel.
+#[derive(Default)]
+struct FitSums<S, U> {
+    differences: [S; 3],
+    currents: [U; 3],
+    weights: U,
+}
+
+impl ColorFit {
+    /// Pixels per 64-bit batch: `2^40 · 2^22 = 2^62`.
+    const BATCH_PIXELS: u64 = 1 << 22;
+
+    fn new() -> Self {
+        Self {
+            batch: FitSums::default(),
+            batch_pixels: 0,
+            total: FitSums::default(),
+        }
+    }
+
+    /// The blend's fixed-point weight `k` of a scanline: zero for a line the
+    /// blend leaves unchanged, which therefore does not affect the fit.
+    #[inline]
+    fn weight(alpha: i32, coverage: u32) -> u32 {
+        // `alpha * 0x101 <= M` and `coverage <= M`, so the product is below
+        // `M * (M + 1)`, where `div_by_m` is exact.
+        div_by_m(alpha as u32 * 0x101 * coverage)
+    }
+
+    /// Adds a scanline of `pixels` pixels with weight `k` whose RGB channels
+    /// sum to `target` in the target and `current` on the canvas.
+    #[inline]
+    fn add_line(&mut self, k: u32, pixels: usize, target: [u64; 3], current: [u64; 3]) {
+        let pixels = pixels as u64;
+        if self.batch_pixels + pixels >= Self::BATCH_PIXELS {
+            self.flush();
+            if pixels >= Self::BATCH_PIXELS {
+                self.add_long_line(k, pixels, target, current);
+                return;
+            }
+        }
+        self.batch_pixels += pixels;
+        let k = u64::from(k);
+        let k2 = k * k;
+        for channel in 0..3 {
+            let difference = target[channel] as i64 - current[channel] as i64;
+            self.batch.differences[channel] += k as i64 * difference;
+            self.batch.currents[channel] += k2 * current[channel];
+        }
+        self.batch.weights += k2 * pixels;
+    }
+
+    /// [`Self::add_line`] in `i128` for a line too long for a batch.
+    #[cold]
+    fn add_long_line(&mut self, k: u32, pixels: u64, target: [u64; 3], current: [u64; 3]) {
+        let k = i128::from(k);
+        for channel in 0..3 {
+            let (t, c) = (i128::from(target[channel]), i128::from(current[channel]));
+            self.total.differences[channel] += k * (t - c);
+            self.total.currents[channel] += k * k * c;
+        }
+        self.total.weights += k * k * i128::from(pixels);
+    }
+
+    /// Moves the batch into the `i128` totals.
+    fn flush(&mut self) {
+        for channel in 0..3 {
+            self.total.differences[channel] += i128::from(self.batch.differences[channel]);
+            self.total.currents[channel] += i128::from(self.batch.currents[channel]);
+        }
+        self.total.weights += i128::from(self.batch.weights);
+        self.batch = FitSums::default();
+        self.batch_pixels = 0;
+    }
+
+    /// The fitted colour, each channel rounded to the nearest integer and
+    /// clamped to `0..=255`; the default colour when nothing had weight.
+    fn color(mut self, alpha: i32) -> Color {
+        self.flush();
+        let total = self.total;
+        let weights = total.weights;
+        if weights == 0 {
+            return Color::default();
+        }
+        let channel = |channel: usize| -> u8 {
+            let numerator = i128::from(M) * total.differences[channel] + total.currents[channel];
+            if numerator <= 0 {
+                return 0;
+            }
+            // Round to nearest. `i128` division is a library call, so take
+            // the exact `i64` path whenever both operands fit, as they do for
+            // any shape below about `2^21` pixels.
+            let (numerator, denominator) = (2 * numerator + weights, 2 * weights);
+            let quotient = match (i64::try_from(numerator), i64::try_from(denominator)) {
+                (Ok(numerator), Ok(denominator)) => i128::from(numerator / denominator),
+                _ => numerator / denominator,
+            };
+            quotient.min(255) as u8
+        };
+        Color::new(channel(0), channel(1), channel(2), alpha as u8)
+    }
+}
+
 mod scalar {
-    use super::{Buffer, Color, M, Scanline, blend_channel_scalar, clamp_line};
+    use super::{Buffer, Color, ColorFit, M, Scanline, blend_channel_scalar, clamp_line};
 
     #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
     pub(super) fn compute_color(
@@ -67,47 +197,48 @@ mod scalar {
     ) -> Color {
         let w = target.width() as i32;
         let h = target.height() as i32;
-
-        let mut rsum: i64 = 0;
-        let mut gsum: i64 = 0;
-        let mut bsum: i64 = 0;
-        let mut count: i64 = 0;
-
-        let a = 0x101_i64 * 255 / alpha as i64;
-
         let t_pix = target.pixels();
         let c_pix = current.pixels();
+        let mut fit = ColorFit::new();
 
         for line in lines {
-            let (x1, x2) = match clamp_line(line, w, h) {
-                Some(v) => v,
-                None => continue,
+            let k = ColorFit::weight(alpha, line.alpha);
+            if k == 0 {
+                continue;
+            }
+            let Some((x1, x2)) = clamp_line(line, w, h) else {
+                continue;
             };
-            let mut i = target.pix_offset(x1, line.y);
-            for _ in x1..=x2 {
-                let tr = i64::from(t_pix[i]);
-                let tg = i64::from(t_pix[i + 1]);
-                let tb = i64::from(t_pix[i + 2]);
-                let cr = i64::from(c_pix[i]);
-                let cg = i64::from(c_pix[i + 1]);
-                let cb = i64::from(c_pix[i + 2]);
-                i += 4;
-                rsum += (tr - cr) * a + cr * 0x101;
-                gsum += (tg - cg) * a + cg * 0x101;
-                bsum += (tb - cb) * a + cb * 0x101;
-                count += 1;
+            let pixels = (x2 - x1 + 1) as usize;
+            let start = target.pix_offset(x1, line.y);
+            let (target_sums, current_sums) = line_sums(t_pix, c_pix, start, pixels);
+            fit.add_line(k, pixels, target_sums, current_sums);
+        }
+
+        fit.color(alpha)
+    }
+
+    /// Per-channel RGB sums of `pixels` pixels from byte offset `start` in
+    /// the target and in the canvas.
+    #[inline]
+    pub(super) fn line_sums(
+        t_pix: &[u8],
+        c_pix: &[u8],
+        start: usize,
+        pixels: usize,
+    ) -> ([u64; 3], [u64; 3]) {
+        let end = start + pixels * 4;
+        let (t_px4, _) = t_pix[start..end].as_chunks::<4>();
+        let (c_px4, _) = c_pix[start..end].as_chunks::<4>();
+        let mut target_sums = [0_u64; 3];
+        let mut current_sums = [0_u64; 3];
+        for (t_px, c_px) in t_px4.iter().zip(c_px4) {
+            for channel in 0..3 {
+                target_sums[channel] += u64::from(t_px[channel]);
+                current_sums[channel] += u64::from(c_px[channel]);
             }
         }
-
-        if count == 0 {
-            return Color::default();
-        }
-
-        let r = ((rsum / count) as i32 >> 8).clamp(0, 255);
-        let g = ((gsum / count) as i32 >> 8).clamp(0, 255);
-        let b = ((bsum / count) as i32 >> 8).clamp(0, 255);
-
-        Color::new(r as u8, g as u8, b as u8, alpha as u8)
+        (target_sums, current_sums)
     }
 
     #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
@@ -196,7 +327,7 @@ mod scalar {
 
 #[cfg(target_arch = "aarch64")]
 mod neon {
-    use super::{Buffer, Color, M, Scanline, blend_channel_scalar, clamp_line, scalar};
+    use super::{Buffer, Color, ColorFit, M, Scanline, blend_channel_scalar, clamp_line, scalar};
     use std::arch::aarch64::*;
 
     /// # Safety
@@ -278,35 +409,64 @@ mod neon {
         }
     }
 
+    /// Chunks of 8 pixels summed in 16-bit lanes before widening: each lane
+    /// gains at most 255 per chunk, and `255 * 256 = 65_280` fits in `u16`.
+    const CHUNKS_PER_BLOCK: usize = 256;
+
+    /// Per-channel RGB sums of `pixels` pixels from byte offset `start` in
+    /// the target and in the canvas; matches [`scalar::line_sums`].
+    ///
     /// # Safety
     ///
-    /// Requires NEON, which every aarch64 target provides.
-    unsafe fn accumulate_color_channel(target: uint8x8_t, current: uint8x8_t, alpha: i32) -> i64 {
-        // SAFETY: register-only NEON intrinsics with no memory access. NEON is a
-        // baseline feature of every aarch64 target and this module only compiles
-        // for aarch64, so the required target feature is always available.
-        unsafe {
-            let target16 = vreinterpretq_s16_u16(vmovl_u8(target));
-            let current16_signed = vreinterpretq_s16_u16(vmovl_u8(current));
-            let diff16 = vsubq_s16(target16, current16_signed);
-            let current16 = vmovl_u8(current);
+    /// `start + pixels * 4` must not exceed `t_pix.len()` or `c_pix.len()`.
+    #[inline]
+    unsafe fn line_sums(
+        t_pix: &[u8],
+        c_pix: &[u8],
+        start: usize,
+        pixels: usize,
+    ) -> ([u64; 3], [u64; 3]) {
+        let mut target_sums = [0_u64; 3];
+        let mut current_sums = [0_u64; 3];
+        let mut byte_index = start;
+        let mut chunks = pixels / 8;
 
-            let diff_low = vmovl_s16(vget_low_s16(diff16));
-            let diff_high = vmovl_s16(vget_high_s16(diff16));
-            let current_low = vmovl_u16(vget_low_u16(current16));
-            let current_high = vmovl_u16(vget_high_u16(current16));
-
-            let low = vaddq_s32(
-                vmulq_n_s32(diff_low, alpha),
-                vreinterpretq_s32_u32(vmulq_n_u32(current_low, 0x101)),
-            );
-            let high = vaddq_s32(
-                vmulq_n_s32(diff_high, alpha),
-                vreinterpretq_s32_u32(vmulq_n_u32(current_high, 0x101)),
-            );
-
-            i64::from(vaddvq_s32(low)) + i64::from(vaddvq_s32(high))
+        while chunks > 0 {
+            let block = chunks.min(CHUNKS_PER_BLOCK);
+            chunks -= block;
+            // SAFETY: each `vld4_u8` reads 8 pixels (32 bytes) from
+            // `byte_index`. The loops read `pixels / 8` chunks in total from
+            // `start`, so the last byte read is below `start + pixels * 4`,
+            // which the caller keeps within both slices. The remaining calls
+            // are register-only NEON operations; NEON is a baseline aarch64
+            // feature.
+            unsafe {
+                let mut target_acc = [vdupq_n_u16(0); 3];
+                let mut current_acc = [vdupq_n_u16(0); 3];
+                for _ in 0..block {
+                    let t = vld4_u8(t_pix.as_ptr().add(byte_index));
+                    let c = vld4_u8(c_pix.as_ptr().add(byte_index));
+                    target_acc[0] = vaddw_u8(target_acc[0], t.0);
+                    target_acc[1] = vaddw_u8(target_acc[1], t.1);
+                    target_acc[2] = vaddw_u8(target_acc[2], t.2);
+                    current_acc[0] = vaddw_u8(current_acc[0], c.0);
+                    current_acc[1] = vaddw_u8(current_acc[1], c.1);
+                    current_acc[2] = vaddw_u8(current_acc[2], c.2);
+                    byte_index += 32;
+                }
+                for channel in 0..3 {
+                    target_sums[channel] += u64::from(vaddlvq_u16(target_acc[channel]));
+                    current_sums[channel] += u64::from(vaddlvq_u16(current_acc[channel]));
+                }
+            }
         }
+
+        let (tail_target, tail_current) = scalar::line_sums(t_pix, c_pix, byte_index, pixels % 8);
+        for channel in 0..3 {
+            target_sums[channel] += tail_target[channel];
+            current_sums[channel] += tail_current[channel];
+        }
+        (target_sums, current_sums)
     }
 
     /// # Safety
@@ -322,78 +482,32 @@ mod neon {
     ) -> Color {
         let w = target.width() as i32;
         let h = target.height() as i32;
-        let mut rsum = 0_i64;
-        let mut gsum = 0_i64;
-        let mut bsum = 0_i64;
-        let mut count = 0_i64;
-        let weight = 0x101_i32 * 255 / alpha;
-
         let t_pix = target.pixels();
         let c_pix = current.pixels();
+        let mut fit = ColorFit::new();
 
         for line in lines {
-            let (x1, x2) = match clamp_line(line, w, h) {
-                Some(v) => v,
-                None => continue,
+            let k = ColorFit::weight(alpha, line.alpha);
+            if k == 0 {
+                continue;
+            }
+            let Some((x1, x2)) = clamp_line(line, w, h) else {
+                continue;
             };
-            let pixel_count = (x2 - x1 + 1) as usize;
-            let mut byte_index = target.pix_offset(x1, line.y);
-            let chunk_pixels = pixel_count / 8;
-
-            for _ in 0..chunk_pixels {
-                // SAFETY: `clamp_line` keeps `line.y` in `0..h` and `x1..=x2`
-                // in `0..w` of `target`. Each `vld4_u8` reads 8 pixels (32
-                // bytes) starting at `byte_index`, and this loop runs
-                // `pixel_count / 8` times from pixel `x1`, so the last pixel
-                // read is at most `x2`: the read stays inside
-                // `target.pixels()`, whose length is `w * h * 4` (the `Buffer`
-                // length invariant, asserted by every constructor). `current`
-                // has `target`'s width and height (this function's contract,
-                // asserted by the safe caller), so by the same invariant
-                // `c_pix.len() == t_pix.len()` and the read at the same offset
-                // is in bounds too.
-                let (target_channels, current_channels) = unsafe {
-                    (
-                        vld4_u8(t_pix.as_ptr().add(byte_index)),
-                        vld4_u8(c_pix.as_ptr().add(byte_index)),
-                    )
-                };
-
-                // SAFETY: these helpers only run register-only NEON operations
-                // (no memory access); NEON is a baseline aarch64 feature.
-                unsafe {
-                    rsum += accumulate_color_channel(target_channels.0, current_channels.0, weight);
-                    gsum += accumulate_color_channel(target_channels.1, current_channels.1, weight);
-                    bsum += accumulate_color_channel(target_channels.2, current_channels.2, weight);
-                }
-                count += 8;
-                byte_index += 32;
-            }
-
-            for _ in 0..(pixel_count % 8) {
-                let tr = i64::from(t_pix[byte_index]);
-                let tg = i64::from(t_pix[byte_index + 1]);
-                let tb = i64::from(t_pix[byte_index + 2]);
-                let cr = i64::from(c_pix[byte_index]);
-                let cg = i64::from(c_pix[byte_index + 1]);
-                let cb = i64::from(c_pix[byte_index + 2]);
-                byte_index += 4;
-                rsum += (tr - cr) * i64::from(weight) + cr * 0x101;
-                gsum += (tg - cg) * i64::from(weight) + cg * 0x101;
-                bsum += (tb - cb) * i64::from(weight) + cb * 0x101;
-                count += 1;
-            }
+            let pixels = (x2 - x1 + 1) as usize;
+            let start = target.pix_offset(x1, line.y);
+            // SAFETY: `clamp_line` keeps `line.y` in `0..h` and `x1..=x2` in
+            // `0..w` of `target`, so `start + pixels * 4` is at most the
+            // length of `target.pixels()`, `w * h * 4` (the `Buffer` length
+            // invariant, asserted by every constructor). `current` has
+            // `target`'s width and height (this function's contract, asserted
+            // by the safe caller), so by the same invariant
+            // `c_pix.len() == t_pix.len()`.
+            let (target_sums, current_sums) = unsafe { line_sums(t_pix, c_pix, start, pixels) };
+            fit.add_line(k, pixels, target_sums, current_sums);
         }
 
-        if count == 0 {
-            return Color::default();
-        }
-
-        let r = ((rsum / count) as i32 >> 8).clamp(0, 255);
-        let g = ((gsum / count) as i32 >> 8).clamp(0, 255);
-        let b = ((bsum / count) as i32 >> 8).clamp(0, 255);
-
-        Color::new(r as u8, g as u8, b as u8, alpha as u8)
+        fit.color(alpha)
     }
 
     /// # Safety
@@ -541,7 +655,11 @@ mod neon {
 /// best approximate `target` at the given `alpha` level, which must be
 /// `1..=255`.
 ///
-/// Returns a zero [`Color`] if no scanline pixels fall within bounds.
+/// Each pixel is weighted by its scanline's coverage, so anti-aliased edges
+/// are fitted as partly covered (see [`ColorFit`]); Go's `primitive` treats
+/// them as fully covered, which under-saturates the colour.
+///
+/// Returns a zero [`Color`] if no in-bounds scanline pixel has coverage.
 ///
 /// # Panics
 ///
@@ -1101,36 +1219,189 @@ mod tests {
         assert!((partial - expected).abs() < 1e-12);
     }
 
+    /// With full coverage every pixel has the same weight `w = alpha / 255`,
+    /// so the fit is the plain least-squares colour
+    /// `s = 255 · Σ(t − c) / (alpha · n) + Σc / n`, rounded and clamped.
     #[test]
-    fn compute_color_partial_alpha() {
-        // Test with alpha < 255 to exercise the weighting
+    fn compute_color_full_coverage_is_the_unweighted_fit() {
         let mut target = Buffer::new(2, 1);
-        let tp = target.pixels_mut();
-        // pixel (0,0) = (200, 100, 50, 255)
-        tp[0] = 200;
-        tp[1] = 100;
-        tp[2] = 50;
-        tp[3] = 255;
-        // pixel (1,0) = (100, 200, 150, 255)
-        tp[4] = 100;
-        tp[5] = 200;
-        tp[6] = 150;
-        tp[7] = 255;
+        target
+            .pixels_mut()
+            .copy_from_slice(&[200, 100, 50, 255, 120, 180, 90, 255]);
+        let current = Buffer::new_from_color(2, 1, Color::new(40, 40, 40, 255));
+        let lines = [full_row(0, 2)];
 
-        let current = Buffer::new(2, 1);
+        // r: 255 · 240 / 384 + 40 = 199.375; g: 255 · 200 / 384 + 40 = 172.81;
+        // b: 255 · 60 / 384 + 40 = 79.84.
+        let c = compute_color(&target, &current, &lines, 192);
+        assert_eq!(c, Color::new(199, 173, 80, 192));
+
+        // r: 255 · 240 / 256 + 40 = 279.06 is clamped to 255; g: 255 · 200 /
+        // 256 + 40 = 239.22; b: 255 · 60 / 256 + 40 = 99.77.
+        let c = compute_color(&target, &current, &lines, 128);
+        assert_eq!(c, Color::new(255, 239, 100, 128));
+    }
+
+    /// Batches that reach `BATCH_PIXELS` flush to the `i128` totals, and a
+    /// line longer than a batch goes straight to them; either way the fit
+    /// equals the formula evaluated in `i128` throughout.
+    #[test]
+    fn color_fit_batches_match_the_exact_formula() {
+        use rand::{RngExt, SeedableRng};
+        use rand_chacha::ChaCha8Rng;
+
+        let mut rng = ChaCha8Rng::seed_from_u64(0xba7c);
+        for case in 0..200 {
+            let mut fit = ColorFit::new();
+            let mut differences = [0_i128; 3];
+            let mut currents = [0_i128; 3];
+            let mut weights = 0_i128;
+            for _ in 0..rng.random_range(1..12) {
+                let pixels: u64 = match rng.random_range(0..4) {
+                    0 => rng.random_range(1..=16),
+                    1 => ColorFit::BATCH_PIXELS - rng.random_range(1..=2),
+                    2 => ColorFit::BATCH_PIXELS + rng.random_range(0..=2),
+                    _ => rng.random_range(1..=u64::from(u32::MAX)),
+                };
+                let k = rng.random_range(1..=M);
+                let target: [u64; 3] = std::array::from_fn(|_| rng.random_range(0..=255 * pixels));
+                let current: [u64; 3] = std::array::from_fn(|_| rng.random_range(0..=255 * pixels));
+                fit.add_line(k, pixels as usize, target, current);
+                let k = i128::from(k);
+                for channel in 0..3 {
+                    let (t, c) = (i128::from(target[channel]), i128::from(current[channel]));
+                    differences[channel] += k * (t - c);
+                    currents[channel] += k * k * c;
+                }
+                weights += k * k * i128::from(pixels);
+            }
+            let expected = std::array::from_fn::<u8, 3, _>(|channel| {
+                let numerator = i128::from(M) * differences[channel] + currents[channel];
+                ((2 * numerator + weights) / (2 * weights)).clamp(0, 255) as u8
+            });
+            let color = fit.color(77);
+            assert_eq!([color.r, color.g, color.b], expected, "case {case}");
+            assert_eq!(color.a, 77);
+        }
+    }
+
+    /// A pixel covered by half draws half the colour, so matching the
+    /// target needs twice the difference: the fit must not treat the
+    /// anti-aliased pixel as fully covered (ENG-6).
+    #[test]
+    fn compute_color_compensates_partial_coverage() {
+        let target = Buffer::new_from_color(1, 1, Color::new(100, 60, 20, 255));
+        let current = Buffer::new_from_color(1, 1, Color::new(0, 0, 0, 255));
         let lines = [Scanline {
             y: 0,
             x1: 0,
-            x2: 1,
-            alpha: 0xFFFF,
+            x2: 0,
+            alpha: 0x8000,
         }];
 
-        let c = compute_color(&target, &current, &lines, 128);
-        assert_eq!(c.a, 128);
-        // The computed RGB values should be nonzero and within bounds
-        assert!(c.r > 0);
-        assert!(c.g > 0);
-        assert!(c.b > 0);
+        let c = compute_color(&target, &current, &lines, 255);
+        assert_eq!(c, Color::new(200, 120, 40, 255));
+    }
+
+    /// Scanlines with zero coverage do not change the canvas, so they must
+    /// not pull the fit either; with no weight at all there is nothing to fit.
+    #[test]
+    fn compute_color_ignores_uncovered_scanlines() {
+        let mut target = Buffer::new(2, 1);
+        target
+            .pixels_mut()
+            .copy_from_slice(&[100, 60, 20, 255, 0, 255, 0, 255]);
+        let current = Buffer::new_from_color(2, 1, Color::new(0, 0, 0, 255));
+        let covered = Scanline {
+            y: 0,
+            x1: 0,
+            x2: 0,
+            alpha: 0xFFFF,
+        };
+        let uncovered = Scanline {
+            y: 0,
+            x1: 1,
+            x2: 1,
+            alpha: 0,
+        };
+
+        let c = compute_color(&target, &current, &[covered, uncovered], 255);
+        assert_eq!(c, Color::new(100, 60, 20, 255));
+        let c = compute_color(&target, &current, &[uncovered], 255);
+        assert_eq!(c, Color::default());
+    }
+
+    /// The fitted channel minimises the squared error of the blend model
+    /// `c · (1 − w) + s · w`, `w = (alpha / 255) · (coverage / M)`, over
+    /// the 8-bit values: neither neighbour of `s` does better. The test
+    /// computes the error in `f64` from scratch, per pixel.
+    #[test]
+    fn compute_color_minimises_the_weighted_error() {
+        use rand::{RngExt, SeedableRng};
+        use rand_chacha::ChaCha8Rng;
+
+        let mut rng = ChaCha8Rng::seed_from_u64(0xf17);
+        for case in 0..400 {
+            let (width, height) = (rng.random_range(1..40), rng.random_range(1..6));
+            let mut target = Buffer::new(width, height);
+            let mut current = Buffer::new(width, height);
+            rng.fill(target.pixels_mut());
+            rng.fill(current.pixels_mut());
+            let alpha = rng.random_range(1..=255);
+            let lines: Vec<Scanline> = (0..rng.random_range(1..8))
+                .map(|_| {
+                    let x1 = rng.random_range(-2..width as i32);
+                    Scanline {
+                        y: rng.random_range(-1..=height as i32),
+                        x1,
+                        x2: x1 + rng.random_range(0..width as i32 + 2),
+                        alpha: match rng.random_range(0..4) {
+                            0 => M,
+                            _ => rng.random_range(0..=M),
+                        },
+                    }
+                })
+                .collect();
+
+            let color = compute_color(&target, &current, &lines, alpha);
+            let covered = lines.iter().any(|line| {
+                line.alpha > 0 && clamp_line(line, width as i32, height as i32).is_some()
+            });
+            if !covered {
+                assert_eq!(color, Color::default(), "case {case}");
+                continue;
+            }
+            assert_eq!(color.a, alpha as u8, "case {case}");
+            let fitted = [color.r, color.g, color.b];
+            for (channel, &s) in fitted.iter().enumerate() {
+                let error = |s: f64| {
+                    let mut sum = 0.0;
+                    for line in &lines {
+                        let Some((x1, x2)) = clamp_line(line, width as i32, height as i32) else {
+                            continue;
+                        };
+                        // `(alpha / 255) · (coverage / M)` in the blend's fixed point.
+                        let k = alpha as u32 * 0x101 * line.alpha / M;
+                        let w = f64::from(k) / f64::from(M);
+                        for x in x1..=x2 {
+                            let i = target.pix_offset(x, line.y) + channel;
+                            let t = f64::from(target.pixels()[i]);
+                            let c = f64::from(current.pixels()[i]);
+                            sum += (t - c * (1.0 - w) - s * w).powi(2);
+                        }
+                    }
+                    sum
+                };
+                let best = error(f64::from(s));
+                let tolerance = 1e-9 * (1.0 + best);
+                if s > 0 {
+                    assert!(best <= error(f64::from(s) - 1.0) + tolerance, "case {case}");
+                }
+                if s < 255 {
+                    assert!(best <= error(f64::from(s) + 1.0) + tolerance, "case {case}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -1370,6 +1641,25 @@ mod neon_parity {
                 let actual = unsafe { neon::compute_color(&target, &current, &lines, alpha) };
                 assert_eq!(actual, expected, "{width}x{height} alpha={alpha}");
             }
+        }
+    }
+
+    /// Lines longer than `CHUNKS_PER_BLOCK` chunks of 8 pixels, so the NEON
+    /// line sums flush their 16-bit lanes at least once mid-line; bright
+    /// buffers push every lane towards its overflow bound.
+    #[test]
+    fn compute_color_matches_scalar_on_long_lines() {
+        let mut rng = ChaCha8Rng::seed_from_u64(0x1086);
+        let (width, height) = (2 * 8 * 256 + 13, 3);
+        let mut target = Buffer::new_from_color(width, height, Color::new(255, 255, 255, 255));
+        let current = random_buffer(&mut rng, width, height);
+        rng.fill(&mut target.pixels_mut()[..64]);
+        for alpha in [1, 128, 255] {
+            let lines = random_lines(&mut rng, width as i32, height as i32);
+            let expected = scalar::compute_color(&target, &current, &lines, alpha);
+            // SAFETY: `target` and `current` have the same dimensions.
+            let actual = unsafe { neon::compute_color(&target, &current, &lines, alpha) };
+            assert_eq!(actual, expected, "alpha={alpha}");
         }
     }
 

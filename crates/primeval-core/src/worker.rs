@@ -419,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn random_state_any_uses_supported_shape_kinds() {
+    fn random_state_any_draws_every_concrete_kind() {
         let target = Buffer::new_from_color(32, 32, Color::new(255, 255, 255, 255));
         let current = Buffer::new_from_color(32, 32, Color::new(0, 0, 0, 255));
         let mut grid = ErrorGrid::new(32, 32, 4, 4);
@@ -432,23 +432,16 @@ mod tests {
         };
 
         let mut worker = WorkerCtx::new(32, 32, test_rng());
-        for _ in 0..32 {
+        let mut drawn = std::collections::HashSet::new();
+        for _ in 0..256 {
             let state = worker.random_state(&round, ShapeKind::Any, fixed_alpha(128));
-            match state.shape {
-                crate::shapes::Shape::Triangle(_)
-                | crate::shapes::Shape::Rectangle(_)
-                | crate::shapes::Shape::Ellipse(_)
-                | crate::shapes::Shape::Circle(_)
-                | crate::shapes::Shape::RotatedRectangle(_)
-                | crate::shapes::Shape::Quadratic(_)
-                | crate::shapes::Shape::RotatedEllipse(_)
-                | crate::shapes::Shape::Polygon(_) => {}
-            }
+            drawn.insert(std::mem::discriminant(&state.shape));
         }
+        assert_eq!(drawn.len(), ShapeKind::all_kinds().len());
     }
 
     #[test]
-    fn best_random_state_returns_finite_energy() {
+    fn best_random_state_keeps_the_lowest_energy_candidate() {
         let target = Buffer::new_from_color(32, 32, Color::new(255, 255, 255, 255));
         let current = Buffer::new_from_color(32, 32, Color::new(0, 0, 0, 255));
         let mut grid = ErrorGrid::new(32, 32, 4, 4);
@@ -463,8 +456,27 @@ mod tests {
         let mut worker = WorkerCtx::new(32, 32, test_rng());
         let mut state = worker.best_random_state(&round, ShapeKind::Any, fixed_alpha(128), 8);
         let energy = state.energy(&mut worker, &round);
+        assert_eq!(worker.evaluations, 8, "the cached energy is reused");
 
-        assert!(energy > 0);
-        assert!(worker.evaluations >= 8);
+        // Replay the same candidates from the same seed.
+        let mut replay = WorkerCtx::new(32, 32, test_rng());
+        let candidates: Vec<(Shape, u64)> = (0..8)
+            .map(|_| {
+                let mut candidate = replay.random_state(&round, ShapeKind::Any, fixed_alpha(128));
+                let energy = candidate.energy(&mut replay, &round);
+                (candidate.shape, energy)
+            })
+            .collect();
+        let lowest = candidates.iter().map(|&(_, energy)| energy).min().unwrap();
+        assert_eq!(energy, lowest);
+        assert!(
+            lowest < round.score,
+            "a fitted shape improves black towards white"
+        );
+        let first_lowest = candidates.iter().find(|&&(_, e)| e == lowest).unwrap();
+        assert_eq!(
+            state.shape, first_lowest.0,
+            "ties keep the earliest candidate"
+        );
     }
 }

@@ -1218,15 +1218,25 @@ mod tests {
         );
     }
 
+    /// Mutations keep the circle's centre on the canvas and its radius in
+    /// `1..min(w, h)`, and they do move the radius.
     #[test]
     fn mutate_keeps_circle_radius_equal() {
-        let (mut worker, _) = round(32, 32);
+        let (width, height) = (48, 40);
+        let (mut worker, _) = round(width, height);
         let mut shape = Shape::Circle(Circle { x: 10, y: 10, r: 4 });
-        shape.mutate(&mut worker);
-        match shape {
-            Shape::Circle(circle) => assert!(circle.r >= 1),
-            _ => panic!("expected circle"),
+        let mut radii = std::collections::BTreeSet::new();
+        for _ in 0..500 {
+            shape.mutate(&mut worker);
+            let &Shape::Circle(circle) = &shape else {
+                panic!("expected circle")
+            };
+            assert!((0..width as i32).contains(&circle.x), "{circle:?}");
+            assert!((0..height as i32).contains(&circle.y), "{circle:?}");
+            assert!((1..height as i32).contains(&circle.r), "{circle:?}");
+            radii.insert(circle.r);
         }
+        assert!(radii.len() > 10, "the radius barely moved: {radii:?}");
     }
 
     #[test]

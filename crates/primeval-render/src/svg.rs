@@ -149,6 +149,28 @@ mod tests {
     use super::*;
     use primeval_core::DrawnShape;
 
+    /// Every channel value survives `hex` and `Color::from_hex`, in both
+    /// letter cases; the SVG writer drops alpha, which `from_hex` sets to 255.
+    #[test]
+    fn hex_colours_round_trip_through_from_hex() {
+        for value in 0..=255_u8 {
+            let color = Color::new(value, value.wrapping_mul(7), 255 - value, value);
+            let opaque = Color { a: 255, ..color };
+            let text = hex(color);
+            assert_eq!(Color::from_hex(&text), Some(opaque), "{text}");
+            assert_eq!(
+                Color::from_hex(&text.to_uppercase()),
+                Some(opaque),
+                "{text}"
+            );
+            assert_eq!(
+                Color::from_hex(text.trim_start_matches('#')),
+                Some(opaque),
+                "{text}"
+            );
+        }
+    }
+
     fn drawing(shapes: Vec<DrawnShape>) -> Drawing {
         Drawing {
             width: 40,

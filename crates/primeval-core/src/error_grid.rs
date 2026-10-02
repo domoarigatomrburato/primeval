@@ -17,6 +17,20 @@ fn cell_count(cols: u32, rows: u32) -> usize {
     usize::try_from(u64::from(cols) * u64::from(rows)).expect("error grid cell count fits in usize")
 }
 
+/// The pixel range `start..end` of cell `index` along one axis, where cells
+/// are `size` pixels and the last of `count` cells extends to `extent` so
+/// that it absorbs the remainder. `start >= end` for cells past the image,
+/// which happens when the grid has more cells than the image has pixels.
+fn cell_span(index: u32, size: u32, count: u32, extent: u32) -> (u32, u32) {
+    let start = index * size;
+    let end = if index == count - 1 {
+        extent
+    } else {
+        (start + size).min(extent)
+    };
+    (start, end)
+}
+
 /// A grid that tracks per-cell RGB error between target and current buffers.
 ///
 /// After calling [`compute`](ErrorGrid::compute), the internal CDF allows
@@ -83,28 +97,18 @@ impl ErrorGrid {
         let c_pix = current.pixels();
 
         for row_idx in 0..self.rows {
-            let y_start = row_idx * self.cell_h;
+            let (y_start, y_end) = cell_span(row_idx, self.cell_h, self.rows, img_h);
             if y_start >= img_h {
                 break;
             }
-            let y_end = if row_idx == self.rows - 1 {
-                img_h
-            } else {
-                (y_start + self.cell_h).min(img_h)
-            };
             let err_row_base = (row_idx * self.cols) as usize;
 
             for y in y_start..y_end {
                 for col_idx in 0..self.cols {
-                    let x_start = col_idx * self.cell_w;
+                    let (x_start, x_end) = cell_span(col_idx, self.cell_w, self.cols, img_w);
                     if x_start >= img_w {
                         break;
                     }
-                    let x_end = if col_idx == self.cols - 1 {
-                        img_w
-                    } else {
-                        (x_start + self.cell_w).min(img_w)
-                    };
 
                     let i_start = (y as usize * img_w as usize + x_start as usize) * 4;
                     let i_end = i_start + (x_end - x_start) as usize * 4;
@@ -143,19 +147,10 @@ impl ErrorGrid {
             );
         }
 
-        let r = rng.random::<f64>() * self.total;
-        let idx = self.cdf.partition_point(|&v| v < r).min(self.cdf.len() - 1);
-        let row = idx / self.cols as usize;
-        let col = idx % self.cols as usize;
-
-        let x_range = self.cell_w as i32;
-        let y_range = self.cell_h as i32;
-        let x = col as i32 * x_range + rng.random_range(0..x_range);
-        let y = row as i32 * y_range + rng.random_range(0..y_range);
-
-        let x = x.min(self.img_w as i32 - 1);
-        let y = y.min(self.img_h as i32 - 1);
-        (x, y)
+        let ((x_start, x_end), (y_start, y_end)) = self.sample_cell(rng);
+        let x = rng.random_range(x_start..x_end);
+        let y = rng.random_range(y_start..y_end);
+        (x as i32, y as i32)
     }
 
     /// Samples a floating-point coordinate biased toward high-error cells.
@@ -174,17 +169,40 @@ impl ErrorGrid {
             );
         }
 
+        let ((x_start, x_end), (y_start, y_end)) = self.sample_cell(rng);
+        let within = |rng: &mut R, start: u32, end: u32| {
+            let (start, end) = (f64::from(start), f64::from(end));
+            // Rounding can carry `start + r * (end - start)` up to `end`.
+            (start + rng.random::<f64>() * (end - start)).min(end.next_down())
+        };
+        let x = within(rng, x_start, x_end);
+        let y = within(rng, y_start, y_end);
+        (x, y)
+    }
+
+    /// Picks a cell with probability proportional to its error and returns
+    /// its real pixel bounds `(x_start..x_end, y_start..y_end)`, including
+    /// the remainder that the last column and row absorb. Requires a
+    /// positive total.
+    ///
+    /// The chosen cell always has pixels: `partition_point` returns the
+    /// first cell whose cumulative error reaches `r`, which for `r > 0` has
+    /// positive error (so lies on the image) and for `r == 0` is cell 0.
+    fn sample_cell<R: Rng>(&self, rng: &mut R) -> ((u32, u32), (u32, u32)) {
         let r = rng.random::<f64>() * self.total;
         let idx = self.cdf.partition_point(|&v| v < r).min(self.cdf.len() - 1);
-        let row = idx / self.cols as usize;
-        let col = idx % self.cols as usize;
-
-        let x = col as f64 * self.cell_w as f64 + rng.random::<f64>() * self.cell_w as f64;
-        let y = row as f64 * self.cell_h as f64 + rng.random::<f64>() * self.cell_h as f64;
-
-        let x = x.min(self.img_w as f64 - 1.0);
-        let y = y.min(self.img_h as f64 - 1.0);
-        (x, y)
+        let row = (idx / self.cols as usize) as u32;
+        let col = (idx % self.cols as usize) as u32;
+        let (x_start, x_end) = cell_span(col, self.cell_w, self.cols, self.img_w);
+        let (y_start, y_end) = cell_span(row, self.cell_h, self.rows, self.img_h);
+        debug_assert!(x_start < x_end && y_start < y_end, "cell {idx} is empty");
+        // Clamp the start so an empty cell still yields an on-image pixel.
+        let x_start = x_start.min(self.img_w - 1);
+        let y_start = y_start.min(self.img_h - 1);
+        (
+            (x_start, x_end.max(x_start + 1)),
+            (y_start, y_end.max(y_start + 1)),
+        )
     }
 }
 
@@ -298,6 +316,78 @@ mod tests {
             let (x, y) = g.sample(&mut rng);
             assert!((0..50).contains(&x), "x={x} out of bounds");
             assert!((0..30).contains(&y), "y={y} out of bounds");
+        }
+    }
+
+    /// Every pixel of a canvas whose size the grid does not divide (the
+    /// last row and column absorb the remainder) is reachable through the
+    /// biased path, for integer and float samples (ENG-10).
+    #[test]
+    fn biased_sampling_reaches_every_pixel_of_a_non_divisible_canvas() {
+        let (width, height) = (257_u32, 255_u32);
+        let target = Buffer::new_from_color(width, height, Color::new(255, 255, 255, 255));
+        let current = Buffer::new_from_color(width, height, Color::new(0, 0, 0, 255));
+        let mut g = ErrorGrid::new(width, height, 16, 16);
+        g.compute(&target, &current);
+
+        let pixel_count = (width * height) as usize;
+        let mut rng = test_rng();
+        let mut hit = vec![false; pixel_count];
+        let mut hit_float = vec![false; pixel_count];
+        let (mut missing, mut missing_float) = (pixel_count, pixel_count);
+        // Uniform error makes every pixel equally likely: about
+        // `n · ln n ≈ 0.73 M` samples cover all `n = 65_535` of them.
+        for _ in 0..4_000_000 {
+            let (x, y) = g.sample(&mut rng);
+            let index = (y as u32 * width + x as u32) as usize;
+            if !std::mem::replace(&mut hit[index], true) {
+                missing -= 1;
+            }
+            let (fx, fy) = g.sample_float(&mut rng);
+            let index = (fy as u32 * width + fx as u32) as usize;
+            if !std::mem::replace(&mut hit_float[index], true) {
+                missing_float -= 1;
+            }
+            if missing == 0 && missing_float == 0 {
+                break;
+            }
+        }
+        assert_eq!(missing, 0, "pixels never sampled as integers");
+        assert_eq!(missing_float, 0, "pixels never sampled as floats");
+    }
+
+    /// Biased samples stay on the canvas for odd, tiny and non-divisible
+    /// sizes, grids finer than the image, and random error distributions.
+    #[test]
+    fn biased_samples_stay_in_bounds_for_random_sizes() {
+        let mut rng = test_rng();
+        for _ in 0..200 {
+            let width = rng.random_range(1..70_u32);
+            let height = rng.random_range(1..70_u32);
+            let mut target = Buffer::new(width, height);
+            rng.fill(target.pixels_mut());
+            let current = Buffer::new(width, height);
+            let mut g = ErrorGrid::new(
+                width,
+                height,
+                rng.random_range(0..20),
+                rng.random_range(0..20),
+            );
+            g.compute(&target, &current);
+            for _ in 0..200 {
+                let (x, y) = g.sample(&mut rng);
+                assert!((0..width as i32).contains(&x), "x={x} on {width}x{height}");
+                assert!((0..height as i32).contains(&y), "y={y} on {width}x{height}");
+                let (fx, fy) = g.sample_float(&mut rng);
+                assert!(
+                    (0.0..f64::from(width)).contains(&fx),
+                    "x={fx} on {width}x{height}"
+                );
+                assert!(
+                    (0.0..f64::from(height)).contains(&fy),
+                    "y={fy} on {width}x{height}"
+                );
+            }
         }
     }
 
