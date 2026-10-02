@@ -52,6 +52,8 @@ The problems are concentrated at the edges: how binaries are built, how failures
 - GPU acceleration (Metal or wgpu) is out of scope for now. It is revisited only together with the algorithm change in section 16.
 - The algorithm change ("next") happens after everything in this plan is fixed.
 - Proposing removal of obsolete or low-value formats and features is explicitly welcome (section 11).
+- Formats: output is SVG and PNG only (JPG and GIF output are removed); input is JPEG, PNG and WebP (GIF input is removed).
+- The engine works in RGB only: backgrounds must be opaque, and transparent inputs are composited at decode time (RM-4).
 
 **Top findings**
 
@@ -730,11 +732,11 @@ The project has never been published, so every removal is free.
 | RM-1 | yes | **GIF output** | 50× the peak memory and about 2× the time of SVG/PNG (Appendix A.4); 256 colours; 2.3 MB files against 27 KB SVG; source of the `u16` panic (RT-4). | Drops the `gif` dependency, `gif_frame_step`, `Model::frames`, `encode_gif`, NeuQuant and most of RT-5. If animation is wanted later, an **animated SVG** (CSS `animation-delay` per shape, in insertion order) is a few KB, vector, and costs no memory. That would be a deliberate new feature. |
 | RM-2 | yes | **Path input** (`{ kind: "path" }` in the Node API, `InputSource::Path` in render) | RT-6: unbounded reads, FIFO hangs, file-existence oracle, all IO errors reported as NotFound, UTF-8-only paths. Node's `fs` does this better. | `NotFoundError` disappears; input becomes plain bytes (`approximate(bytes, options)` or `{ input: Uint8Array }`); the CLI uses `fs.readFile` with precise errors. |
 | RM-3 | yes | **`repeat`** | It actually adds up to N extra shapes per step (`model.rs:157-171`), so the shape count stops matching `count` and progress `total` is wrong; it is documented incorrectly; it is a niche upstream knob ("mostly good for beziers"); its loop is fragile (ENG-12). | One option fewer and a clean meaning: `count` = number of shapes. |
-| RM-4 | yes (decision) | **Alpha channel in the engine**: work in RGB, composite transparent inputs onto the background at decode time, accept only opaque backgrounds (`RGB` / `RRGGBB`) | ENG-16 inconsistency; about 25% of per-pixel work (PERF-4); simpler kernels; transparent output has little value for this product. Validate the trade-off with PERF-0 first. | 3-byte buffers, RGB-only NEON (`vld3_u8`), one background rule across SVG and PNG. |
-| RM-5 | yes | **GIF input decoding** (the `gif` feature of `image` in `primeval-render/Cargo.toml`) | Undocumented and untested. | Smaller decode surface. Consider adding **WebP input** (pure-Rust decoder in `image`): it is the format users will most often bring. |
+| RM-4 | yes (accepted) | **Alpha channel in the engine**: work in RGB, composite transparent inputs onto the background at decode time, accept only opaque backgrounds (`RGB` / `RRGGBB`) | ENG-16 inconsistency; about 25% of per-pixel work (PERF-4); simpler kernels; transparent output has little value for this product. PERF-0 measures the gain when PERF-4 lands. | 3-byte buffers, RGB-only NEON (`vld3_u8`), one background rule across SVG and PNG. |
+| RM-5 | yes | **GIF input decoding** (the `gif` feature of `image` in `primeval-render/Cargo.toml`) | Undocumented and untested. | Smaller decode surface. **WebP input** is added (accepted; pure-Rust decoder in `image`): it is the format users will most often bring. |
 | RM-6 | yes | **Rust-only knobs not exposed to Node**: `prepare()` / `ApproximationRun`, `gif_frame_step`, public `workers` | They break the "layers stay aligned" rule; the binding uses only `approximate`. | `workers` becomes an internal performance knob once ENG-4 makes output independent of it. |
 | RM-7 | yes | **CLI extras**: `--format`, the `jpeg` alias, `--progress auto\|plain\|off`, defaulting the output format to the input's | `--format svg -o x.png` writes SVG into a `.png`; three spellings of one thing. | Format comes from the `--output` extension only; the **default output is SVG** (the flagship format); `--quiet` replaces `--progress`; revisit the `_primitive` suffix. |
-| RM-8 | yes (decision) | **JPG output** (optional) | Lossy over flat shapes (ringing at edges); 140 KB against 218 KB for PNG at 1024 px, 200 shapes. Keeping it costs little. | If removed: SVG + PNG only. |
+| RM-8 | yes (accepted) | **JPG output** | Lossy over flat shapes (ringing at edges); the size gain (140 KB against 218 KB for PNG at 1024 px, 200 shapes) does not justify a third encoder. | SVG + PNG only; the `jpeg` dependency stays only as an input decoder. |
 | RM-9 | no | **Dead code in core** | Profiling hooks (`profile_quadratic` is always false, `QuadraticProfileStats`, `worker.rs:93-139`); `export::output_paths` (`export.rs:153`, CLI file naming); `util::number_string` (`util.rs:42`); `util::rotate` (tests only); `ShapeKind::variants` and `OutputFormat::variants` (used only by regex tests); `Polygon.convex` (always false, so the convexity check is dead); `Quadratic.width` (never mutated); `WorkerCtx::scratch_vertices`; `parse_alpha_u32`; the unused `_round` parameter in `Shape::mutate`; the `approx` dev-dependency. | Less surface; lets the workspace dead-code lints work once API-1 lands. |
 
 ---
@@ -782,16 +784,16 @@ Removals before hardening, so no effort goes into code that is about to disappea
 - [ ] RM-1 Remove GIF output
 - [ ] RM-2 Remove path input; the CLI reads files itself
 - [ ] RM-3 Remove `repeat`
-- [ ] RM-5 Remove GIF input decoding (decide on WebP input)
+- [ ] RM-5 Remove GIF input decoding; add WebP input
 - [ ] RM-6 Remove Rust-only knobs
 - [ ] RM-7 CLI simplification (format from extension, SVG default, `--quiet`)
-- [ ] RM-8 Decide on JPG
+- [ ] RM-8 Remove JPG output
 - [ ] RM-9 Delete dead code
 - [ ] API-3 **Engine boundary**: engine produces committed shapes; decode, replay and encoders move to render; core drops `image`
 - [ ] API-1 Restrict core visibility; `#[non_exhaustive]`
 - [ ] API-4 Typed alpha end to end
 - [ ] API-9, API-10, API-11 Render facade ergonomics, `merge`, example
-- [ ] RM-4 Decide on RGB-only (needs a quick PERF-0 measurement)
+- [ ] RM-4 RGB-only contract: opaque backgrounds only, transparent inputs composited at decode time (the RGB-only kernels are PERF-4 in T6)
 
 ### T3: Runtime robustness
 
@@ -833,7 +835,7 @@ Required in any case, because the current engine becomes the reference and basel
 - [ ] PERF-0 Divan benches and the time+quality script (start this early, in parallel with T2, because RM-4 and every later item need it)
 - [ ] PERF-5 Anti-aliased rasterizer interiors (largest measured hotspot)
 - [ ] PERF-1 Prefix sums + early exit
-- [ ] PERF-4 RGB-only kernels (if RM-4 is accepted)
+- [ ] PERF-4 RGB-only kernels (RM-4)
 - [ ] PERF-8 Reduced-resolution random phase (needs quality metrics)
 - [ ] PERF-6, PERF-11
 - [ ] Deferred until the "next" decision: PERF-2 runtime-dispatched x86 SIMD, PERF-3 NEON accumulator tuning (section 15)
