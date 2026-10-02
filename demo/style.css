@@ -126,6 +126,7 @@ a:hover {
 .badge,
 .chip,
 .caption-meta,
+.switch-label,
 .footer {
   font-family: var(--mono);
   font-size: 11px;
@@ -232,29 +233,34 @@ a:hover {
 
 /* --- Stage --- */
 
+/* Empty, the stage is a drop target of its own height. With a picture it
+   has no wall: it takes the picture's shape, as wide as the column and at
+   most --picture-height tall, so only a tall picture leaves room at its sides. */
 .stage {
+  --picture-height: max(360px, 100svh - 240px);
   position: relative;
-  container-type: size;
-  height: clamp(360px, 100vh - 280px, 820px);
+  container-type: inline-size;
   display: grid;
   place-items: center;
-  padding: 28px;
-  background: var(--paper-2);
   overflow: hidden;
 }
 
-/* The image hangs on the wall with a thin mat line around it. */
+.stage[data-state="empty"] {
+  height: clamp(360px, 100svh - 280px, 820px);
+  padding: 28px;
+  background: var(--paper-2);
+}
+
 .frame {
   --aspect: 0.75;
   --split: 50%;
   position: relative;
   grid-area: 1 / 1;
-  width: min(100cqw - 56px, (100cqh - 56px) * var(--aspect));
+  width: min(100cqw, var(--picture-height) * var(--aspect));
   aspect-ratio: var(--aspect);
   overflow: hidden;
   background: var(--mat);
   outline: 1px solid var(--rule-strong);
-  outline-offset: 9px;
   touch-action: pan-y;
 }
 
@@ -458,24 +464,33 @@ a:hover {
   opacity: 1;
 }
 
-/* --- Caption: a museum label under the picture --- */
+/* --- Caption: a museum label under the picture, and its downloads --- */
 
 .caption {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
+  align-items: flex-end;
   justify-content: space-between;
-  gap: 2px 16px;
-  margin: 12px 0 0;
+  gap: 12px 24px;
+  margin: 16px 0 0;
 }
 
 .caption[hidden] {
   display: none;
 }
 
+.caption-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  margin: 0;
+}
+
 .caption-title {
   font-family: var(--serif);
-  font-size: 17px;
+  font-size: 19px;
+  line-height: 1.3;
 }
 
 .caption-title cite {
@@ -486,7 +501,13 @@ a:hover {
   color: var(--muted);
 }
 
-/* --- Status --- */
+.exports {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+/* --- Status: shown once there is an image to render --- */
 
 .status {
   display: grid;
@@ -497,6 +518,10 @@ a:hover {
   padding: 12px 0;
   border-top: 1px solid var(--ink);
   border-bottom: 1px solid var(--rule);
+}
+
+.stage-column:has(> .stage[data-state="empty"]) .status {
+  display: none;
 }
 
 .status-head {
@@ -983,22 +1008,12 @@ a:hover {
 
 /* --- Buttons --- */
 
-.actions,
-.exports {
+.actions {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 8px;
-}
-
-.actions {
-  grid-template-columns: 2fr 1fr;
   padding-top: 16px;
   border-top: 1px solid var(--ink);
-}
-
-.exports {
-  border-top: 0;
-  padding-top: 8px;
 }
 
 .button {
@@ -1052,6 +1067,91 @@ a:hover {
   opacity: 0.4;
 }
 
+.exports .button {
+  min-height: 38px;
+  padding: 6px 14px;
+}
+
+.exports .button svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: square;
+}
+
+/* Run and the auto-run switch: one vermilion block, the switch its right
+   segment behind a hairline. */
+.run-group {
+  display: flex;
+  min-width: 0;
+  background: var(--accent);
+}
+
+.run-group .button-primary {
+  flex: 1;
+  min-width: 0;
+}
+
+.auto-run {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  border-left: 1px solid color-mix(in srgb, var(--accent-ink) 45%, transparent);
+  color: var(--accent-ink);
+  cursor: pointer;
+}
+
+.auto-run:hover {
+  background: var(--accent-strong);
+}
+
+.auto-run:has(.switch:focus-visible) {
+  outline: 2px solid var(--ink);
+  outline-offset: -4px;
+}
+
+.switch {
+  appearance: none;
+  position: relative;
+  flex: none;
+  width: 28px;
+  height: 16px;
+  margin: 0;
+  border: 1px solid currentColor;
+  border-radius: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.switch:focus-visible {
+  outline: none;
+}
+
+.switch::before {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 10px;
+  height: 10px;
+  background: currentColor;
+}
+
+.switch:checked {
+  background: var(--accent-ink);
+}
+
+.switch:checked::before {
+  left: 14px;
+  background: var(--accent);
+}
+
+.switch-label {
+  font-size: 10px;
+  white-space: nowrap;
+}
+
 .error {
   margin-top: 12px;
   padding: 12px 14px;
@@ -1103,14 +1203,13 @@ a:hover {
   }
 
   .stage {
-    height: min(68vh, 118vw);
-    min-height: 300px;
-    padding: 20px;
+    --picture-height: 80svh;
   }
 
-  .frame {
-    width: min(100cqw - 40px, (100cqh - 40px) * var(--aspect));
-    outline-offset: 6px;
+  .stage[data-state="empty"] {
+    height: min(68svh, 118vw);
+    min-height: 300px;
+    padding: 20px;
   }
 
   .status {
@@ -1161,8 +1260,8 @@ a:hover {
     height: 48px;
   }
 
-  .caption {
-    flex-direction: column;
+  .exports {
+    flex-basis: 100%;
   }
 }
 
@@ -1199,6 +1298,14 @@ a:hover {
       border-color 0.12s ease,
       color 0.12s ease,
       filter 0.2s ease;
+  }
+
+  .switch,
+  .switch::before {
+    transition:
+      background-color 0.12s ease,
+      border-color 0.12s ease,
+      left 0.12s ease;
   }
 
   .run-state[data-state="busy"]::before {
