@@ -271,10 +271,8 @@ test("cli derives <input-stem>.svg next to the input when --output is omitted", 
 test("cli derives svg output for a .png input", () => {
   const tmpDir = makeTmpDir();
   const input = path.join(tmpDir, "monalisa.png");
-  fs.copyFileSync(
-    path.join(repoRoot, "docs", "readme", "comparisons", "monalisa-any-200-alpha-128.png"),
-    input,
-  );
+  const png = runCli([fixturePath, "--quiet", "--output", input, ...RENDER_ARGS]);
+  assert.equal(png.status, 0, png.stderr);
 
   const result = runCli([input, "--quiet", ...RENDER_ARGS]);
 

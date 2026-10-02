@@ -72,3 +72,53 @@ test("the README API examples read photo.jpg, not repository paths", () => {
   assert.ok(reads.length >= 5, `found ${reads.length} readFile calls`);
   assert.deepEqual(new Set(reads), new Set(['"photo.jpg"']));
 });
+
+// Local `src` and `href` targets of a Markdown file, resolved from the
+// repository root. External links and in-page anchors are skipped.
+function localLinks(file) {
+  const source = fs.readFileSync(path.join(repoRoot, file), "utf8");
+  const targets = [
+    ...[...source.matchAll(/\b(?:src|href)="([^"]+)"/g)].map(([, target]) => target),
+    ...[...source.matchAll(/\]\(([^)\s]+)\)/g)].map(([, target]) => target),
+  ];
+  return targets
+    .filter((target) => !/^(?:[a-z]+:|#)/.test(target))
+    .map((target) => path.normalize(path.join(path.dirname(file), target.split("#")[0])));
+}
+
+function filesUnder(dir) {
+  return fs
+    .readdirSync(path.join(repoRoot, dir), { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile() && !entry.name.startsWith("."))
+    .map((entry) => path.relative(repoRoot, path.join(entry.parentPath, entry.name)));
+}
+
+test("the README and the gallery link only to files in the repository", () => {
+  for (const file of ["README.md", "docs/gallery.md"]) {
+    const links = localLinks(file);
+    assert.ok(links.length > 0, `${file} has no local links`);
+    for (const link of links) {
+      assert.ok(fs.existsSync(path.join(repoRoot, link)), `${file} links to missing ${link}`);
+    }
+  }
+});
+
+test("the gallery shows every original and every generated image", () => {
+  const linked = new Set([...localLinks("docs/gallery.md"), ...localLinks("README.md")]);
+  const generated = [
+    ...filesUnder("docs/readme/originals"),
+    ...filesUnder("docs/images"),
+    ...filesUnder("docs/readme/comparisons"),
+  ];
+  for (const file of generated) {
+    assert.ok(linked.has(file), `${file} is not linked from the gallery or the README`);
+  }
+});
+
+test("the Benchmarks section cites the quality runner, not the Go CLI", () => {
+  const readme = fs.readFileSync(path.join(repoRoot, "README.md"), "utf8");
+  const section = readme.split("\n## Benchmarks\n")[1].split("\n## ")[0];
+  assert.match(section, /cargo run --release -p primeval-render --example quality/);
+  assert.match(section, /commit `[0-9a-f]{7,}`/);
+  assert.doesNotMatch(section, /Go CLI|Go time/);
+});

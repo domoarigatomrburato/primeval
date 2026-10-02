@@ -282,9 +282,11 @@ The images below use identical settings (`shape: any`, `count: 200`, `seed: 42`)
 - `alpha: "auto"`
 - `alpha: 128` (fixed, historical default)
 
+The difference image is the per-pixel difference of the two renders with each channel multiplied by four.
+
 | Alpha auto | Alpha 128 (fixed) | Difference (boosted) |
 | --- | --- | --- |
-| ![Mona Lisa rendered with alpha auto at 200 steps.](docs/readme/comparisons/monalisa-any-200-alpha-auto.png) | ![Mona Lisa rendered with fixed alpha 128 at 200 steps.](docs/readme/comparisons/monalisa-any-200-alpha-128.png) | ![Boosted per-pixel difference between alpha auto and alpha 128 renders.](docs/readme/comparisons/monalisa-any-200-alpha-diff-boosted.png) |
+| ![Mona Lisa rendered with alpha auto at 200 steps.](docs/readme/comparisons/monalisa-any-200-alpha-auto.jpg) | ![Mona Lisa rendered with fixed alpha 128 at 200 steps.](docs/readme/comparisons/monalisa-any-200-alpha-128.jpg) | ![Boosted per-pixel difference between alpha auto and alpha 128 renders.](docs/readme/comparisons/monalisa-any-200-alpha-diff-boosted.jpg) |
 
 ## CLI Reference
 
@@ -360,23 +362,27 @@ const result = await approximate({
 
 ## Benchmarks
 
-Using `docs/readme/originals/americangothic.jpg` as the input image, `500` steps per run, and all nine shape modes (`any`, triangle, rectangle, ellipse, circle, rotated rectangle, quadratic, rotated ellipse, polygon), primeval completed the full matrix in **`1m 18s`** versus **`2m 41s`** for the original Go CLI from [`fogleman/primitive`](https://github.com/fogleman/primitive).
+Wall time per call and final score for 200 steps of each shape mode on the two photographs in `docs/readme/originals/`, with default options (`resizeInput: 256`, `outputSize: 1024`, alpha and background `auto`), seed 42 and PNG output. The time covers decoding, the search and the PNG encode. The score is the normalised RMSE between the canvas and the input at working resolution (lower is better).
 
-That works out to a **`2.06x` speedup overall** (`51.5%` less total time). On this run, Rust was **faster in all 9 modes** and delivered **`4.0%` lower average RMSE** overall (`15.97` vs `16.63`). It also produced lower RMSE in 7 of the 9 individual modes.
+| Shape | American Gothic time | American Gothic score | Mona Lisa time | Mona Lisa score |
+| --- | ---: | ---: | ---: | ---: |
+| Mixed | 1.23 s | 0.0420 | 1.20 s | 0.0344 |
+| Triangle | 0.58 s | 0.0464 | 0.56 s | 0.0368 |
+| Rectangle | 0.33 s | 0.0489 | 0.31 s | 0.0420 |
+| Ellipse | 0.49 s | 0.0490 | 0.48 s | 0.0407 |
+| Circle | 0.51 s | 0.0586 | 0.47 s | 0.0457 |
+| Rotated rectangle | 0.55 s | 0.0455 | 0.56 s | 0.0378 |
+| Quadratic | 2.20 s | 0.1355 | 1.63 s | 0.1044 |
+| Rotated ellipse | 2.50 s | 0.0452 | 2.33 s | 0.0357 |
+| Polygon | 3.27 s | 0.0387 | 3.08 s | 0.0326 |
 
-| Shape | Rust time | Go time | Speedup | Rust RMSE | Go RMSE |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Mixed | 7.6s | 14.6s | 1.9x | 12.3 | 13.6 |
-| Triangle | 4.0s | 9.1s | 2.3x | 14.4 | 14.6 |
-| Rectangle | 2.5s | 7.1s | 2.8x | 15.2 | 14.6 |
-| Ellipse | 5.6s | 18.2s | 3.3x | 12.3 | 12.6 |
-| Circle | 7.6s | 21.7s | 2.9x | 14.2 | 14.5 |
-| Rotated rectangle | 4.5s | 9.6s | 2.1x | 12.8 | 14.1 |
-| Quadratic | 6.1s | 23.2s | 3.8x | 39.5 | 38.3 |
-| Rotated ellipse | 24.8s | 39.4s | 1.6x | 11.8 | 13.8 |
-| Polygon | 15.2s | 17.7s | 1.2x | 11.1 | 13.7 |
+Measured at commit `cdcb531` on an Apple M3 (8 cores: 4 performance, 4 efficiency) under macOS, from a single run of:
 
-*Lower RMSE is better.* Times are from a single run on an Apple M-series machine and will vary by hardware. The upstream Go CLI does not expose a seed flag, so RMSE figures reflect one representative run rather than a deterministic replay.
+```bash
+cargo run --release -p primeval-render --example quality -- --no-synthetic --steps 200
+```
+
+Times vary between runs and machines. Scores are deterministic for a given commit and platform, whatever the core count. [`CONTRIBUTING.md`](CONTRIBUTING.md#benchmarks) describes the runner and its other columns.
 
 ## Used in Production
 

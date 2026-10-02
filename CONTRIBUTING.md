@@ -68,6 +68,16 @@ cargo run --release -p primeval-render --example quality > baseline.md          
 
 Its corpus is the public-domain images in `docs/readme/originals/` plus generated images. Use `--image PATH` (repeatable), `--no-synthetic`, `--shapes LIST` and `--steps LIST` to change it; the doc comment in `crates/primeval-render/examples/quality.rs` defines the metrics. Diff two tables to compare runs. Quality numbers are reproducible for the same commit on the same platform whatever the thread count; set `RAYON_NUM_THREADS` to measure scaling, which changes only the times.
 
+## Gallery Images
+
+The SVGs and thumbnails in `docs/images/`, `docs/gallery.md` and the README's alpha comparison images in `docs/readme/comparisons/` are generated; do not edit them by hand. Regenerate them after an engine change that alters output:
+
+```bash
+cargo run --release -p primeval-render --example gallery  # several minutes
+```
+
+To add a photograph, drop a JPEG, PNG or WebP file you may redistribute into `docs/readme/originals/` and run the same command. Name it with dashes (`the-kiss.jpg` becomes "The Kiss" in the gallery) or add its title to `TITLES` in `crates/primeval-render/examples/gallery.rs`. The doc comment there lists the step counts, seed and output sizes.
+
 ## Profiling
 
 Builds target each architecture's portable baseline; the repository sets no `target-cpu`, and the release workflow rejects artifacts that use AVX-512 or SVE. To profile with every instruction your own CPU supports, opt in for that build only and keep the output in a separate target directory:

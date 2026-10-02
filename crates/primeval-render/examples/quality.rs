@@ -40,9 +40,9 @@
 //!   `sqrt(Σ Δ² / (w · h · 3)) / 255`.
 //!
 //! Lower is better for both metrics. Times vary between runs; the metrics
-//! are deterministic for a given machine. The search runs one worker per
-//! logical core and its result depends on the worker count, so compare
-//! metrics only between runs on machines with the same core count.
+//! are deterministic for a given commit and platform, whatever the core
+//! count (the search runs one worker per logical core, but its result does
+//! not depend on how many there are).
 
 use image::{ImageFormat, Rgb, RgbImage, imageops};
 use primeval_render::{
