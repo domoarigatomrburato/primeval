@@ -223,20 +223,12 @@ Since ENG-4 (T5), runner quality is identical across thread counts; times still 
   - It targets the 75–80% of evaluations that are independent.
   - It changes search behaviour, so it needs PERF-0's quality metrics to accept.
 
-### PERF-11: Batch throughput
-
-- **Severity / status:** Medium. Measured indirectly (3.9× scaling on 8 cores). `next: yes`.
-- **Detail:** for the build-time use case (many placeholders), throughput across images matters more than the latency of one image. One image per core, single-threaded, beats one image at a time across all cores.
-- **Fix:** document it; optionally add a batch mode to the CLI (`primeval *.jpg --out-dir ...`) that runs images in parallel with `workers: 1`. Note that adding CLI behaviour requires a deliberate decision under `AGENTS.md`.
-
 ---
 
 ## 7. API and engineering quality (API)
 
 | ID | Severity | Status | `next` | Finding | Fix |
 | --- | --- | --- | --- | --- | --- |
-| API-6 | Low | Verified | partial | `ShapeKind` keeps parallel name tables (`shapes.rs:194-254`: `variants()`, `FromStr`, display). | One `const` table. |
-| API-7 | Low | Measured | partial | 186 public items lack docs (`-W missing_docs`). Some docs are wrong: `difference_full_raw` claims a normalised RMS but returns a raw `u64`; `raster.rs:8` and `:172` mention a "tiny-skia pipeline" that does not exist; `raster.rs:177` says "non-zero winding" while the code uses even-odd. | `#![warn(missing_docs)]` on the public surface and fix the wrong docs. Broken links, module docs and the rustdoc gate landed in T1. |
 | API-8 | Medium | Measured | yes | Not publishable: `cargo publish --dry-run` warns "manifest has no description" for core and **fails** for render (path dependency without `version`). `rust-version`, `readme`, `keywords`, `categories` and `documentation` are missing. `binding` lacks `publish = false`. Crate versions (0.1.0) are not aligned with npm. | Decide whether the crates are public. If yes, add the metadata, versioned path deps and version alignment (REL-6); if not, `publish = false` everywhere. |
 
 ---
@@ -262,11 +254,8 @@ All TOOL items landed in T1. Follow-ups:
 
 | ID | Severity | Status | `next` | Finding | Fix |
 | --- | --- | --- | --- | --- | --- |
-| DOC-2 | Medium | Verified | yes | Missing operational documentation: minimum glibc, CPU baseline, memory sizing (per-format peaks), concurrency guidance for servers, untrusted-input guidance, the limits introduced by RT-5. | A "Deploying" section in the README. |
-| DOC-3 | Low | Verified | yes | The README examples read `docs/readme/originals/monalisa.jpg`, which does not exist for npm consumers. | Use `photo.jpg` with a note, or `process.argv[2]`. |
 | DOC-4 | Low | Verified | yes | The Benchmarks section cannot be reproduced (the script was removed in `e24492d`). | Replace with the PERF-0 script and its output, or remove the section. |
-| DOC-6 | Medium | Verified | yes | **Licensing of sample images:** `docs/readme/originals/spongebob.jpg` (Nickelodeon artwork) and `kenna-fiume-po.jpg` (a Michael Kenna photograph), plus every derived gallery image, are copyrighted works in a public MIT repository. Mona Lisa and American Gothic are public domain. | Replace them with public-domain, CC0 or the maintainer's own photographs; regenerate the gallery; this corpus is also the benchmark corpus (PERF-0). |
-| DOC-7 | Low | Verified | yes | Package and repository metadata: `package.json` has a weak description ("TypeScript-first Node package...") and lacks `keywords`, `homepage`, `bugs` and `author`; there are no README badges (CI, licence); the GitHub repository has no topics. | Fill them in. |
+| DOC-6 | Low | Partly done | yes | The copyrighted originals (SpongeBob artwork, a Michael Kenna photograph) and their gallery images are removed; only the public-domain Mona Lisa and American Gothic remain, which also form the benchmark corpus (PERF-0). | Add replacement photographs (public-domain, CC0 or the maintainer's own) and regenerate the gallery. |
 
 ---
 
@@ -339,14 +328,15 @@ Done. Every ENG item and TEST-4 landed, plus two found on the way: symmetric ell
 - [x] PERF-1 Prefix sums + exact early exit: same chosen shapes, about half the blended pixels skipped (clean runner timings still to record)
 - [x] PERF-4 RGB-only kernels (RM-4): byte-identical output, 16% faster search on the runner
 - [ ] PERF-8 Reduced-resolution random phase (needs quality metrics)
-- [ ] PERF-11 (docs only)
+- [x] PERF-11: documented in the README's Deploying section; a CLI batch mode is a maintainer decision
 - [ ] Deferred until the "next" decision: PERF-2 runtime-dispatched x86 SIMD, PERF-3 NEON accumulator tuning (section 15)
 
 ### T7: Documentation
 
 Continuous: each ticket updates the README for the behaviour it changes. This ticket is the final pass.
 
-- [ ] DOC-2 to DOC-4, DOC-6, DOC-7, API-7; regenerate the README and gallery images, which predate the T2–T5 engine and output changes
+- [x] API-6, API-7, DOC-2 (Deploying section, with PERF-11's batch-throughput note), DOC-3, DOC-7 (metadata and badges; GitHub topics are the maintainer's), and DOC-6's removal of the copyrighted images
+- [ ] Gallery generator and regenerated images (they predate the T2–T6 engine and output changes), DOC-4 Benchmarks from the PERF-0 runner, replacement photographs (DOC-6)
 
 ---
 
