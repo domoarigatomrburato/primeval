@@ -14,5 +14,5 @@
     "rootDir": "src",
     "outDir": "dist"
   },
-  "files": ["src/browser.ts", "src/worker.ts"]
+  "files": ["src/browser.ts", "src/worker-single.ts", "src/worker-threaded.ts", "src/wasm-glue.d.ts"]
 }

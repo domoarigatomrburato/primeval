@@ -12,9 +12,9 @@ Main components:
 - `binding`: napi-rs crate named `primeval-node`
 - `binding-wasm`: wasm-bindgen crate named `primeval-wasm`, the browser binding; `scripts/build-wasm.mjs` builds its single-threaded and threaded variants
 - `src/index.ts`: single-source TypeScript wrapper for the npm package; `src/errors.ts` holds its error classes and the mapping from native error codes; `src/native-binding.ts` is the native boundary shim
-- `src/browser.ts`: browser entry (not yet in `exports`), run by `src/browser-runtime.ts` in one `src/worker.ts` Web Worker per call; `src/types.ts`, `src/request.ts` and `src/data-uri.ts` are shared with `src/index.ts`, and `tsconfig.browser.json` builds the browser files without Node types
+- `src/browser.ts`: browser entry (the `browser` condition of `exports`), run by `src/browser-runtime.ts` in one Web Worker per call (`src/worker-single.ts` or `src/worker-threaded.ts`, which also runs the rayon pool workers; shared logic in `src/worker-common.ts`); `src/types.ts`, `src/request.ts` and `src/data-uri.ts` are shared with `src/index.ts`, and `tsconfig.browser.json` builds the browser files without Node types
 - `src/cli.ts`: Node CLI entrypoint distributed via npm package `bin`
-- `scripts/`: binding-loader generation, `napi.targets` tooling, and the wasm build (`build-wasm.mjs`, the single source of the nightly pin, threaded flags and output layout)
+- `scripts/`: binding-loader generation, `napi.targets` tooling, and the wasm build (`build-wasm.mjs`, the single source of the nightly pin, threaded flags, output layout and the gzip size budget per `.wasm`)
 - `test/`: Node/package tests; `test/tooling/`: packaging, loader, and release-metadata tests; `test/browser/`: the browser entry in headless Chromium (Playwright)
 - `docs/readme/`: source images (`originals/`, also the test fixtures) and alpha comparisons used by the README
 - `docs/images/` and `docs/gallery.md`: progression gallery and thumbnails

@@ -3,11 +3,17 @@
 // Usage:
 //   node scripts/release-packages.mjs publish <npm dir> <tag>
 //   node scripts/release-packages.mjs verify <tag>
+//   node scripts/release-packages.mjs verify-root
 //
-// `publish` skips every package whose version is already on the registry and
+// `publish` first checks that the root package is complete (`verify-root`),
+// then skips every package whose version is already on the registry and
 // publishes the root package last, so a failed run can simply be re-run.
 // `verify` fails unless every package is on the registry at the tag version.
+// `verify-root` fails unless the root tarball (`npm pack --dry-run`) has
+// every file both entries need at runtime, the wasm builds included; it
+// expects `npm run prepare:package` and `npm run build:wasm` to have run.
 import { execFileSync, spawnSync } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -30,6 +36,88 @@ export function releasePackages(pkg, npmDir, rootDir) {
     }),
     { name: packageName, version, dir: rootDir },
   ];
+}
+
+/** The wasm builds the browser entry chooses between (scripts/build-wasm.mjs). */
+const WASM_VARIANTS = ["single", "threaded"];
+
+/** The `./snippets/...` files a wasm-bindgen glue imports, relative to its directory. */
+export function glueSnippets(glueSource) {
+  return [...glueSource.matchAll(/^import\b[^'"]*['"]\.\/(snippets\/[^'"]+)['"]/gm)].map(
+    ([, file]) => file,
+  );
+}
+
+/**
+ * The files the root tarball must contain: `package.json`, every literal
+ * (non-glob) `files` entry, the compiled module of every `src/*.ts`
+ * (`sourceModules`, without extension), and for each wasm build its glue,
+ * its `.wasm` and the snippets the glue imports (`glueSources[variant]`, the
+ * glue's source when it is built).
+ */
+export function requiredRootFiles({ pkg, sourceModules, glueSources }) {
+  const files = new Set(["package.json"]);
+  for (const entry of pkg.files ?? []) {
+    if (!/[*?[{]/.test(entry)) {
+      files.add(entry);
+    }
+  }
+  for (const module of sourceModules) {
+    files.add(`dist/${module}.js`);
+  }
+  for (const variant of WASM_VARIANTS) {
+    files.add(`wasm/${variant}/primeval.js`);
+    files.add(`wasm/${variant}/primeval_bg.wasm`);
+    const glue = glueSources[variant];
+    for (const snippet of glue === undefined ? [] : glueSnippets(glue)) {
+      files.add(`wasm/${variant}/${snippet}`);
+    }
+  }
+  return [...files];
+}
+
+/** The inputs of `requiredRootFiles` for the package in `rootDir`. */
+export function readRootPackageInputs(rootDir) {
+  const pkg = readPackageMetadata(path.join(rootDir, "package.json"));
+  const sourceModules = fs
+    .readdirSync(path.join(rootDir, "src"))
+    .filter((file) => file.endsWith(".ts") && !file.endsWith(".d.ts"))
+    .map((file) => file.slice(0, -".ts".length));
+  const glueSources = {};
+  for (const variant of WASM_VARIANTS) {
+    const glue = path.join(rootDir, "wasm", variant, "primeval.js");
+    if (fs.existsSync(glue)) {
+      glueSources[variant] = fs.readFileSync(glue, "utf8");
+    }
+  }
+  return { pkg, sourceModules, glueSources };
+}
+
+/** Fails unless `packedFiles` (tarball paths) contains every `required` file. */
+export function verifyRootPackage(required, packedFiles) {
+  const packed = new Set(packedFiles);
+  const missing = required.filter((file) => !packed.has(file));
+  if (missing.length > 0) {
+    throw new Error(`the root package is missing ${missing.join(", ")}`);
+  }
+}
+
+/** The paths in the root tarball, from `npm pack --dry-run --json`, without lifecycle scripts. */
+function packedRootFiles(rootDir) {
+  const output = execFileSync(npmCommand(), ["pack", "--dry-run", "--json", "--ignore-scripts"], {
+    cwd: rootDir,
+    encoding: "utf8",
+  });
+  const [summary] = JSON.parse(output);
+  return summary.files.map((file) => file.path);
+}
+
+function verifyRepositoryRootPackage() {
+  verifyRootPackage(
+    requiredRootFiles(readRootPackageInputs(REPO_ROOT)),
+    packedRootFiles(REPO_ROOT),
+  );
+  console.log("verified the root package contents");
 }
 
 export function assertTagMatchesVersion(tag, version) {
@@ -136,6 +224,8 @@ async function main(argv) {
         throw new Error("publish requires the npm packages directory");
       }
       assertTagMatchesVersion(secondArg, pkg.version);
+      // Before anything is published: an incomplete root package fails the release.
+      verifyRepositoryRootPackage();
       const packages = releasePackages(pkg, path.resolve(firstArg), REPO_ROOT);
       publishPackages(packages, {
         isPublished: npmIsPublished,
@@ -152,9 +242,12 @@ async function main(argv) {
       });
       break;
     }
+    case "verify-root":
+      verifyRepositoryRootPackage();
+      break;
     default:
       throw new Error(
-        "usage: node scripts/release-packages.mjs publish <npm dir> <tag> | verify <tag>",
+        "usage: node scripts/release-packages.mjs publish <npm dir> <tag> | verify <tag> | verify-root",
       );
   }
 }

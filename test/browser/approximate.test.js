@@ -331,7 +331,7 @@ for (const isolated of [true, false]) {
         assert.equal(outcome.calls, 0);
         assert.deepEqual(
           requests.filter(
-            (pathname) => pathname.startsWith("/wasm/") || pathname === "/dist/worker.js",
+            (pathname) => pathname.startsWith("/wasm/") || pathname.startsWith("/dist/worker-"),
           ),
           [],
         );
@@ -488,6 +488,33 @@ for (const isolated of [true, false]) {
       }
     });
 
+    test(`starts only ${variant} workers from the package's own script, never from blob: URLs`, async () => {
+      const { context, page } = await openPage();
+      try {
+        const workers = [];
+        page.on("worker", (worker) => workers.push(worker.url()));
+        const threads = await page.evaluate(
+          async ({ name, render }) => {
+            const input = await window.fixture(name);
+            await window.primeval.approximate({ input, output: "svg", render });
+            return navigator.hardwareConcurrency;
+          },
+          { name: FIXTURE, render: SMALL },
+        );
+
+        // The call's worker, plus one pool worker per thread when threaded.
+        assert.deepEqual(
+          workers,
+          Array.from(
+            { length: isolated ? 1 + threads : 1 },
+            () => `${server.origin}/dist/worker-${variant}.js`,
+          ),
+        );
+      } finally {
+        await context.close();
+      }
+    });
+
     test("terminates each call's worker when the call settles, whatever the outcome", async () => {
       const { context, page } = await openPage();
       try {
@@ -541,7 +568,9 @@ for (const isolated of [true, false]) {
 
         let timer;
         const timeout = new Promise((resolve) => {
-          timer = setTimeout(() => resolve("timeout"), 5000);
+          // Generous: on isolated pages Chromium reports the pool workers'
+          // close events about 2 s after termination, 4 s after a pool panic.
+          timer = setTimeout(() => resolve("timeout"), 15000);
         });
         const outcome = await Promise.race([Promise.all(closed).then(() => "closed"), timeout]);
         clearTimeout(timer);
@@ -557,7 +586,7 @@ for (const isolated of [true, false]) {
       for (const [what, pattern] of [
         ["the .wasm file", `**/wasm/${variant}/primeval_bg.wasm`],
         ["the wasm-bindgen glue", `**/wasm/${variant}/primeval.js`],
-        ["the worker script", "**/dist/worker.js"],
+        ["the worker script", `**/dist/worker-${variant}.js`],
       ]) {
         test(`when ${what} is missing`, async () => {
           const { context, page } = await openPage();

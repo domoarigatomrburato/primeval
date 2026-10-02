@@ -14,5 +14,5 @@
   },
   "include": ["src"],
   // The browser entry and its runtime, built by tsconfig.browser.json.
-  "exclude": ["src/browser.ts", "src/browser-runtime.ts", "src/worker.ts", "src/worker-protocol.ts"]
+  "exclude": ["src/browser.ts", "src/browser-runtime.ts", "src/worker-common.ts", "src/worker-single.ts", "src/worker-threaded.ts", "src/worker-protocol.ts", "src/wasm-glue.d.ts"]
 }

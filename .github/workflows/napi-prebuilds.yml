@@ -110,9 +110,46 @@ jobs:
           path: primeval-node.*.node
           if-no-files-found: error
 
+  # Both WebAssembly builds for the browser entry, shipped in the root package.
+  wasm:
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          # No caches in the release workflow: they could be poisoned (zizmor cache-poisoning).
+          package-manager-cache: false
+
+      # The pinned stable, with the wasm target from rust-toolchain.toml.
+      - run: rustup toolchain install
+
+      # The dated nightly for the threaded build, pinned in the script.
+      - run: node scripts/build-wasm.mjs install-nightly
+
+      # The CLI must match the wasm-bindgen crate in Cargo.lock. Built from
+      # source with its lockfile, without a cache (see above).
+      - run: cargo install wasm-bindgen-cli --locked --version "$(node scripts/build-wasm.mjs wasm-bindgen-version)"
+
+      # Fails on a build over the size budget or without the shared memory.
+      - run: npm run build:wasm
+
+      - name: Upload wasm build
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wasm
+          path: wasm/
+          if-no-files-found: error
+
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, wasm]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -134,6 +171,12 @@ jobs:
 
       - run: npm ci
 
+      - name: Download wasm build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: wasm
+          path: wasm
+
       - name: Download artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -148,8 +191,14 @@ jobs:
       - name: Verify native package completeness
         run: node scripts/napi-targets.mjs verify-artifacts npm
 
-      # Skips every package already on the registry and publishes the root
-      # package last, so a failed run can be re-run as is.
+      # dist/ and binding.js, so the publish step can check the root package
+      # before it publishes anything.
+      - name: Build the root package
+        run: npm run prepare:package
+
+      # Fails before publishing anything if the root package misses a dist or
+      # wasm file. Then skips every package already on the registry and
+      # publishes the root package last, so a failed run can be re-run as is.
       - name: Publish packages
         run: node scripts/release-packages.mjs publish npm "$TAG"
         env:

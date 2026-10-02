@@ -7,16 +7,24 @@ const repoRoot = process.cwd();
 
 // Needs `binding.d.ts` from `npm run build:node` and `dist/` from `npm run
 // build`, so it runs in `npm test`, not in the clean-checkout typecheck.
-test("hand-written native types and public declarations type-check", () => {
-  const result = spawnSync(
+function typeCheck(tsconfig) {
+  return spawnSync(
     process.execPath,
     [
       path.join(repoRoot, "node_modules", "typescript", "bin", "tsc"),
       "-p",
-      path.join(repoRoot, "test", "types", "tsconfig.json"),
+      path.join(repoRoot, "test", "types", tsconfig),
     ],
     { cwd: repoRoot, encoding: "utf8" },
   );
+}
 
+test("hand-written native types and public declarations type-check", () => {
+  const result = typeCheck("tsconfig.json");
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+});
+
+test("the browser entry's declarations type-check without Node types", () => {
+  const result = typeCheck("tsconfig.browser.json");
   assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
 });

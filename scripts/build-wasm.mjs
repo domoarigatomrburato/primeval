@@ -6,8 +6,8 @@
 //   the standard library rebuilt for atomics.
 //
 // This file is the single source of truth for the nightly pin, the threaded
-// RUSTFLAGS, the build-std flags and the output layout; CI and the docs call
-// its subcommands instead of repeating them.
+// RUSTFLAGS, the build-std flags, the output layout and the size budget; CI
+// and the docs call its subcommands instead of repeating them.
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -49,6 +49,19 @@ export const THREADS_RUSTFLAGS = [
   "-C",
   "link-arg=--export=__tls_base",
 ];
+
+/** The most each `.wasm` may weigh, gzip -9, since the page downloads one. */
+export const GZIP_BUDGET_BYTES = 512 * 1024;
+
+/** Fails if `output`, `gzipBytes` long after gzip -9, is over the budget. */
+export function checkSizeBudget(output, gzipBytes) {
+  if (gzipBytes > GZIP_BUDGET_BYTES) {
+    throw new Error(
+      `${output} is ${gzipBytes} bytes gzip -9, over the budget of ${GZIP_BUDGET_BYTES} bytes ` +
+        `(${GZIP_BUDGET_BYTES / 1024} KiB)`,
+    );
+  }
+}
 
 /** Rebuilds std with the atomics flags; nightly-only. */
 const BUILD_STD = ["-Z", "build-std=panic_abort,std"];
@@ -281,15 +294,20 @@ function build(names) {
     const output = path.join(variantBuild.outDir, `${OUT_NAME}_bg.wasm`);
     const bytes = fs.readFileSync(path.join(REPO_ROOT, output));
     const shared = importedMemory(bytes)?.shared ?? false;
-    if (shared !== variantBuild.shared) {
-      // Never leave a build that cannot work where packaging would find it.
-      fs.rmSync(path.join(REPO_ROOT, variantBuild.outDir), { recursive: true, force: true });
-      throw new Error(
-        `${output} must ${variantBuild.shared ? "" : "not "}import a shared memory; ` +
-          "check the threaded RUSTFLAGS and that CARGO_ENCODED_RUSTFLAGS is unset",
-      );
-    }
     const gzip = gzipSync(bytes, { level: 9 }).length;
+    try {
+      if (shared !== variantBuild.shared) {
+        throw new Error(
+          `${output} must ${variantBuild.shared ? "" : "not "}import a shared memory; ` +
+            "check the threaded RUSTFLAGS and that CARGO_ENCODED_RUSTFLAGS is unset",
+        );
+      }
+      checkSizeBudget(output, gzip);
+    } catch (error) {
+      // Never leave a failed build where packaging would find it.
+      fs.rmSync(path.join(REPO_ROOT, variantBuild.outDir), { recursive: true, force: true });
+      throw error;
+    }
     console.log(
       `${output}: ${bytes.length} bytes raw, ${gzip} bytes gzip -9, ` +
         `${shared ? "shared" : "unshared"} memory`,

@@ -575,12 +575,12 @@ dependencies = [
 name = "primeval-wasm"
 version = "0.1.1"
 dependencies = [
+ "crossbeam-channel",
  "js-sys",
  "primeval-js",
  "primeval-render",
  "rayon",
  "wasm-bindgen",
- "wasm-bindgen-rayon",
 ]
 
 [[package]]
@@ -844,18 +844,6 @@ dependencies = [
  "quote",
  "syn 3.0.6",
  "wasm-bindgen-shared",
-]
-
-[[package]]
-name = "wasm-bindgen-rayon"
-version = "1.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a16c60a56c81e4dc3b9c43d76ba5633e1c0278211d59a9cb07d61b6cd1c6583"
-dependencies = [
- "crossbeam-channel",
- "js-sys",
- "rayon",
- "wasm-bindgen",
 ]
 
 [[package]]

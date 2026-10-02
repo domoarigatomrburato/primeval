@@ -3,7 +3,7 @@
   "version": "0.1.1",
   "private": false,
   "type": "module",
-  "description": "Approximate images with geometric shapes (triangles, ellipses, curves, polygons) and export SVG or PNG. Native Rust engine with a Node API and CLI.",
+  "description": "Approximate images with geometric shapes (triangles, ellipses, curves, polygons) and export SVG or PNG. Native Rust engine with a Node API and CLI, and a WebAssembly build for browsers.",
   "keywords": [
     "image",
     "svg",
@@ -17,6 +17,9 @@
     "generative-art",
     "rust",
     "napi",
+    "wasm",
+    "webassembly",
+    "browser",
     "cli"
   ],
   "homepage": "https://github.com/domoarigatomrburato/primeval#readme",
@@ -35,6 +38,10 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
+      "browser": {
+        "types": "./dist/browser.d.ts",
+        "default": "./dist/browser.js"
+      },
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
@@ -49,8 +56,15 @@
   "files": [
     "dist/*.js",
     "dist/index.d.ts",
+    "dist/browser.d.ts",
     "dist/errors.d.ts",
     "dist/types.d.ts",
+    "wasm/single/primeval.js",
+    "wasm/single/primeval_bg.wasm",
+    "wasm/single/snippets/**",
+    "wasm/threaded/primeval.js",
+    "wasm/threaded/primeval_bg.wasm",
+    "wasm/threaded/snippets/**",
     "binding.js",
     "README.md",
     "LICENSE"

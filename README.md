@@ -24,7 +24,7 @@ Give it an input image and it searches for a layered approximation you can expor
   </tr>
 </table>
 
-Inspired by Michael Fogleman's original [`primitive`](https://github.com/fogleman/primitive), this repository is an **independent Rust implementation** with a reusable core library (`primeval-core`) and an ESM-only Node package (`@aleburato/primeval`) that includes both a programmatic API and a Node CLI.
+Inspired by Michael Fogleman's original [`primitive`](https://github.com/fogleman/primitive), this repository is an **independent Rust implementation** with a reusable core library (`primeval-core`) and an ESM-only Node package (`@aleburato/primeval`) that includes both a programmatic API and a Node CLI, and runs the same API in the browser.
 
 ## Progression Gallery
 
@@ -36,6 +36,7 @@ Browse the full example gallery in [`docs/gallery.md`](docs/gallery.md). The sam
 - Nine shape modes in the CLI: mixed (`any`), triangle, rectangle, ellipse, circle, rotated rectangle, quadratic curve, rotated ellipse, and polygon
 - Optimization at a small working resolution, with the same shapes exported at a high output resolution
 - Vector export via SVG, plus raster output as PNG
+- The same API in the browser, through WebAssembly, multi-threaded on cross-origin isolated pages
 
 ## Install
 
@@ -274,6 +275,40 @@ Package notes:
 - Errors are `ValidationError`, `AbortError`, or `InternalError`, all subclasses of `PrimevalError`; see the table above.
 - For SVG results, `data` is a `string`; for raster results, `data` is a `Buffer`.
 - SVG output keeps the shapes at working resolution inside a `viewBox` and sets `width` and `height` to the output size, so it scales cleanly to any size. PNG output is an anti-aliased, opaque RGB image at the output size, with the same geometry as the SVG.
+
+## Browser
+
+The same package runs in the browser through WebAssembly, with the same `approximate()` and `toDataUri()`, the same options, defaults, error classes and codes, `onProgress`, and `AbortSignal`. Import it from `@aleburato/primeval` as on Node: the browser entry is the `browser` condition of the package's `exports`, which bundlers use when they build for the browser. Bundler builds (Vite, webpack) are not covered by the package's tests yet. Without a bundler, serve the package's files from the page's own origin (browsers start module workers only from the same origin) and map the name to `dist/browser.js` with an import map:
+
+```html
+<script type="importmap">
+  { "imports": { "@aleburato/primeval": "/node_modules/@aleburato/primeval/dist/browser.js" } }
+</script>
+<input type="file" accept="image/jpeg,image/png,image/webp" />
+<script type="module">
+  import { approximate } from "@aleburato/primeval";
+
+  document.querySelector("input").addEventListener("change", async (event) => {
+    const input = new Uint8Array(await event.target.files[0].arrayBuffer());
+    const result = await approximate({ input, output: "svg", render: { count: 200 } });
+    document.body.insertAdjacentHTML("beforeend", result.data);
+  });
+</script>
+```
+
+Browser notes:
+
+- `input` is a `Uint8Array`, for example `new Uint8Array(await file.arrayBuffer())`. For PNG results, `data` is a `Uint8Array`, not a `Buffer`; SVG results are a `string`, as on Node.
+- Threads: when the page is cross-origin isolated (`crossOriginIsolated` is `true`), the render uses a thread per logical core (`navigator.hardwareConcurrency`); otherwise it runs on one thread. Isolation needs both headers on the page, with `credentialless` instead of `require-corp` also accepted:
+
+  ```text
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+  ```
+
+- Each call runs in a Web Worker of its own, which ends when the call settles, so concurrent calls do not share memory and the page's main thread stays free. An `AbortSignal` terminates the worker at once.
+- A page downloads one of two WebAssembly builds, threaded or single-threaded, chosen before the download and compiled once per page: about 330 KB with brotli (about 440 KB with gzip), plus a few KB of JavaScript.
+- The same seed and options give the same output. Native and browser output currently match for the same seed, but this is not guaranteed across platforms.
 
 ## Alpha Comparison (Mona Lisa, 200 steps, mixed shape)
 

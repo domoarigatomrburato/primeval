@@ -4,8 +4,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { bindingMetadataForPackage } from "../../scripts/generate-binding.mjs";
+import { readRootPackageInputs, requiredRootFiles } from "../../scripts/release-packages.mjs";
 
 const repoRoot = process.cwd();
 const packageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
@@ -162,6 +164,57 @@ test("packed package can be installed and render in a consumer project", {
           `${file} imports ${specifier}.js, whose declarations are not shipped`,
         );
       }
+    }
+
+    // The browser entry under the `browser` condition, the Node entry without
+    // it, and nothing internal (the browser runtime's test-only export) under
+    // either.
+    const installedRoot = path.join(tempDir, "node_modules", "@aleburato", "primeval");
+    const resolve = (specifier, conditions) => {
+      const result = spawnSync(
+        process.execPath,
+        [
+          ...conditions.map((condition) => `--conditions=${condition}`),
+          "--input-type=module",
+          "-e",
+          `process.stdout.write(import.meta.resolve(${JSON.stringify(specifier)}));`,
+        ],
+        { cwd: tempDir, encoding: "utf8" },
+      );
+      return result.status === 0 ? fileURLToPath(result.stdout) : { stderr: result.stderr };
+    };
+    assert.equal(
+      resolve("@aleburato/primeval", ["browser"]),
+      fs.realpathSync(path.join(installedRoot, "dist", "browser.js")),
+    );
+    assert.equal(
+      resolve("@aleburato/primeval", []),
+      fs.realpathSync(path.join(installedRoot, "dist", "index.js")),
+    );
+    for (const conditions of [["browser"], []]) {
+      assert.match(
+        resolve("@aleburato/primeval/dist/browser-runtime.js", conditions).stderr ?? "",
+        /ERR_PACKAGE_PATH_NOT_EXPORTED/,
+      );
+    }
+    for (const file of ["browser.js", "browser.d.ts", "worker-single.js", "worker-threaded.js"]) {
+      assert.ok(shipped.includes(file), `dist/${file} must ship`);
+    }
+
+    // The wasm files ship when they are built (a clean checkout has none); the
+    // release requires all of them (scripts/release-packages.mjs verify-root).
+    const wasmFiles = requiredRootFiles(readRootPackageInputs(repoRoot)).filter((file) =>
+      file.startsWith("wasm/"),
+    );
+    for (const file of wasmFiles.filter((file) => fs.existsSync(path.join(repoRoot, file)))) {
+      assert.ok(fs.existsSync(path.join(installedRoot, file)), `${file} must ship`);
+    }
+    for (const variant of ["single", "threaded"]) {
+      const dir = path.join(installedRoot, "wasm", variant);
+      const declarations = fs.existsSync(dir)
+        ? fs.readdirSync(dir, { recursive: true }).filter((file) => file.endsWith(".d.ts"))
+        : [];
+      assert.deepEqual(declarations, [], `wasm/${variant} must not ship declarations`);
     }
 
     const fixturePath = path.join(repoRoot, "docs", "readme", "originals", "monalisa.jpg");

@@ -1,5 +1,6 @@
-// The messages between the browser runtime (browser-runtime.ts) and its
-// per-call worker (worker.ts). Types only.
+// The messages between the browser runtime (browser-runtime.ts), its per-call
+// worker (worker-single.ts or worker-threaded.ts) and, in the threaded build,
+// that worker's pool workers (worker-threaded.ts again). Types only.
 import type { RequestRenderOptions } from "./request.js";
 import type { ProgressInfo } from "./types.js";
 
@@ -16,7 +17,7 @@ export type PanicSite = "caller" | "pool";
 
 /** The one message the page sends a worker. */
 export interface WorkerRequest {
-  variant: WasmVariant;
+  type: "run";
   module: WebAssembly.Module;
   /** The page's per-call `BroadcastChannel` for panics on pool threads. */
   channel: string;
@@ -52,3 +53,17 @@ export type WorkerMessage =
   | { type: "error"; error: WorkerError }
   /** A panic on the worker's own thread, posted by the panic hook before the trap. */
   | { type: "panic"; message: string };
+
+/** The one message a threaded worker sends each of its pool workers. */
+export interface PoolWorkerInit {
+  type: "pool";
+  /** The page's compiled module. */
+  module: WebAssembly.Module;
+  /** The calling worker's shared memory. */
+  memory: WebAssembly.Memory;
+  /** The pool channel's receiver, a pointer into `memory`. */
+  receiver: number;
+}
+
+/** What a pool worker posts once, before it blocks in its rayon thread. */
+export type PoolWorkerMessage = { type: "ready" } | { type: "failed"; message: string };

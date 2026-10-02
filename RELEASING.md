@@ -53,10 +53,12 @@ When a `v*` tag is pushed, [.github/workflows/napi-prebuilds.yml](.github/workfl
 3. Build each native addon on a runner of its own platform. Linux GNU targets link against glibc 2.17 through `napi build --use-napi-cross`.
 4. Check each artifact with `scripts/check-artifact.mjs`: no AVX-512 (x86_64) or SVE (aarch64) instructions, and no glibc symbol newer than 2.17 on Linux.
 5. Smoke test each artifact with `scripts/smoke-test-addon.mjs`: load it through the package loader and render a small image to SVG and PNG.
-6. Assemble per-platform npm packages and verify that every expected package contains the correct `.node` payload.
-7. Publish with `scripts/release-packages.mjs publish`: every platform package, then the root package last, with provenance. A package whose version is already on the registry is skipped.
-8. Verify with `npm view` that every package is on the registry at the tag version, and fail otherwise.
-9. Create the GitHub Release with generated notes, unless it already exists.
+6. Build both WebAssembly builds for the browser entry with `npm run build:wasm`, on the pinned stable toolchain, the dated nightly, and the matching wasm-bindgen-cli (all pinned through `scripts/build-wasm.mjs`). The build fails if the threaded `.wasm` does not import a shared memory, the single-threaded one does, or either is over the size budget in that script.
+7. Assemble per-platform npm packages and verify that every expected package contains the correct `.node` payload.
+8. Put the wasm build in `wasm/`, build the root package, and check with `scripts/release-packages.mjs verify-root` (run by `publish` before it publishes anything) that its tarball has every `dist/` module and every wasm file both builds need. A missing or incomplete wasm build fails the release here.
+9. Publish with `scripts/release-packages.mjs publish`: every platform package, then the root package last, with provenance. A package whose version is already on the registry is skipped.
+10. Verify with `npm view` that every package is on the registry at the tag version, and fail otherwise.
+11. Create the GitHub Release with generated notes, unless it already exists.
 
 ## First Release
 
@@ -76,7 +78,7 @@ Re-run the failed workflow run for the same tag. Packages already published are 
 
 To test the build side of the release workflow without publishing, use the workflow's `workflow_dispatch` trigger from GitHub Actions.
 
-`workflow_dispatch` runs the build matrix, the artifact checks, and the smoke tests, but the publish and GitHub Release jobs only run for tagged refs.
+`workflow_dispatch` runs the build matrix, the artifact checks, the smoke tests, and the wasm build, but the publish and GitHub Release jobs only run for tagged refs.
 
 ## After Publish
 

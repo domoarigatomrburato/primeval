@@ -7,6 +7,8 @@ import { test } from "node:test";
 import {
   cargoBuildCommand,
   cargoClippyCommand,
+  checkSizeBudget,
+  GZIP_BUDGET_BYTES,
   importedMemory,
   lockedVersion,
   NIGHTLY_TOOLCHAIN,
@@ -100,6 +102,18 @@ name = "wasm-bindgen"
 version = "0.2.129"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 `;
+
+test("each .wasm has a budget of 512 KiB gzip -9", () => {
+  assert.equal(GZIP_BUDGET_BYTES, 512 * 1024);
+});
+
+test("checkSizeBudget passes a .wasm at the budget and fails one byte over", () => {
+  checkSizeBudget("wasm/single/primeval_bg.wasm", GZIP_BUDGET_BYTES);
+  assert.throws(() => checkSizeBudget("wasm/threaded/primeval_bg.wasm", GZIP_BUDGET_BYTES + 1), {
+    message:
+      "wasm/threaded/primeval_bg.wasm is 524289 bytes gzip -9, over the budget of 524288 bytes (512 KiB)",
+  });
+});
 
 test("lockedVersion reads one package's version from Cargo.lock", () => {
   assert.equal(lockedVersion(CARGO_LOCK, "wasm-bindgen"), "0.2.129");

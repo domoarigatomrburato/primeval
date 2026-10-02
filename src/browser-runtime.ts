@@ -1,11 +1,11 @@
 // The browser runtime behind browser.ts. Internal: not a public entry point.
 //
-// Each call runs in a fresh module worker (worker.ts) that is terminated when
-// the call settles, whatever the outcome; a terminated worker takes the
-// instance, its memory and its thread pool with it. The page picks the build
-// (threaded when cross-origin isolated, single-threaded otherwise) before
-// fetching anything, compiles its `.wasm` once, and posts the compiled module
-// to every worker.
+// Each call runs in a fresh module worker of its build (worker-single.ts or
+// worker-threaded.ts) that is terminated when the call settles, whatever the
+// outcome; a terminated worker takes the instance, its memory and its thread
+// pool (nested workers) with it. The page picks the build (threaded when
+// cross-origin isolated, single-threaded otherwise) before fetching anything,
+// compiles its `.wasm` once, and posts the compiled module to every worker.
 import { InternalError, mapNativeError } from "./errors.js";
 import { abortError, normalizeRequest } from "./request.js";
 import type { ProgressInfo } from "./types.js";
@@ -30,6 +30,13 @@ function wasmUrl(variant: WasmVariant): URL {
   return variant === "threaded"
     ? new URL("../wasm/threaded/primeval_bg.wasm", import.meta.url)
     : new URL("../wasm/single/primeval_bg.wasm", import.meta.url);
+}
+
+// Literal URLs, one per variant, so bundlers can see both workers.
+function startWorker(variant: WasmVariant): Worker {
+  return variant === "threaded"
+    ? new Worker(new URL("./worker-threaded.js", import.meta.url), { type: "module" })
+    : new Worker(new URL("./worker-single.js", import.meta.url), { type: "module" });
 }
 
 /** The compiled module of `variant`, once per page; a failure is retried next call. */
@@ -140,7 +147,7 @@ function runInWorker(
           channel = new BroadcastChannel(name);
           channel.onmessage = (event: MessageEvent<unknown>) =>
             fail(errorFromWorker({ code: "INTERNAL", message: String(event.data) }));
-          worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
+          worker = startWorker(variant);
           worker.onmessage = (event: MessageEvent<WorkerMessage>) => onMessage(event.data);
           worker.onerror = (event) => {
             event.preventDefault();
@@ -149,7 +156,7 @@ function runInWorker(
           worker.onmessageerror = () =>
             fail(new InternalError("a message from the primeval worker could not be read"));
           const request: WorkerRequest = {
-            variant,
+            type: "run",
             module,
             channel: name,
             progress: onProgress !== undefined,

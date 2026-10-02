@@ -1,13 +1,21 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import { test } from "node:test";
 
 import {
   assertTagMatchesVersion,
+  glueSnippets,
   parseNpmView,
   publishPackages,
+  readRootPackageInputs,
   releasePackages,
+  requiredRootFiles,
   verifyPublished,
+  verifyRootPackage,
 } from "../../scripts/release-packages.mjs";
+
+const repoRoot = process.cwd();
 
 const PKG = {
   name: "@aleburato/primeval",
@@ -140,4 +148,134 @@ test("post-publish verification fails and names every missing package", async ()
     /not on the registry: @aleburato\/primeval-linux-x64-gnu@1\.2\.3, @aleburato\/primeval@1\.2\.3/,
   );
   assert.deepEqual(sleeps, [10, 10]);
+});
+
+// --- Root package contents ---
+
+const GLUE = [
+  "import { broadcast } from './snippets/primeval-wasm-0123/inline0.js';",
+  "import { startWorkers } from './snippets/other-4567/src/helpers.js';",
+  "export function approximate() {}",
+].join("\n");
+
+const ROOT_INPUTS = {
+  pkg: { files: ["dist/*.js", "dist/index.d.ts", "wasm/single/snippets/**", "README.md"] },
+  sourceModules: ["index", "browser"],
+  glueSources: { single: GLUE, threaded: GLUE },
+};
+
+const COMPLETE_ROOT = [
+  "package.json",
+  "README.md",
+  "dist/index.js",
+  "dist/browser.js",
+  "dist/index.d.ts",
+  "wasm/single/primeval.js",
+  "wasm/single/primeval_bg.wasm",
+  "wasm/single/snippets/primeval-wasm-0123/inline0.js",
+  "wasm/single/snippets/other-4567/src/helpers.js",
+  "wasm/threaded/primeval.js",
+  "wasm/threaded/primeval_bg.wasm",
+  "wasm/threaded/snippets/primeval-wasm-0123/inline0.js",
+  "wasm/threaded/snippets/other-4567/src/helpers.js",
+];
+
+test("glueSnippets lists the snippets a wasm-bindgen glue imports", () => {
+  assert.deepEqual(glueSnippets(GLUE), [
+    "snippets/primeval-wasm-0123/inline0.js",
+    "snippets/other-4567/src/helpers.js",
+  ]);
+  assert.deepEqual(glueSnippets("export function f() {}"), []);
+});
+
+test("the root package needs every dist module, literal file and both wasm builds", () => {
+  assert.deepEqual(requiredRootFiles(ROOT_INPUTS).sort(), [...COMPLETE_ROOT].sort());
+});
+
+test("without a built glue, the root package still needs its glue and .wasm", () => {
+  const required = requiredRootFiles({ ...ROOT_INPUTS, glueSources: {} });
+  for (const variant of ["single", "threaded"]) {
+    assert.ok(required.includes(`wasm/${variant}/primeval.js`), variant);
+    assert.ok(required.includes(`wasm/${variant}/primeval_bg.wasm`), variant);
+  }
+});
+
+test("a complete root package passes", () => {
+  verifyRootPackage(requiredRootFiles(ROOT_INPUTS), COMPLETE_ROOT);
+});
+
+test("a root package without a wasm build fails and names every missing file", () => {
+  const required = requiredRootFiles(ROOT_INPUTS);
+  const packed = COMPLETE_ROOT.filter(
+    (file) => file !== "dist/browser.js" && !file.startsWith("wasm/threaded/"),
+  );
+  assert.throws(
+    () => verifyRootPackage(required, packed),
+    (error) => {
+      assert.match(error.message, /^the root package is missing /);
+      for (const file of [
+        "dist/browser.js",
+        "wasm/threaded/primeval.js",
+        "wasm/threaded/primeval_bg.wasm",
+        "wasm/threaded/snippets/primeval-wasm-0123/inline0.js",
+      ]) {
+        assert.ok(error.message.includes(file), file);
+      }
+      assert.ok(!error.message.includes("wasm/single/"));
+      return true;
+    },
+  );
+});
+
+test("the repository's root package needs every exports and bin target", () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
+  const required = requiredRootFiles(readRootPackageInputs(repoRoot));
+  const targets = [...JSON.stringify(pkg.exports).matchAll(/"\.\/((?:dist|wasm)\/[^"]+)"/g)].map(
+    ([, file]) => file,
+  );
+  assert.ok(targets.includes("dist/browser.js"));
+  for (const file of [...targets, ...Object.values(pkg.bin), "binding.js"]) {
+    assert.ok(required.includes(file), file);
+  }
+  for (const worker of ["dist/worker-single.js", "dist/worker-threaded.js"]) {
+    assert.ok(required.includes(worker), worker);
+  }
+});
+
+test("the release publishes the wasm build of its own workflow run", () => {
+  const workflow = fs.readFileSync(
+    path.join(repoRoot, ".github", "workflows", "napi-prebuilds.yml"),
+    "utf8",
+  );
+  const job = (name) => {
+    const start = workflow.indexOf(`\n  ${name}:\n`);
+    assert.notEqual(start, -1, `no ${name} job`);
+    const end = workflow.slice(start + 1).search(/\n {2}[a-z-]+:\n/);
+    return end === -1 ? workflow.slice(start) : workflow.slice(start, start + 1 + end);
+  };
+
+  const wasm = job("wasm");
+  assert.match(wasm, /- run: rustup toolchain install\n/);
+  assert.match(wasm, /- run: node scripts\/build-wasm\.mjs install-nightly\n/);
+  assert.match(
+    wasm,
+    /- run: cargo install wasm-bindgen-cli --locked --version "\$\(node scripts\/build-wasm\.mjs wasm-bindgen-version\)"\n/,
+  );
+  assert.match(wasm, /- run: npm run build:wasm\n/);
+  assert.match(wasm, /uses: actions\/upload-artifact@[0-9a-f]{40} /);
+  assert.match(wasm, /name: wasm\n\s+path: wasm\/\n\s+if-no-files-found: error\n/);
+  // No caches in the release workflow (zizmor cache-poisoning).
+  assert.doesNotMatch(wasm, /rust-cache|cache: npm/);
+  assert.match(wasm, /package-manager-cache: false/);
+
+  const publish = job("publish");
+  assert.match(publish, /needs: \[build, wasm\]/);
+  assert.match(
+    publish,
+    /uses: actions\/download-artifact@[0-9a-f]{40} [^\n]*\n\s+with:\n\s+name: wasm\n\s+path: wasm\n/,
+  );
+  assert.ok(
+    publish.indexOf("name: wasm") < publish.indexOf("release-packages.mjs publish"),
+    "the wasm build must be in place before publishing",
+  );
 });
