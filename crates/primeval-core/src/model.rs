@@ -202,7 +202,9 @@ impl Model {
     /// At each layer the committed shape is the bar, in its current colour,
     /// and independent hill climbs from it search for a better shape,
     /// alpha (when `alpha` is [`Alpha::Auto`]) and colour against a model of
-    /// the layers below and above; see `refine.rs`. With
+    /// the layers below and above, with moves that start at the greedy
+    /// search's size and shrink to one- and two-pixel moves as fewer are
+    /// kept; see `refine.rs`. With
     /// [`Alpha::Fixed`] every shape keeps its alpha. The climbs run as rayon
     /// tasks in the current pool, each on a random stream derived from the
     /// seed, the pass index, the layer and the climb, so the result does not
@@ -601,6 +603,50 @@ mod tests {
         assert_eq!(
             seeded_drawing_of(7, 2, 1, ShapeKind::Any, true, COARSE),
             seeded_drawing_of(7, 2, 1, ShapeKind::Any, false, COARSE),
+            "with a coarse random phase"
+        );
+    }
+
+    /// The 64-bit FNV-1a digest of `drawing`'s `Debug` form, which spells
+    /// every shape's coordinates, colour and alpha.
+    fn digest(drawing: &Drawing) -> u64 {
+        format!("{drawing:?}")
+            .bytes()
+            .fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+            })
+    }
+
+    /// Pins the greedy search, so that a change to the refit's moves cannot
+    /// change it: the digests of seeded drawings of every kind, recorded
+    /// before the refit got moves of its own.
+    #[test]
+    fn seeded_greedy_output_is_pinned() {
+        let pinned = [
+            (ShapeKind::Any, 0x9151b875372b0724),
+            (ShapeKind::Triangle, 0x0b2c1d60c966824f),
+            (ShapeKind::Rectangle, 0xdf2ad63d0504df61),
+            (ShapeKind::Ellipse, 0x76faeeaf75e15ce4),
+            (ShapeKind::Circle, 0x1cc7d6677aa8b599),
+            (ShapeKind::RotatedRectangle, 0xf5a0269435bfd504),
+            (ShapeKind::Quadratic, 0x1debfcef3c5c8312),
+            (ShapeKind::RotatedEllipse, 0x3ac662fa31867a07),
+            (ShapeKind::Polygon, 0xbf98d658c01b88e1),
+        ];
+        assert_eq!(pinned.len(), every_kind().len());
+        let actual: Vec<_> = pinned
+            .iter()
+            .map(|&(kind, _)| {
+                (
+                    kind,
+                    digest(&seeded_drawing_of(42, 2, 4, kind, true, SMALL)),
+                )
+            })
+            .collect();
+        assert_eq!(actual, pinned);
+        assert_eq!(
+            digest(&seeded_drawing_of(42, 2, 2, ShapeKind::Any, true, COARSE)),
+            0x4a7372c32d09ea93,
             "with a coarse random phase"
         );
     }

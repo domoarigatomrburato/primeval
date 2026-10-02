@@ -349,16 +349,17 @@ impl Shape {
         }
     }
 
-    pub(crate) fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>) {
+    /// Moves the shape by a move of size `step`.
+    pub(crate) fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>, step: Step) {
         match self {
-            Self::Triangle(shape) => shape.mutate(worker),
-            Self::Rectangle(shape) => shape.mutate(worker),
-            Self::Ellipse(shape) => shape.mutate(worker),
-            Self::Circle(shape) => shape.mutate(worker),
-            Self::RotatedRectangle(shape) => shape.mutate(worker),
-            Self::Quadratic(shape) => shape.mutate(worker),
-            Self::RotatedEllipse(shape) => shape.mutate(worker),
-            Self::Polygon(shape) => shape.mutate(worker),
+            Self::Triangle(shape) => shape.mutate(worker, step),
+            Self::Rectangle(shape) => shape.mutate(worker, step),
+            Self::Ellipse(shape) => shape.mutate(worker, step),
+            Self::Circle(shape) => shape.mutate(worker, step),
+            Self::RotatedRectangle(shape) => shape.mutate(worker, step),
+            Self::Quadratic(shape) => shape.mutate(worker, step),
+            Self::RotatedEllipse(shape) => shape.mutate(worker, step),
+            Self::Polygon(shape) => shape.mutate(worker, step),
         }
     }
 
@@ -457,7 +458,7 @@ impl Triangle {
             x3,
             y3,
         };
-        triangle.mutate(worker);
+        triangle.mutate(worker, Step::Coarse);
         triangle
     }
 
@@ -510,27 +511,24 @@ impl Triangle {
         &worker.lines
     }
 
-    fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>) {
+    fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>, step: Step) {
         const MARGIN: i32 = 16;
         loop {
             match worker.rng.random_range(0..3) {
                 0 => {
-                    self.x1 = (self.x1 + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                        .clamp(-MARGIN, worker.width - 1 + MARGIN);
-                    self.y1 = (self.y1 + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                        .clamp(-MARGIN, worker.height - 1 + MARGIN);
+                    let (dx1, dy1) = step.offsets(&mut worker.rng, POSITION_SIGMA);
+                    self.x1 = (self.x1 + dx1).clamp(-MARGIN, worker.width - 1 + MARGIN);
+                    self.y1 = (self.y1 + dy1).clamp(-MARGIN, worker.height - 1 + MARGIN);
                 }
                 1 => {
-                    self.x2 = (self.x2 + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                        .clamp(-MARGIN, worker.width - 1 + MARGIN);
-                    self.y2 = (self.y2 + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                        .clamp(-MARGIN, worker.height - 1 + MARGIN);
+                    let (dx2, dy2) = step.offsets(&mut worker.rng, POSITION_SIGMA);
+                    self.x2 = (self.x2 + dx2).clamp(-MARGIN, worker.width - 1 + MARGIN);
+                    self.y2 = (self.y2 + dy2).clamp(-MARGIN, worker.height - 1 + MARGIN);
                 }
                 _ => {
-                    self.x3 = (self.x3 + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                        .clamp(-MARGIN, worker.width - 1 + MARGIN);
-                    self.y3 = (self.y3 + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                        .clamp(-MARGIN, worker.height - 1 + MARGIN);
+                    let (dx3, dy3) = step.offsets(&mut worker.rng, POSITION_SIGMA);
+                    self.x3 = (self.x3 + dx3).clamp(-MARGIN, worker.width - 1 + MARGIN);
+                    self.y3 = (self.y3 + dy3).clamp(-MARGIN, worker.height - 1 + MARGIN);
                 }
             }
             if self.is_valid() {
@@ -585,19 +583,17 @@ impl Rectangle {
         &worker.lines
     }
 
-    fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>) {
+    fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>, step: Step) {
         match worker.rng.random_range(0..2) {
             0 => {
-                self.x1 = (self.x1 + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                    .clamp(0, worker.width - 1);
-                self.y1 = (self.y1 + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                    .clamp(0, worker.height - 1);
+                let (dx1, dy1) = step.offsets(&mut worker.rng, POSITION_SIGMA);
+                self.x1 = (self.x1 + dx1).clamp(0, worker.width - 1);
+                self.y1 = (self.y1 + dy1).clamp(0, worker.height - 1);
             }
             _ => {
-                self.x2 = (self.x2 + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                    .clamp(0, worker.width - 1);
-                self.y2 = (self.y2 + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                    .clamp(0, worker.height - 1);
+                let (dx2, dy2) = step.offsets(&mut worker.rng, POSITION_SIGMA);
+                self.x2 = (self.x2 + dx2).clamp(0, worker.width - 1);
+                self.y2 = (self.y2 + dy2).clamp(0, worker.height - 1);
             }
         }
     }
@@ -618,20 +614,19 @@ impl Ellipse {
         rasterize_ellipse(worker, self.x, self.y, self.rx, self.ry)
     }
 
-    fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>) {
+    fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>, step: Step) {
         match worker.rng.random_range(0..3) {
             0 => {
-                self.x = (self.x + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                    .clamp(0, worker.width - 1);
-                self.y = (self.y + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                    .clamp(0, worker.height - 1);
+                let (dx, dy) = step.offsets(&mut worker.rng, POSITION_SIGMA);
+                self.x = (self.x + dx).clamp(0, worker.width - 1);
+                self.y = (self.y + dy).clamp(0, worker.height - 1);
             }
             1 => {
-                self.rx = (self.rx + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
+                self.rx = (self.rx + step.offset(&mut worker.rng, POSITION_SIGMA))
                     .clamp(1, worker.width - 1)
             }
             _ => {
-                self.ry = (self.ry + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
+                self.ry = (self.ry + step.offset(&mut worker.rng, POSITION_SIGMA))
                     .clamp(1, worker.height - 1)
             }
         }
@@ -652,16 +647,15 @@ impl Circle {
         rasterize_ellipse(worker, self.x, self.y, self.r, self.r)
     }
 
-    fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>) {
+    fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>, step: Step) {
         match worker.rng.random_range(0..3) {
             0 => {
-                self.x = (self.x + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                    .clamp(0, worker.width - 1);
-                self.y = (self.y + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                    .clamp(0, worker.height - 1);
+                let (dx, dy) = step.offsets(&mut worker.rng, POSITION_SIGMA);
+                self.x = (self.x + dx).clamp(0, worker.width - 1);
+                self.y = (self.y + dy).clamp(0, worker.height - 1);
             }
             _ => {
-                self.r = (self.r + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
+                self.r = (self.r + step.offset(&mut worker.rng, POSITION_SIGMA))
                     .clamp(1, worker.width.min(worker.height) - 1)
             }
         }
@@ -706,7 +700,7 @@ impl RotatedRectangle {
             sy: worker.rng.random_range(1..33),
             angle: worker.rng.random_range(0..360),
         };
-        rect.mutate(worker);
+        rect.mutate(worker, Step::Coarse);
         rect
     }
 
@@ -721,21 +715,19 @@ impl RotatedRectangle {
         &worker.lines
     }
 
-    fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>) {
+    fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>, step: Step) {
         match worker.rng.random_range(0..3) {
             0 => {
-                self.x = (self.x + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                    .clamp(0, worker.width - 1);
-                self.y = (self.y + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                    .clamp(0, worker.height - 1);
+                let (dx, dy) = step.offsets(&mut worker.rng, POSITION_SIGMA);
+                self.x = (self.x + dx).clamp(0, worker.width - 1);
+                self.y = (self.y + dy).clamp(0, worker.height - 1);
             }
             1 => {
-                self.sx = (self.sx + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                    .clamp(1, worker.width - 1);
-                self.sy = (self.sy + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                    .clamp(1, worker.height - 1);
+                let (dsx, dsy) = step.offsets(&mut worker.rng, POSITION_SIGMA);
+                self.sx = (self.sx + dsx).clamp(1, worker.width - 1);
+                self.sy = (self.sy + dsy).clamp(1, worker.height - 1);
             }
-            _ => self.angle += gaussian_sample(&mut worker.rng, ANGLE_SIGMA) as i32,
+            _ => self.angle += step.offset(&mut worker.rng, ANGLE_SIGMA),
         }
     }
 }
@@ -780,7 +772,7 @@ impl Quadratic {
             y3,
             width: Self::STROKE_WIDTH,
         };
-        quadratic.mutate(worker);
+        quadratic.mutate(worker, Step::Coarse);
         quadratic
     }
 
@@ -965,7 +957,7 @@ impl Quadratic {
         )
     }
 
-    fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>) {
+    fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>, step: Step) {
         let min_coord = -Self::MUTATE_MARGIN;
         let max_x = f64::from(worker.width - 1) + Self::MUTATE_MARGIN;
         let max_y = f64::from(worker.height - 1) + Self::MUTATE_MARGIN;
@@ -975,21 +967,21 @@ impl Quadratic {
         for _ in 0..Self::MAX_MUTATE_ATTEMPTS {
             match choice {
                 0 => {
-                    self.x1 = (self.x1 + gaussian_sample(&mut worker.rng, POSITION_SIGMA))
+                    self.x1 = (self.x1 + step.offset_f64(&mut worker.rng, POSITION_SIGMA))
                         .clamp(min_coord, max_x);
-                    self.y1 = (self.y1 + gaussian_sample(&mut worker.rng, POSITION_SIGMA))
+                    self.y1 = (self.y1 + step.offset_f64(&mut worker.rng, POSITION_SIGMA))
                         .clamp(min_coord, max_y);
                 }
                 1 => {
-                    self.x2 = (self.x2 + gaussian_sample(&mut worker.rng, POSITION_SIGMA))
+                    self.x2 = (self.x2 + step.offset_f64(&mut worker.rng, POSITION_SIGMA))
                         .clamp(min_coord, max_x);
-                    self.y2 = (self.y2 + gaussian_sample(&mut worker.rng, POSITION_SIGMA))
+                    self.y2 = (self.y2 + step.offset_f64(&mut worker.rng, POSITION_SIGMA))
                         .clamp(min_coord, max_y);
                 }
                 _ => {
-                    self.x3 = (self.x3 + gaussian_sample(&mut worker.rng, POSITION_SIGMA))
+                    self.x3 = (self.x3 + step.offset_f64(&mut worker.rng, POSITION_SIGMA))
                         .clamp(min_coord, max_x);
-                    self.y3 = (self.y3 + gaussian_sample(&mut worker.rng, POSITION_SIGMA))
+                    self.y3 = (self.y3 + step.offset_f64(&mut worker.rng, POSITION_SIGMA))
                         .clamp(min_coord, max_y);
                 }
             }
@@ -1046,21 +1038,21 @@ impl RotatedEllipse {
         &worker.lines
     }
 
-    fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>) {
+    fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>, step: Step) {
         match worker.rng.random_range(0..3) {
             0 => {
-                self.x = (self.x + gaussian_sample(&mut worker.rng, POSITION_SIGMA))
+                self.x = (self.x + step.offset_f64(&mut worker.rng, POSITION_SIGMA))
                     .clamp(0.0, f64::from(worker.width - 1));
-                self.y = (self.y + gaussian_sample(&mut worker.rng, POSITION_SIGMA))
+                self.y = (self.y + step.offset_f64(&mut worker.rng, POSITION_SIGMA))
                     .clamp(0.0, f64::from(worker.height - 1));
             }
             1 => {
-                self.rx = (self.rx + gaussian_sample(&mut worker.rng, POSITION_SIGMA))
+                self.rx = (self.rx + step.offset_f64(&mut worker.rng, POSITION_SIGMA))
                     .clamp(1.0, f64::from(worker.width - 1));
-                self.ry = (self.ry + gaussian_sample(&mut worker.rng, POSITION_SIGMA))
+                self.ry = (self.ry + step.offset_f64(&mut worker.rng, POSITION_SIGMA))
                     .clamp(1.0, f64::from(worker.height - 1));
             }
-            _ => self.angle += gaussian_sample(&mut worker.rng, ANGLE_SIGMA),
+            _ => self.angle += step.offset_f64(&mut worker.rng, ANGLE_SIGMA),
         }
     }
 }
@@ -1087,7 +1079,7 @@ impl Polygon {
             y[i] = y0 + worker.rng.random::<f64>() * 40.0 - 20.0;
         }
         let mut polygon = Self { order, x, y };
-        polygon.mutate(worker);
+        polygon.mutate(worker, Step::Coarse);
         polygon
     }
 
@@ -1108,7 +1100,7 @@ impl Polygon {
         &worker.lines
     }
 
-    fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>) {
+    fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>, step: Step) {
         const MARGIN: f64 = 16.0;
         if worker.rng.random::<f64>() < 0.25 {
             let i = worker.rng.random_range(0..self.order);
@@ -1117,9 +1109,9 @@ impl Polygon {
             self.y.swap(i, j);
         } else {
             let i = worker.rng.random_range(0..self.order);
-            self.x[i] = (self.x[i] + gaussian_sample(&mut worker.rng, POSITION_SIGMA))
+            self.x[i] = (self.x[i] + step.offset_f64(&mut worker.rng, POSITION_SIGMA))
                 .clamp(-MARGIN, f64::from(worker.width - 1) + MARGIN);
-            self.y[i] = (self.y[i] + gaussian_sample(&mut worker.rng, POSITION_SIGMA))
+            self.y[i] = (self.y[i] + step.offset_f64(&mut worker.rng, POSITION_SIGMA))
                 .clamp(-MARGIN, f64::from(worker.height - 1) + MARGIN);
         }
     }
@@ -1128,6 +1120,62 @@ impl Polygon {
 fn gaussian_sample<R: Rng>(rng: &mut R, sigma: f64) -> f64 {
     let sample: f64 = StandardNormal.sample(rng);
     sample * sigma
+}
+
+/// The size of a move ([`Shape::mutate`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Step {
+    /// The greedy search's moves: normal offsets with `σ` of
+    /// [`POSITION_SIGMA`] px and [`ANGLE_SIGMA`] degrees, truncated toward
+    /// zero on integer coordinates.
+    Coarse,
+    /// Normal offsets with `σ` scaled by the factor, rounded on integer
+    /// coordinates and drawn again while all of a move's integer offsets
+    /// round to zero.
+    Scaled(f64),
+}
+
+impl Step {
+    /// The offset of one integer coordinate, with `sigma` at the coarse
+    /// scale.
+    fn offset<R: Rng>(self, rng: &mut R, sigma: f64) -> i32 {
+        match self {
+            Self::Coarse => gaussian_sample(rng, sigma) as i32,
+            Self::Scaled(scale) => loop {
+                let offset = gaussian_sample(rng, sigma * scale).round() as i32;
+                if offset != 0 {
+                    return offset;
+                }
+            },
+        }
+    }
+
+    /// The offsets of two integer coordinates that move together, with
+    /// `sigma` at the coarse scale.
+    fn offsets<R: Rng>(self, rng: &mut R, sigma: f64) -> (i32, i32) {
+        match self {
+            Self::Coarse => (
+                gaussian_sample(rng, sigma) as i32,
+                gaussian_sample(rng, sigma) as i32,
+            ),
+            Self::Scaled(scale) => loop {
+                let x = gaussian_sample(rng, sigma * scale).round() as i32;
+                let y = gaussian_sample(rng, sigma * scale).round() as i32;
+                if (x, y) != (0, 0) {
+                    return (x, y);
+                }
+            },
+        }
+    }
+
+    /// The offset of one float coordinate, with `sigma` at the coarse
+    /// scale.
+    fn offset_f64<R: Rng>(self, rng: &mut R, sigma: f64) -> f64 {
+        match self {
+            Self::Coarse => gaussian_sample(rng, sigma),
+            Self::Scaled(scale) => gaussian_sample(rng, sigma * scale),
+        }
+    }
 }
 
 /// The integer-centred ellipse rasterizer treats `(x, y)` as a pixel centre
@@ -1512,7 +1560,7 @@ mod tests {
         let mut shape = Shape::Circle(Circle { x: 10, y: 10, r: 4 });
         let mut radii = std::collections::BTreeSet::new();
         for _ in 0..500 {
-            shape.mutate(&mut worker);
+            shape.mutate(&mut worker, Step::Coarse);
             let &Shape::Circle(circle) = &shape else {
                 panic!("expected circle")
             };
@@ -1604,7 +1652,7 @@ mod tests {
                 width: 0.5,
             };
 
-            quadratic.mutate(&mut worker);
+            quadratic.mutate(&mut worker, Step::Coarse);
             assert!(quadratic.is_valid(), "seed {seed} produced invalid shape");
         }
     }
@@ -1756,15 +1804,53 @@ mod tests {
             for &kind in ShapeKind::all_kinds() {
                 for sample in 0..150 {
                     let mut shape = Shape::random(kind, &mut worker, &round);
-                    for step in 0..4 {
-                        let context = format!("{kind:?} sample {sample} step {step}");
+                    let steps = [
+                        Step::Coarse,
+                        Step::Coarse,
+                        Step::Coarse,
+                        Step::Coarse,
+                        Step::Scaled(1.0),
+                        Step::Scaled(crate::refine::MIN_SCALE),
+                        Step::Scaled(crate::refine::MIN_SCALE),
+                    ];
+                    for (index, step) in steps.into_iter().enumerate() {
+                        let context = format!("{kind:?} sample {sample} step {index}");
                         let lines = shape.rasterize(&mut worker).to_vec();
                         assert_lines_well_formed(&lines, width as i32, height as i32, &context);
-                        shape.mutate(&mut worker);
+                        shape.mutate(&mut worker, step);
                     }
+                    let lines = shape.rasterize(&mut worker).to_vec();
+                    let context = format!("{kind:?} sample {sample} last step");
+                    assert_lines_well_formed(&lines, width as i32, height as i32, &context);
                 }
             }
         }
+    }
+
+    /// Scaled integer offsets are rounded and never zero: a single offset
+    /// is non-zero, and a pair is not both zero, though one of them can
+    /// be. At the refit's smallest scale they are one- and two-pixel
+    /// moves, while a coarse offset is often zero.
+    #[test]
+    fn scaled_integer_offsets_are_never_zero() {
+        let mut rng = crate::rng::create_rng(0x0ff5);
+        let fine = Step::Scaled(crate::refine::MIN_SCALE);
+        let (mut small, mut axis) = (0, 0);
+        for _ in 0..2000 {
+            let offset = fine.offset(&mut rng, POSITION_SIGMA);
+            assert!(offset != 0 && offset.abs() <= 6, "{offset}");
+            small += usize::from(offset.abs() <= 2);
+            let (x, y) = fine.offsets(&mut rng, POSITION_SIGMA);
+            assert!((x, y) != (0, 0) && x.abs() <= 6 && y.abs() <= 6, "{x}, {y}");
+            axis += usize::from(x == 0 || y == 0);
+            assert_ne!(Step::Scaled(1.0).offset(&mut rng, ANGLE_SIGMA), 0);
+        }
+        assert!(small > 1800, "{small} of 2000 offsets within 2 px");
+        assert!(axis > 500, "{axis} of 2000 pairs move along one axis");
+        let zero = (0..2000)
+            .filter(|_| Step::Coarse.offset(&mut rng, POSITION_SIGMA) == 0)
+            .count();
+        assert!(zero > 50, "{zero} of 2000 coarse offsets are zero");
     }
 
     #[test]
@@ -1791,7 +1877,7 @@ mod tests {
             angle: 0.0,
         });
         for _ in 0..200 {
-            shape.mutate(&mut worker);
+            shape.mutate(&mut worker, Step::Coarse);
             let Shape::RotatedEllipse(ellipse) = &shape else {
                 panic!("expected a rotated ellipse");
             };

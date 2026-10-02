@@ -1,3 +1,4 @@
+use crate::refine::StepScale;
 use crate::state::State;
 use crate::worker::{SearchRound, WorkerCtx};
 use rand::Rng;
@@ -34,11 +35,13 @@ pub(crate) fn hill_climb<R: Rng>(
 /// any evaluator: `evaluate` scores a state as an energy, lower is better,
 /// and a payload that travels with it (the refit's fitted colour, say).
 ///
-/// The moves are [`State::do_move`] and [`State::undo_move`], as in
-/// [`hill_climb`]: a move is kept only if its energy is strictly lower than
-/// the best so far, and the climb stops after `max_age` consecutive moves
-/// that are not. Returns the best state with its energy and payload; an
-/// energy that is not a number never counts as lower.
+/// The moves are [`State::do_move_by`] and [`State::undo_move`]: a move is
+/// kept only if its energy is strictly lower than the best so far, and the
+/// climb stops after `max_age` consecutive moves that are not. Unlike
+/// [`hill_climb`]'s coarse moves, their size adapts: it starts at the
+/// coarse scale and follows the 1/5th success rule ([`StepScale`]).
+/// Returns the best state with its energy and payload; an energy that is
+/// not a number never counts as lower.
 #[must_use]
 pub(crate) fn climb<R: Rng, T>(
     start: State,
@@ -51,11 +54,14 @@ pub(crate) fn climb<R: Rng, T>(
     let mut best = current.clone();
     let (mut best_energy, mut best_payload) = scored;
     let mut age = 0;
+    let mut scale = StepScale::START;
 
     while age < max_age {
-        let undo = current.do_move(worker);
+        let undo = current.do_move_by(worker, scale.step());
         let (energy, payload) = evaluate(&current, worker);
-        if energy < best_energy {
+        let kept = energy < best_energy;
+        scale.update(kept);
+        if kept {
             best_energy = energy;
             best_payload = payload;
             best = current.clone();
@@ -104,6 +110,39 @@ mod tests {
         });
 
         assert_eq!((best, energy, payload, calls), (start, 1.0, 0, 20));
+    }
+
+    /// A climb's moves start coarse and, while every move is rejected,
+    /// shrink to the refit's smallest scale within 16 moves.
+    #[test]
+    fn climb_moves_shrink_while_rejected() {
+        let (mut worker, _round) = round(256, 256);
+        let start = State::new(
+            Shape::Circle(Circle {
+                x: 128,
+                y: 128,
+                r: 40,
+            }),
+            fixed_alpha(128),
+        );
+        let mut moves = Vec::new();
+        let _ = climb(start, (0.0, ()), &mut worker, 200, |state, _| {
+            let Shape::Circle(circle) = state.shape else {
+                panic!("expected a circle");
+            };
+            let distance = (circle.x - 128).abs().max((circle.y - 128).abs());
+            moves.push(distance.max((circle.r - 40).abs()));
+            (1.0, ())
+        });
+
+        assert_eq!(moves.len(), 200);
+        assert!(moves[..8].iter().any(|&size| size > 8), "{:?}", &moves[..8]);
+        assert!(moves.iter().all(|&size| size > 0), "a move went nowhere");
+        assert!(
+            moves[16..].iter().all(|&size| size <= 6),
+            "{:?}",
+            &moves[16..]
+        );
     }
 
     #[test]

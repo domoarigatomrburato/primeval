@@ -53,11 +53,15 @@
 //! At each layer the committed shape, evaluated with its current colour, is
 //! the bar. [`ROUNDS`] independent hill climbs ([`climb`]) from the
 //! committed shape and alpha then search with the fitted colour, as rayon
-//! tasks, each on its own [`refine_rng`] stream; the best climb wins, ties
-//! going to the lowest round, and replaces the committed shape only if it
-//! is strictly below the bar. The result does not depend on the number of
-//! threads or on scheduling. [`crate::Model::refine`] then verifies the
-//! pass on the exact canvas and keeps it only if the exact score improved.
+//! tasks, each on its own [`refine_rng`] stream. Their moves start at the
+//! greedy search's coarse size and adapt to how often they are kept
+//! ([`StepScale`]), down to one- and two-pixel moves that polish the
+//! shape; a climb stops after [`AGE`] moves in a row are not kept. The
+//! best climb wins, ties going to the lowest round, and replaces the
+//! committed shape only if it is strictly below the bar. The result does
+//! not depend on the number of threads or on scheduling.
+//! [`crate::Model::refine`] then verifies the pass on the exact canvas and
+//! keeps it only if the exact score improved.
 
 use crate::alpha::Alpha;
 use crate::buffer::{BYTES_PER_PIXEL, Buffer};
@@ -67,6 +71,7 @@ use crate::optimize::climb;
 use crate::rng::refine_rng;
 use crate::scanline::{Scanline, clamp_line};
 use crate::score;
+use crate::shapes::Step;
 use crate::state::State;
 use crate::worker::WorkerCtx;
 use rand::Rng;
@@ -74,23 +79,78 @@ use rayon::prelude::*;
 
 /// Independent hill climbs per layer of a refit pass.
 ///
-/// [`ROUNDS`] and [`AGE`] were chosen by mean score gain per refine second
-/// with the engine runner (`--shapes any,triangle,rotated-ellipse --steps
-/// 100,200 --refine end:1`, Apple M3). At 100 steps, the mean score gain
-/// and the refine time as a share of the greedy time were: `R = 16`,
-/// `AGE = 100`: 8.1 %, 0.92; `8, 200`: 8.9 %, 1.11; `8, 100`: 7.4 %, 0.51;
-/// `8, 50`: 5.5 %, 0.22; `4, 100`: 6.4 %, 0.31; `4, 50`: 4.6 %, 0.15. The
-/// gain per second only grows as the budget shrinks (`4, 25`: 2.9 %, 0.07;
-/// `2, 50`: 3.6 %, 0.12), and at equal time two cheap passes match one
-/// larger one, so there is no best budget: these are the most efficient
-/// point of the grid `R ∈ {4, 8, 16}`, `AGE ∈ {50, 100, 200}`. Times are
-/// shares of the same run's greedy time, which drifted by up to 1.5× from
-/// run to run.
+/// [`ROUNDS`] and [`AGE`] were first chosen for coarse moves, by mean score
+/// gain per refine second with the engine runner (`--shapes
+/// any,triangle,rotated-ellipse --steps 100,200 --refine end:1`, Apple M3).
+/// At 100 steps, the mean score gain and the refine time as a share of the
+/// greedy time were: `R = 16`, `AGE = 100`: 8.1 %, 0.92; `8, 200`: 8.9 %,
+/// 1.11; `8, 100`: 7.4 %, 0.51; `8, 50`: 5.5 %, 0.22; `4, 100`: 6.4 %,
+/// 0.31; `4, 50`: 4.6 %, 0.15. The gain per second only grows as the budget
+/// shrinks (`4, 25`: 2.9 %, 0.07; `2, 50`: 3.6 %, 0.12), and at equal time
+/// two cheap passes match one larger one, so there is no best budget:
+/// `4, 50` was the most efficient point of the grid `R ∈ {4, 8, 16}`,
+/// `AGE ∈ {50, 100, 200}`. Times are shares of the same run's greedy time,
+/// which drifted by up to 1.5× from run to run.
+///
+/// Adapted moves ([`StepScale`]) make each climb longer: a kept fine move
+/// restarts the age. [`AGE`] was then halved to keep the refine time of the
+/// coarse `4, 50`; see [`StepScale`].
 pub(crate) const ROUNDS: u64 = 4;
 
 /// Consecutive non-improving moves after which a refit climb stops; see
 /// [`ROUNDS`].
-pub(crate) const AGE: usize = 50;
+pub(crate) const AGE: usize = 25;
+
+/// The factor by which a kept move scales a refit climb's moves up; see
+/// [`StepScale`].
+pub(crate) const SCALE_UP: f64 = 2.0;
+
+/// The factor by which a rejected move scales a refit climb's moves down,
+/// `SCALE_UP^(−1/4)`, so that the scale holds still when one move in five
+/// is kept; see [`StepScale`].
+pub(crate) const SCALE_DOWN: f64 = 0.840_896_415_253_714_5;
+
+/// The smallest scale of a refit climb's moves: `σ` of 1 px for positions
+/// and 2° for angles, against the coarse 16 px and 32°; see [`StepScale`].
+pub(crate) const MIN_SCALE: f64 = 1.0 / 16.0;
+
+/// The scale of a refit climb's moves ([`Step::Scaled`]), adapted by the
+/// 1/5th success rule: a climb starts at the coarse scale, `1`, which a
+/// kept move multiplies by [`SCALE_UP`] and a rejected one by
+/// [`SCALE_DOWN`], within `MIN_SCALE..=1`. From a committed shape most
+/// coarse moves fail, so the scale falls to [`MIN_SCALE`] within 16
+/// rejections and the climb polishes with one- and two-pixel moves; a kept
+/// move widens it again.
+///
+/// Chosen with the engine runner (`--refine end:1 --steps 50,100,200`, the
+/// default corpus, Apple M3) against coarse moves at `4, 50`, by the change
+/// of the median `rmse256` against greedy at 100 and 200 steps. At about
+/// the same refine time, `4, 25` with this rule gave, over all rows,
+/// −5.6 % and −5.4 % (coarse: −4.7 %, −3.6 %); for `any`, −10.5 % and
+/// −10.6 % (−5.7 %, −5.1 %); for `triangle`, −5.5 % and −6.5 % (−2.8 %,
+/// −2.9 %). Every kind gained at least as much as with coarse moves;
+/// circle, ellipse and `quadratic` gained least. The rule at `4, 50` cost
+/// twice the time; alternating coarse moves with fixed fine ones (`σ` of
+/// 1.5 px) gained less at every time; `SCALE_UP = 3` and a smallest `σ` of
+/// 2 px gained no more.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct StepScale(f64);
+
+impl StepScale {
+    /// The scale a climb starts from: the coarse moves' `σ`.
+    pub(crate) const START: Self = Self(1.0);
+
+    /// The size of the next move.
+    pub(crate) fn step(self) -> Step {
+        Step::Scaled(self.0)
+    }
+
+    /// Adapts the scale to whether the last move was `kept`.
+    pub(crate) fn update(&mut self, kept: bool) {
+        let factor = if kept { SCALE_UP } else { SCALE_DOWN };
+        self.0 = (self.0 * factor).clamp(MIN_SCALE, 1.0);
+    }
+}
 
 /// The memory the canvas checkpoints of a pass may take, in bytes.
 const CHECKPOINT_BUDGET: usize = 64 << 20;
@@ -830,6 +890,36 @@ mod tests {
                 "{kind:?}"
             );
         }
+    }
+
+    /// The 1/5th success rule: a kept move scales up by [`SCALE_UP`], a
+    /// rejected one down by [`SCALE_DOWN`], within `MIN_SCALE..=1`, and one
+    /// kept move in five holds the scale still.
+    #[test]
+    fn step_scale_follows_the_one_fifth_rule() {
+        let mut scale = StepScale::START;
+        assert_eq!(scale.step(), Step::Scaled(1.0));
+        scale.update(true);
+        assert_eq!(scale, StepScale(1.0), "clamped at the coarse scale");
+        scale.update(false);
+        assert_eq!(scale, StepScale(SCALE_DOWN));
+
+        let mut rejections = 1;
+        while scale != StepScale(MIN_SCALE) && rejections < 100 {
+            scale.update(false);
+            rejections += 1;
+        }
+        assert_eq!(rejections, 16, "2^(-1/4) per rejection reaches 1/16");
+        scale.update(false);
+        assert_eq!(scale, StepScale(MIN_SCALE), "clamped at the smallest");
+        scale.update(true);
+        assert_eq!(scale, StepScale(2.0 * MIN_SCALE));
+
+        let before = scale.0;
+        for kept in [true, false, false, false, false] {
+            scale.update(kept);
+        }
+        assert!((scale.0 / before - 1.0).abs() < 1e-12, "{scale:?}");
     }
 
     #[test]

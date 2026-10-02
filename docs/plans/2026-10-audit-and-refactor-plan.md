@@ -481,7 +481,7 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
   - A top-down pass re-optimises each shape at its own layer, against an affine model of the layers above. That model includes the integer pipeline's mean truncation.
   - The pass is then verified on the exact canvas and reverted if it does not improve.
   - It is deterministic across thread counts.
-  - Tuned constants: 4 climbs per layer, age 50.
+  - Tuned constants: 4 climbs per layer, age 25, with step-adapted moves (step 3 below).
 - **Adopted** (`192714e`). `approximate` ends with one pass, cancellable between layers (`Model::refine_unless`).
   - The progress contract changed accordingly: the streamed shapes are the greedy preview, and the result keeps their number, order and kind but may revise them.
   - The demo shows "Refining" after the last step, then replaces the preview with the final SVG.
@@ -509,24 +509,50 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
   - At 500 shapes only part of the score gain reaches the export: the median score falls 6.0% but rmse256 only 3.4%, and the gap rises from 4.6% to 5.8%. The pass partly fits the engine's own rounding.
   - At a fixed shape count, A1 is a real but modest gain. Per second of compute, it is no better than adding greedy shapes, so it matters only where the shape count is fixed, which is the placeholder case.
 
-**Done:** 1, the measurement fix (runner metrics and summaries); 2, A1 in `approximate` (`192714e`).
+**Step-adapted moves in the refit climb (step 3, adopted).**
+- **Method.**
+  - Each refit climb's moves start at the greedy search's coarse size (`σ` 16 px, 32°, alpha ±10).
+  - Their size follows the 1/5th success rule: ×2 after a kept move, ×2^(−1/4) after a rejected one, down to `σ` 1 px, 2° and alpha ±3.
+  - Integer offsets are rounded and never zero.
+  - The age halves to 25, which keeps the refine time of the old pass.
+  - Greedy's moves are unchanged and pinned by a test.
+- **Median change against greedy** at about the old pass's refine time, as score / rmse256:
 
-**Next, in order.** This order was decided after an independent review; B is not next. Success and kill thresholds are on median rmse256, overall and for `any` and `triangle`.
+| Shapes | All kinds | `any` | `triangle` |
+| ---: | --- | --- | --- |
+| 50 | −4.7% / −4.7% | −8.6% / −8.5% | −6.1% / −6.0% |
+| 100 | −5.9% / −5.6% | −10.5% / −10.5% | −6.6% / −5.5% |
+| 200 | −9.6% / −5.4% | −11.0% / −10.6% | −8.4% / −6.5% |
+| 500 | −11.8% / −10.2% | −12.8% / −11.0% | −10.2% / −6.9% |
 
-3. **Fine, step-adapted moves in the refit climb.**
-   - **Problem:** today's moves are `N(0, 16 px)` and `N(0, 32°)` with no step adaptation, so a climb proposes very few one-pixel moves.
-   - **Change:** alternate a small move, or adapt σ by the 1/5th rule.
-   - **Success:** at least 1.5× the gain of the current pass at about the same time. **Kill:** less than one extra point, which also weakens B's premise.
-4. **Remove and re-add the weakest shapes.**
+- **Against the coarse pass** (rmse256 at 100 / 200 shapes):
+  - `any` −5.7% / −5.1%, `triangle` −2.8% / −2.9%, all kinds −4.7% / −3.6%;
+  - `any` and `triangle` gain 1.8–2.2×, polygon, rotated ellipse, rectangle and rotated rectangle 1.7–2.9×, and no kind loses;
+  - circle, ellipse and `quadratic` barely react, and the median over all 45 rows falls on one of their rows at 100 shapes.
+- **Variants that lost:**
+  - alternating coarse moves with fixed 1.5 px moves gained less at every time;
+  - `SCALE_UP = 3` and a 2 px floor gained no more;
+  - the same rule at age 50 doubles the time.
+- **Fine polish pays**, so step 6 stays open.
+- **The engine–export gap widens.** At 200 shapes the score falls 9.6% but rmse256 only 5.4%, and the median gap at 500 rises to +6.6%. The search increasingly fits the engine's own rounding, which makes the agreement step the next one.
+
+**Done:**
+1. The measurement fix (runner metrics and summaries).
+2. A1 in `approximate` (`192714e`).
+3. Step-adapted refit moves.
+
+**Next, in order.** This order was decided after an independent review, and revised after step 3; B is not next. Success and kill thresholds are on median rmse256, overall and for `any` and `triangle`; overall medians alone can sit on a kind that does not react.
+
+4. **Engine and export agreement.**
+   - **Check:** does the engine's per-layer integer rounding explain the gap and its growth with the layer count? Compare the engine's blend with the exporter's compositing on a long stack of layers.
+   - **Change, if it does:** make the engine round as the export does, so that the search optimises what it exports. Greedy changes too, so this needs a new baseline.
+   - **Success:** the 500-shape median gap falls below 2% and rmse256 improves at every checkpoint. **Kill:** the gap has another cause.
+5. **Remove and re-add the weakest shapes.**
    - A1's per-layer bar already gives each shape's leave-one-out energy.
    - Re-add the lowest-contributing 10% by greedy steps.
    - **Success:** a further 3%, with unchanged bytes. **Kill:** less than 1%.
-5. **Engine and export agreement at high counts.**
-   - **Check:** does the per-layer rounding explain the gap's growth with the layer count? Compare the engine's integer blend with the exporter's compositing on a long stack of layers.
-   - **Change, if it does:** make the engine round as the export does, so that the search optimises what it exports.
-   - **Success:** the 500-shape median gap falls below 2% and rmse256 improves. **Kill:** the gap has another cause.
-6. **B pilot, only if step 3 shows that fine polish pays.**
-   - The gap diagnosis removed the fidelity argument for smooth coverage, so B must win on search quality alone.
+6. **B pilot** (step 3 showed that fine polish pays).
+   - The gap diagnosis removed the fidelity argument for smooth coverage, and step-adapted moves already capture much of the polish, so B must win on search quality alone, against the adapted refit.
    - **Design:** triangles only; colour stays the closed-form fit; Adam on geometry and alpha; coordinates quantised to 0.25 px at export; then snap, exact verify, and one cheap A1 pass.
    - **Baseline:** the best A1 at equal time, not greedy.
    - **Success:** at least 3 points better, at most +10% SVG bytes, and at most 2× greedy time in single-threaded wasm.

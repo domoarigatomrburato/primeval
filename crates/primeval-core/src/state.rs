@@ -1,10 +1,17 @@
 use crate::alpha::Alpha;
-use crate::shapes::Shape;
+use crate::shapes::{Shape, Step};
 use crate::worker::{SearchRound, WorkerCtx};
 use rand::{Rng, RngExt};
 
 /// Alpha a search starts from when the alpha is automatic.
 const AUTO_ALPHA_START: u8 = 128;
+
+/// How far a coarse move changes the alpha, either way, when the alpha is
+/// automatic.
+const ALPHA_STEP: i32 = 10;
+
+/// How far a scaled move can change the alpha at the least.
+const MIN_ALPHA_STEP: i32 = 3;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct State {
@@ -89,11 +96,31 @@ impl State {
         energy
     }
 
+    /// Makes a greedy search move, [`Step::Coarse`], and returns the state
+    /// before it.
     pub(crate) fn do_move<R: Rng>(&mut self, worker: &mut WorkerCtx<R>) -> Self {
+        self.do_move_by(worker, Step::Coarse)
+    }
+
+    /// Makes a move of size `step` and returns the state before it: the
+    /// shape moves by [`Shape::mutate`], and under [`Alpha::Auto`] the alpha
+    /// moves too, uniformly and possibly by zero, within `1..=255`. A
+    /// [`Step::Coarse`] move, the greedy search's, changes the alpha by up
+    /// to [`ALPHA_STEP`] either way; a [`Step::Scaled`] move, a refit
+    /// climb's, by up to [`ALPHA_STEP`] times the scale, rounded, but at
+    /// least [`MIN_ALPHA_STEP`]: by up to 3 at the refit's smallest scale.
+    pub(crate) fn do_move_by<R: Rng>(&mut self, worker: &mut WorkerCtx<R>, step: Step) -> Self {
         let previous = self.clone();
-        self.shape.mutate(worker);
+        self.shape.mutate(worker, step);
         if self.auto_alpha {
-            let delta = worker.rng.random_range(0..21) - 10;
+            let delta = match step {
+                Step::Coarse => worker.rng.random_range(0..2 * ALPHA_STEP + 1) - ALPHA_STEP,
+                Step::Scaled(scale) => {
+                    let reach = ((f64::from(ALPHA_STEP) * scale).round() as i32)
+                        .clamp(MIN_ALPHA_STEP, ALPHA_STEP);
+                    worker.rng.random_range(-reach..=reach)
+                }
+            };
             self.alpha = (i32::from(self.alpha) + delta).clamp(1, 255) as u8;
         }
         self.cached_energy = None;
@@ -142,6 +169,43 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(worker.evaluations, 1);
+    }
+
+    /// Under [`Alpha::Auto`] a scaled move changes the alpha by at most its
+    /// reach, 3 at the refit's smallest scale and [`ALPHA_STEP`] at the
+    /// coarse one, and keeps it in `1..=255`, also from either end.
+    #[test]
+    fn scaled_moves_keep_the_alpha_in_range() {
+        let (mut worker, _round) = round(32, 32);
+        for (scale, reach) in [(crate::refine::MIN_SCALE, 3), (1.0, ALPHA_STEP)] {
+            for start in [1, 2, 128, 254, 255] {
+                let shape = Shape::Circle(Circle { x: 16, y: 16, r: 4 });
+                let mut state = State::committed(shape, Alpha::Auto, start);
+                let mut largest = 0;
+                for _ in 0..300 {
+                    let before = i32::from(state.alpha);
+                    let _previous = state.do_move_by(&mut worker, Step::Scaled(scale));
+                    let delta = (i32::from(state.alpha) - before).abs();
+                    assert!(
+                        state.alpha >= 1 && delta <= reach,
+                        "{scale} from {before}: {state:?}"
+                    );
+                    largest = largest.max(delta);
+                }
+                assert_eq!(largest, reach, "scale {scale} from {start}");
+            }
+        }
+    }
+
+    #[test]
+    fn scaled_moves_keep_a_fixed_alpha() {
+        let (mut worker, _round) = round(32, 32);
+        let shape = Shape::Circle(Circle { x: 16, y: 16, r: 4 });
+        let mut state = State::committed(shape, fixed_alpha(77), 77);
+        for _ in 0..50 {
+            let _previous = state.do_move_by(&mut worker, Step::Scaled(crate::refine::MIN_SCALE));
+            assert_eq!(state.alpha, 77);
+        }
     }
 
     #[test]
