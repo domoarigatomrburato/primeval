@@ -59,9 +59,8 @@ The problems are concentrated at the edges: how binaries are built, how failures
 
 | # | ID | Finding | Severity | Status |
 | --- | --- | --- | --- | --- |
-| 1 | ENG-1 | The NEON code inside safe public functions can read out of bounds. Their `// SAFETY:` comments (added in T1) say the invariant is assumed, not checked. | High | Verified |
-| 2 | ENG-2, ENG-3, ENG-4 | Quadratic strokes paint pixels twice (15.4% of shapes). Three engine rasterizers are coarser than the geometry they optimise. "Deterministic" seeds depend on the CPU core count. | Medium | Reproduced, verified |
-| 3 | PERF-* | No benchmarks exist. Polygon and rotated-ellipse take 51% of the total time and are rasterization-bound (10–32 ns/pixel versus 2–4 for rectangles). | Medium | Measured |
+| 1 | ENG-2, ENG-3, ENG-4 | Quadratic strokes paint pixels twice (15.4% of shapes). Three engine rasterizers are coarser than the geometry they optimise. "Deterministic" seeds depend on the CPU core count. | Medium | Reproduced, verified |
+| 2 | PERF-* | No benchmarks exist. Polygon and rotated-ellipse take 51% of the total time and are rasterization-bound (10–32 ns/pixel versus 2–4 for rectangles). | Medium | Measured |
 
 **Carry-over:** of the 100 action items the audit identified, 65 carry over unchanged to a redesigned engine and 13 more partially (section 15, a snapshot taken at audit time). This argues for doing the transferable work first and capping the investment in performance tuning of the current engine.
 
@@ -147,20 +146,6 @@ CLI-1 to CLI-4 landed with RM-7. Deliberate choices: stdout output is SVG only (
 
 ## 5. Engine correctness (ENG)
 
-### ENG-1: Out-of-bounds reads reachable from safe public functions on aarch64
-
-- **Severity / status:** High (soundness). Verified. `next: no`.
-- **Where:** `score.rs:422` `pub fn compute_color` and the public `energy_from_lines_raw` call `unsafe { neon::... }`.
-  - The NEON code loads with `vld4_u8(c_pix.as_ptr().add(byte_index))` (around `score.rs:274-275` and `:357-358`).
-  - The offsets are clipped against `target`'s dimensions only, and `current` is never checked.
-  - `difference_full_raw` does assert equal dimensions.
-  - Since T1 every `unsafe` block has a `// SAFETY:` comment; the two at these call sites state that `current`'s dimensions are assumed, not checked.
-  - The comments rely on the `Buffer` invariant `pixels.len() == width * height * 4`, which `Buffer::from_image` checks only with `debug_assert!`.
-- **Fix:**
-  - `assert_eq!` dimensions at entry, or make these functions `pub(crate)` (API-1).
-  - Make the `Buffer` length invariant a hard check in `from_image`.
-  - Add a NEON-vs-scalar parity test that runs in CI on arm64 (REL-5).
-
 ### ENG-2: Quadratic strokes paint pixels twice
 
 - **Severity / status:** Medium. Reproduced in Rust (Appendix A.6). `next: no`.
@@ -211,18 +196,14 @@ CLI-1 to CLI-4 landed with RM-7. Deliberate choices: stdout output is SVG only (
   - Exactly 16 rounds as independent tasks, each with an RNG derived from `(seed, step, round)`, e.g. ChaCha `set_stream`. The output is then independent of thread count, and the load balances better (PERF-9).
   - Document the guarantee as "same seed, same version, same platform".
 
-### Smaller correctness items (ENG-6 to ENG-17)
+### Smaller correctness items
 
 | ID | Severity | Status | `next` | Where | Problem | Fix |
 | --- | --- | --- | --- | --- | --- | --- |
 | ENG-6 | Low | Verified | no | `score.rs:58-76` | `compute_color` ignores `line.alpha` (coverage), so anti-aliased edges and quadratic pixels are fitted as fully covered and the colour comes out under-saturated. This matches Go; the quality impact is unmeasured. | Weighted least squares: `s* = Σw(t−(1−w)c) / Σw²` with `w = (alpha/255)·(ma/65535)`. |
-| ENG-7 | Low | Verified | no | `scanline.rs:57-66` | `clamp_line` turns lines entirely outside the image into one-pixel lines at the border; `w = 0` panics. Unreachable from render (callers clip first), reachable from the public API. | Return `None` when `x2 < 0 \|\| x1 >= w`. |
 | ENG-8 | Low | Verified | no | `shapes.rs:600-606` | RotatedRectangle starts `rect_max` at 0, so rows whose edges are all at negative x emit a stray (0..0) pixel. Inherited from Go. | Start at `i32::MIN` / `i32::MAX`. |
 | ENG-9 | Low | Verified | no | `shapes.rs:983-984` | RotatedEllipse clamps `ry` to `width - 1`; Ellipse uses the height. | Clamp to `height - 1`. |
 | ENG-10 | Low | Reported | no | `error_grid.rs:80-97`, `:141-144`, `:172-173` | Biased sampling only covers `cell_w × cell_h` per cell, but the last row/column absorbs the remainder, which is then reached only by the 20% uniform samples. | Sample within each cell's real bounds. |
-| ENG-11 | Low | Verified | no | `model.rs:67` | A zero dimension gives a NaN or infinite aspect ratio, `random_range(0..0)` panics, and the score becomes NaN. Public API only. | Validate in the constructor. |
-| ENG-14 | Info | Verified | no | `score.rs` blend | The blend arithmetic is exactly at the overflow bound (`v < M(M+1)`, `div_by_m` exact). Full anti-aliased coverage sums to 65532, not 65535, so "fully covered" pixels are never exactly opaque. | Document the bound, add a `debug_assert`, normalise coverage. |
-| ENG-15 | Nit | Verified | partial | `primeval-render/src/input.rs` (`thumbnail`), `error_grid.rs:37` | `max_size * height / width` and `(cols * rows) as usize` are computed in `u32`. Unreachable with decode limits. | Compute in `u64`. |
 | ENG-17 | Low | Verified | no | `shapes.rs` (`RotatedRectangle::mutate`) | Mutation never enforces the rotated rectangle's aspect-ratio limit: Go's `Mutate` loops until `Valid()`, but here `is_valid` was only called by its own test (deleted in T2 as dead code). Quality impact unmeasured. | Restore the validity check with bounded repair, as Quadratic does, or document the divergence. |
 
 ---
@@ -472,11 +453,10 @@ REL-1, REL-2, REL-5 and REL-6 landed (section 2 lists what only CI can confirm a
 
 Required in any case, because the current engine becomes the reference and baseline for "next".
 
-- [ ] ENG-1 Soundness (assertions, visibility, NEON parity test on arm64 CI)
 - [ ] ENG-2 Quadratic duplicates (+ PERF-7)
 - [ ] ENG-3 Triangle, rotated-rectangle and quadratic rasterizers sample at pixel centres; tighten the geometry test bounds
 - [ ] ENG-4 Determinism independent of thread count (+ PERF-9)
-- [ ] ENG-6 to ENG-17
+- [ ] ENG-6, ENG-8, ENG-9, ENG-10, ENG-17
 - [ ] TEST-4 Property tests for rasterizers and scoring
 
 ### T6: Performance, gated by benchmarks
