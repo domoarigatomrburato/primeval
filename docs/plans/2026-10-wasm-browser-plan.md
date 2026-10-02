@@ -88,7 +88,7 @@ Wasm is 1.5–1.9× slower than native per thread (quadratic the most, plausibly
 | W3a packaging | Conditional exports, types, packed-install test for the browser entry, the in-repo pool, size budget, README "Browser" section, release `wasm` job. | Done. |
 | W3b bundler fixture | A Vite 8 build of the packed package in Chromium, both builds (`test/browser/vite.test.js`; no Vite config needed; webpack dropped); README says what is tested. | Done. |
 | W4 live shapes | `onProgress` `shape`, in Rust render, binding, wasm and TypeScript, documented. | Done. |
-| W5 demo | `demo/`: drop an image, pick shape, count and alpha, watch it draw, compare with the original, download SVG/PNG; deployed to GitHub Pages by a workflow, with the COOP/COEP service worker. | Built and tested; live at `https://domoarigatomrburato.github.io/primeval/` once PR #10 merges, then linked from the README. |
+| W5 demo | `demo/`: drop an image, pick shape, count and alpha, watch it draw, compare with the original, download SVG/PNG; deployed to GitHub Pages by a workflow, with the COOP/COEP service worker. | Done; deploys to `https://domoarigatomrburato.github.io/primeval/` on merge, linked from the README. |
 | Later | WASM fallback on Node where no native prebuild exists (StackBlitz/WebContainers, musl before REL-7); SIMD128 kernels; Firefox and WebKit in the browser tests (Playwright browsers not yet downloaded); `libm` everywhere for cross-platform identical output (engine redesign). | Separate decisions. |
 
 ## Risks

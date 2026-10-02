@@ -7,6 +7,8 @@
 
 Give it an input image and it searches for a layered approximation you can export as **clean SVG or PNG** output.
 
+**[Try it in your browser](https://domoarigatomrburato.github.io/primeval/)**: the demo runs the engine as WebAssembly, on every core, and your image never leaves the page.
+
 <!-- markdownlint-disable MD033 -->
 
 <table>
@@ -277,6 +279,8 @@ Package notes:
 - SVG output keeps the shapes at working resolution inside a `viewBox` and sets `width` and `height` to the output size, so it scales cleanly to any size. PNG output is an anti-aliased, opaque RGB image at the output size, with the same geometry as the SVG.
 
 ## Browser
+
+The [demo](https://domoarigatomrburato.github.io/primeval/) is this package's browser build on a static page ([`demo/`](demo/)).
 
 The same package runs in the browser through WebAssembly, with the same `approximate()` and `toDataUri()`, the same options, defaults, error classes and codes, `onProgress`, and `AbortSignal`. Import it from `@aleburato/primeval` as on Node: the browser entry is the `browser` condition of the package's `exports`, which bundlers use when they build for the browser. The package's tests run it unbundled and in a Vite 8 build, which needs no Vite config: Vite bundles the workers and emits both `.wasm` files as assets, and the page still downloads only one. Other bundlers are not tested. Without a bundler, serve the package's files from the page's own origin (browsers start module workers only from the same origin) and map the name to `dist/browser.js` with an import map:
 
