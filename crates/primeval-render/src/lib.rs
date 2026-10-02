@@ -2,8 +2,8 @@
 //!
 //! This crate handles the full decode -> optimize -> encode path on top of
 //! `primeval-core`. It takes encoded image bytes (JPEG, PNG, or WebP), runs the
-//! approximation search, and returns SVG or PNG output. Reading files is up to
-//! the caller.
+//! approximation search (greedy steps, then one refit pass over the shapes),
+//! and returns SVG or PNG output. Reading files is up to the caller.
 //!
 //! The Node package and napi binding in this repository build on the same API.
 //! If you want the canonical Rust-side defaults and validation behavior, this is
@@ -22,7 +22,8 @@
 //! render.resize_input = 128;
 //! render.output_size = 512;
 //!
-//! // Each step's shape is the SVG element it adds, in the output's `viewBox`.
+//! // Each step's shape is the SVG element it adds, in the output's `viewBox`:
+//! // a live preview that the final refit pass can revise.
 //! let mut shapes = Vec::new();
 //! let mut on_progress = |info: ProgressInfo| shapes.push(info.shape);
 //! let result = approximate(
@@ -274,20 +275,29 @@ pub struct ProgressInfo {
     pub total: u32,
     /// The difference between the canvas and the working-resolution target
     /// after this step: the RMSE over the RGB channels divided by 255, from
-    /// `0.0` (identical) to `1.0`.
+    /// `0.0` (identical) to `1.0`. The final refit pass can lower it further,
+    /// so the result can score lower than the last step.
     pub score: f64,
-    /// The SVG element of the shape this step added, exactly as its line in
-    /// the SVG output, without the newline, whatever the output format. Its
-    /// coordinates are in the SVG's `viewBox`, the working canvas, so the
-    /// shapes of every step, in order, are the shape lines of the SVG that
-    /// the same render returns.
+    /// The shape this step's greedy search committed, formatted exactly as
+    /// a shape line of the SVG output, without the newline, whatever the
+    /// output format. Its coordinates are in the SVG's `viewBox`, the
+    /// working canvas.
+    ///
+    /// The shapes of every step, in order, draw a live preview. After the
+    /// last step the render runs one refit pass that can move, resize and
+    /// recolour any shape, so the result's shape lines can differ from the
+    /// preview. The pass keeps their number, their order and each shape's
+    /// kind; an ellipse whose radii the pass makes equal (or unequal) is
+    /// written as a `<circle>` (or an `<ellipse>`), so those two element
+    /// names can swap.
     pub shape: String,
 }
 
 /// A cheap-to-clone handle that cancels a running [`approximate`] call.
 ///
 /// Clones share the same flag. The render checks it before and after
-/// decoding, before every step, and before encoding.
+/// decoding, before every step, between the layers of the final refit pass,
+/// and before encoding.
 #[derive(Clone, Debug, Default)]
 pub struct CancellationToken(Arc<AtomicBool>);
 
@@ -423,6 +433,13 @@ impl ApproximateResult {
 
 /// Decode, optimize, and encode a single output in one call.
 ///
+/// The search runs [`RenderOptions::count`] greedy steps, each adding the
+/// best shape it finds and reporting it through `execution`'s progress
+/// callback, then one refit pass that re-optimises every shape at its own
+/// layer, with the others fixed, and keeps the result only if it lowers the
+/// score. The pass reports no progress. The result is encoded from the
+/// refitted shapes.
+///
 /// # Errors
 ///
 /// Returns [`ApproximateError::InvalidOption`] for an option outside its
@@ -462,6 +479,13 @@ pub fn approximate(
             });
         }
     }
+
+    // One refit pass revises the greedy shapes before encoding; it reports
+    // no progress and stops, leaving the model unchanged, once cancelled.
+    execution.check_cancelled()?;
+    model
+        .refine_unless(render.alpha, || execution.is_cancelled())
+        .ok_or(ApproximateError::Aborted)?;
 
     execution.check_cancelled()?;
     encode_output(&model.drawing(), render.output_size, output)
@@ -921,8 +945,18 @@ mod tests {
         lines[2..lines.len() - 1].to_vec()
     }
 
+    /// The SVG element name of a shape line. A circle is written as an
+    /// ellipse whose radii are equal, so the two are one element kind here.
+    fn element_name(line: &str) -> &str {
+        let name = line
+            .strip_prefix('<')
+            .and_then(|rest| rest.split([' ', '/', '>']).next())
+            .unwrap_or_else(|| panic!("not an element: {line}"));
+        if name == "circle" { "ellipse" } else { name }
+    }
+
     #[test]
-    fn progress_shapes_are_the_final_svg_shape_lines_in_order() {
+    fn progress_shapes_preview_the_final_svg_shape_lines() {
         let kinds = [
             ShapeKind::Any,
             ShapeKind::Triangle,
@@ -935,6 +969,7 @@ mod tests {
             ShapeKind::Polygon,
         ];
         let mut elements = std::collections::BTreeSet::new();
+        let mut revised = 0;
         for shape in kinds {
             let mut options = render_options();
             options.count = 6;
@@ -955,9 +990,15 @@ mod tests {
             let Ok(ApproximateResult::Svg { data, .. }) = result else {
                 panic!("{shape:?}: expected an SVG result, got {result:?}");
             };
-            assert_eq!(shapes, svg_shape_lines(&data), "{shape:?}");
+            let lines = svg_shape_lines(&data);
+            assert_eq!(shapes.len(), 6, "{shape:?}: one shape per step");
             assert!(shapes.iter().all(|line| !line.contains('\n')), "{shape:?}");
-            for line in &shapes {
+            assert_eq!(lines.len(), shapes.len(), "{shape:?}");
+            let preview: Vec<&str> = shapes.iter().map(|line| element_name(line)).collect();
+            let result: Vec<&str> = lines.iter().map(|line| element_name(line)).collect();
+            assert_eq!(preview, result, "{shape:?}: element kinds in order");
+            revised += usize::from(shapes != lines);
+            for line in shapes.iter().map(String::as_str).chain(lines) {
                 if line.starts_with("<path ") {
                     elements.insert("path");
                 } else if line.starts_with("<ellipse ") && line.contains(" transform=\"rotate(") {
@@ -970,6 +1011,8 @@ mod tests {
             elements.into_iter().collect::<Vec<_>>(),
             ["path", "rotated ellipse"]
         );
+        // The final refit pass ran: it revised the preview for most kinds.
+        assert!(revised >= 5, "the refit pass revised only {revised} of 9");
     }
 
     #[test]

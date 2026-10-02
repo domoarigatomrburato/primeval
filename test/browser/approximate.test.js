@@ -8,7 +8,7 @@ import { chromium } from "playwright";
 
 import * as native from "../../dist/index.js";
 import { startServer } from "../../scripts/static-server.mjs";
-import { svgShapeLines } from "../helpers/svg.js";
+import { assertPreviewsSvg } from "../helpers/svg.js";
 
 const FIXTURE = "monalisa.jpg";
 const SMALL = { count: 4, resizeInput: 16, outputSize: 32, seed: 7 };
@@ -177,7 +177,7 @@ for (const isolated of [true, false]) {
       assert.ok(progress.every((info) => typeof info.score === "number"));
     });
 
-    test("onProgress shapes are the final SVG's shape lines in order", async () => {
+    test("onProgress shapes preview the final SVG's shape lines", async () => {
       const { shapes, svg } = await shared.page.evaluate(
         async ({ name, render }) => {
           const shapes = [];
@@ -192,9 +192,7 @@ for (const isolated of [true, false]) {
         { name: FIXTURE, render: { ...SMALL, count: 6, shape: "quadratic" } },
       );
 
-      assert.equal(shapes.length, 6);
-      assert.ok(shapes.every((shape) => typeof shape === "string"));
-      assert.deepEqual(shapes, svgShapeLines(svg));
+      assertPreviewsSvg(shapes, svg, 6);
     });
 
     test("a throwing onProgress rejects with the thrown value and stops the render", async () => {

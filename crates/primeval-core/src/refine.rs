@@ -403,6 +403,9 @@ pub(crate) struct Streams {
 /// Runs one refit pass over `layers` against `target`, from a canvas of
 /// `background`, and returns the refitted layers if any layer changed,
 /// with the number of candidate evaluations made.
+///
+/// `cancelled` is polled before each layer; once it returns true the pass
+/// stops and returns `None`.
 pub(crate) fn pass<R: Rng>(
     target: &Buffer,
     background: Color,
@@ -410,7 +413,8 @@ pub(crate) fn pass<R: Rng>(
     alpha: Alpha,
     streams: Streams,
     scratch: &mut WorkerCtx<R>,
-) -> (Option<Vec<CommittedShape>>, u64) {
+    cancelled: &mut impl FnMut() -> bool,
+) -> Option<(Option<Vec<CommittedShape>>, u64)> {
     let (width, height) = (target.width(), target.height());
     let canvas = Buffer::new_from_color(width, height, background);
     let canvas_bytes = width as usize * height as usize * BYTES_PER_PIXEL;
@@ -423,6 +427,9 @@ pub(crate) fn pass<R: Rng>(
     let mut evaluations = 0;
 
     for index in (0..layers.len()).rev() {
+        if cancelled() {
+            return None;
+        }
         checkpoints.below(index, layers, &mut below, scratch);
         let layer = Layer {
             target,
@@ -439,7 +446,7 @@ pub(crate) fn pass<R: Rng>(
         above.fold(decided.shape.rasterize(scratch), decided.color);
     }
 
-    (changed.then_some(refitted), evaluations)
+    Some((changed.then_some(refitted), evaluations))
 }
 
 /// Refits layer `index`, `committed`, under `layer`: the replacement if one

@@ -31,12 +31,13 @@ impl State {
         }
     }
 
-    /// A state at a committed shape painted at `alpha`, `1..=255`, whose
-    /// moves change the alpha too when `mode` is [`Alpha::Auto`]; with a
-    /// fixed `mode` the alpha stays `alpha`.
+    /// A state at a committed shape painted at `alpha`, whose moves change
+    /// the alpha too when `mode` is [`Alpha::Auto`]; with a fixed `mode` the
+    /// alpha stays `alpha`. `alpha` is `0` for a committed shape that covers
+    /// no pixel, which fits no colour: such a state is invisible until a
+    /// move under [`Alpha::Auto`] raises its alpha to at least `1`.
     #[must_use]
     pub(crate) fn committed(shape: Shape, mode: Alpha, alpha: u8) -> Self {
-        debug_assert!(alpha > 0, "alpha must be non-zero");
         Self {
             shape,
             auto_alpha: matches!(mode, Alpha::Auto),

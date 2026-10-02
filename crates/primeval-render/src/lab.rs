@@ -187,6 +187,7 @@ mod tests {
         for _ in 0..render.count {
             model.step(render.shape, render.alpha);
         }
+        model.refine(render.alpha);
         encode(&model.drawing(), render.output_size, output)
             .expect("encode")
             .into_bytes()

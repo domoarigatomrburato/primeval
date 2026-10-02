@@ -77,20 +77,27 @@ export type ProgressInfo = {
   /**
    * The current fit: the RMSE between the working canvas and the resized
    * input over the RGB channels, divided by 255, from 0 (exact) to 1; lower
-   * is better.
+   * is better. The final refit pass can lower it further, so the result can
+   * fit better than the last step reports.
    */
   score: number;
   /**
-   * The SVG element of the shape this step added, exactly as its line in the
-   * SVG output, without the newline, whatever the `output` format. Its
-   * coordinates are in the final SVG's `viewBox`, the working canvas, so the
-   * shapes of every step, in order, are the shape lines of the SVG the same
-   * render (same seed and options) returns.
+   * The SVG element of the shape this step's search added, formatted exactly
+   * as a shape line of the SVG output, without the newline, whatever the
+   * `output` format. Its coordinates are in the final SVG's `viewBox`, the
+   * working canvas.
    *
-   * To draw progress live, wrap the shapes received so far in an `<svg>` with
+   * The shapes of every step, in order, draw a live preview. After the last
+   * step the render runs one refit pass that can move, resize and recolour
+   * any shape, so the result's shape lines can differ from the preview. The
+   * pass keeps their number, their order and each shape's kind, though an
+   * ellipse can turn into a `<circle>` or back when its radii become equal
+   * or unequal.
+   *
+   * To draw the preview, wrap the shapes received so far in an `<svg>` with
    * the final document's `viewBox` and background, for example taken from a
    * `count: 1` render with the same options: the background and canvas size
-   * do not depend on `count`.
+   * do not depend on `count`. When the result arrives, show the result.
    */
   shape: string;
 };

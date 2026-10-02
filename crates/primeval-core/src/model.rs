@@ -215,14 +215,31 @@ impl Model {
     ///
     /// Returns the number of candidate evaluations the pass made.
     pub fn refine(&mut self, alpha: Alpha) -> u64 {
+        self.refine_unless(alpha, || false)
+            .expect("a pass that is never cancelled finishes")
+    }
+
+    /// [`Model::refine`], cancellable: `cancelled` is polled before each
+    /// layer of the pass and before the exact re-render that verifies it.
+    ///
+    /// Once `cancelled` returns true the pass stops and returns `None`, and
+    /// the model is left exactly as it was before the pass, including the
+    /// pass index, so the next pass draws the streams this one would have.
+    /// Otherwise the pass runs and ends exactly as [`Model::refine`] does,
+    /// and returns its number of candidate evaluations.
+    #[must_use]
+    pub fn refine_unless(
+        &mut self,
+        alpha: Alpha,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Option<u64> {
         if self.history.is_empty() {
-            return 0;
+            return Some(0);
         }
         let streams = crate::refine::Streams {
             seed: self.seed,
             pass: self.passes,
         };
-        self.passes += 1;
         let (refitted, evaluations) = crate::refine::pass(
             &self.target,
             self.background,
@@ -230,10 +247,16 @@ impl Model {
             alpha,
             streams,
             &mut self.scratch,
-        );
+            &mut cancelled,
+        )?;
         let Some(history) = refitted else {
-            return evaluations;
+            self.passes += 1;
+            return Some(evaluations);
         };
+        if cancelled() {
+            return None;
+        }
+        self.passes += 1;
 
         // The model only predicts; the exact canvas decides.
         let (width, height) = (self.target.width(), self.target.height());
@@ -250,7 +273,7 @@ impl Model {
                 coarse.sync(&self.current);
             }
         }
-        evaluations
+        Some(evaluations)
     }
 
     /// Paints `shape` at `alpha`, which must be `1..=255`.
@@ -752,6 +775,108 @@ mod tests {
         model.refine(Alpha::Auto);
         assert_ne!(model.history, accepted.history);
         assert_consistent(&model, "after the revert");
+    }
+
+    /// A model whose next refit pass would change it, so a pass left
+    /// unchanged by cancellation is observable.
+    fn improvable_model() -> Model {
+        let model = stepped_model(5, SMALL, ShapeKind::Triangle, 5);
+        let mut accepted = model.clone();
+        accepted.refine(Alpha::Auto);
+        assert!(accepted.score < model.score, "the pass would not improve");
+        model
+    }
+
+    /// Everything a cancelled pass must leave as it was.
+    fn assert_unchanged(model: &Model, before: &Model, context: &str) {
+        assert_eq!(model.drawing(), before.drawing(), "{context}: drawing");
+        assert_eq!(
+            model.score_f64().to_bits(),
+            before.score_f64().to_bits(),
+            "{context}: score"
+        );
+        assert_eq!(model.history, before.history, "{context}: history");
+        assert_eq!(model.passes, before.passes, "{context}: passes");
+        assert_consistent(model, context);
+    }
+
+    #[test]
+    fn a_pass_cancelled_from_the_start_leaves_the_model_unchanged() {
+        let before = improvable_model();
+        let mut model = before.clone();
+
+        assert_eq!(model.refine_unless(Alpha::Auto, || true), None);
+
+        assert_unchanged(&model, &before, "cancelled from the start");
+    }
+
+    #[test]
+    fn a_pass_cancelled_at_any_poll_leaves_the_model_unchanged() {
+        let before = improvable_model();
+        let polls = std::cell::Cell::new(0_usize);
+        let mut finished = before.clone();
+        let evaluations = finished.refine_unless(Alpha::Auto, || {
+            polls.set(polls.get() + 1);
+            false
+        });
+        assert!(evaluations.is_some());
+        let polls = polls.get();
+        // Once per layer and once before the exact re-render.
+        assert!(polls > before.history.len(), "only {polls} polls");
+
+        for flip in 1..polls {
+            let mut model = before.clone();
+            let seen = std::cell::Cell::new(0_usize);
+            let result = model.refine_unless(Alpha::Auto, || {
+                seen.set(seen.get() + 1);
+                seen.get() > flip
+            });
+            let context = format!("cancelled after {flip} of {polls} polls");
+            assert_eq!(result, None, "{context}");
+            assert_unchanged(&model, &before, &context);
+        }
+    }
+
+    #[test]
+    fn a_pass_never_cancelled_matches_refine() {
+        let mut refined = improvable_model();
+        let mut model = refined.clone();
+
+        let expected = refined.refine(Alpha::Auto);
+        let evaluations = model.refine_unless(Alpha::Auto, || false);
+
+        assert_eq!(evaluations, Some(expected));
+        assert_eq!(model.drawing(), refined.drawing());
+        assert_eq!(model.score_f64().to_bits(), refined.score_f64().to_bits());
+        assert_eq!(model.passes, refined.passes);
+        assert_consistent(&model, "never cancelled");
+    }
+
+    #[test]
+    fn refine_keeps_a_layer_that_covers_no_pixel() {
+        // A shape that covers no pixel fits no colour: it is committed
+        // with alpha 0, and the pass must accept it, at any alpha mode.
+        for alpha in [Alpha::Auto, fixed_alpha(128)] {
+            let mut model = stepped_model(3, (2, 2), ShapeKind::Triangle, 0);
+            let outside = Shape::Triangle(crate::shapes::Triangle {
+                x1: -12,
+                y1: -12,
+                x2: -6,
+                y2: -12,
+                x3: -12,
+                y3: -6,
+            });
+            model.add(outside, 128);
+            assert_eq!(model.history[0].color.a, 0);
+            model.step(ShapeKind::Triangle, alpha);
+            let before = model.score;
+
+            model.refine(alpha);
+
+            assert!(model.score <= before, "{alpha:?}");
+            assert_eq!(model.history.len(), 2, "{alpha:?}");
+            assert_consistent(&model, &format!("{alpha:?}"));
+        }
     }
 
     #[test]

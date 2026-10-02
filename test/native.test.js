@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { AbortError, approximate, PrimevalError, ValidationError } from "@aleburato/primeval";
 
 import { rgbPng } from "./helpers/png.js";
-import { svgShapeLines } from "./helpers/svg.js";
+import { assertPreviewsSvg } from "./helpers/svg.js";
 
 const LONG_RENDER = { count: 100000, resizeInput: 16, outputSize: 16, seed: 7 };
 
@@ -459,7 +459,7 @@ test("native approximate emits monotonic progress exactly count times", async ()
 });
 
 for (const shape of ["quadratic", "rotated-ellipse", "any"]) {
-  test(`progress shapes are the final SVG's ${shape} shape lines in order`, async () => {
+  test(`progress shapes preview the final SVG's ${shape} shape lines`, async () => {
     const shapes = [];
 
     const result = await approximate({
@@ -474,8 +474,7 @@ for (const shape of ["quadratic", "rotated-ellipse", "any"]) {
       },
     });
 
-    assert.equal(shapes.length, 6);
-    assert.deepEqual(shapes, svgShapeLines(result.data));
+    assertPreviewsSvg(shapes, result.data, 6);
   });
 }
 
