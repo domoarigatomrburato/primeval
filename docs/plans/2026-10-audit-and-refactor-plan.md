@@ -111,15 +111,11 @@ REL-1, REL-2, REL-5 and REL-6 landed in T4:
 
 **Only CI can confirm** (first release run, and the first PR run for the quality matrix): `--use-napi-cross` on both Linux runners, `llvm-objdump` from `llvm-tools` on every runner, the smoke test on all five runners (`macos-15-intel` for x86_64 macOS), and the publish/verify/release steps.
 
-**Maintainer actions:**
-
-- Delete the `v0.1.1` tag (never published); versioning restarts at the first real release.
-- npm trusted publishing (OIDC) may not be able to create a package that does not exist yet: the first publish of each platform package may need a token or pre-created packages. This may also explain why the `v0.1.1` run published nothing.
+**Done with the maintainer:** the unpublished `v0.1.1` tag is deleted (the first release uses a version never tagged). npm trusted publishing cannot create a package, so the publish step accepts an optional `NPM_TOKEN` secret for the first release; `RELEASING.md` ("First Release") lists the one-time steps the maintainer takes on npmjs.com.
 
 ### REL-7: No musl targets
 
-- **Severity / status:** Low (product decision). `next: yes`.
-- **Fix:** Alpine is common in containers. Consider `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` once REL-1, REL-2 and REL-5 are in place. The loader already detects musl.
+- **Decision:** add `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` after the first release has run green end to end, as a change of its own validated with a `workflow_dispatch` run (Alpine smoke test in a container). The loader already detects musl.
 
 ---
 
@@ -219,9 +215,9 @@ Since ENG-4 (T5), runner quality is identical across thread counts; times still 
 
 ## 7. API and engineering quality (API)
 
-| ID | Severity | Status | `next` | Finding | Fix |
-| --- | --- | --- | --- | --- | --- |
-| API-8 | Medium | Measured | yes | Not publishable: `cargo publish --dry-run` warns "manifest has no description" for core and **fails** for render (path dependency without `version`). `rust-version`, `readme`, `keywords`, `categories` and `documentation` are missing. `binding` lacks `publish = false`. Crate versions (0.1.0) are not aligned with npm. | Decide whether the crates are public. If yes, add the metadata, versioned path deps and version alignment (REL-6); if not, `publish = false` everywhere. |
+Done. The last item, API-8, is decided: the crates are not published (`publish = false` in `[workspace.package]`) while their API is expected to change; the npm package is the product.
+
+--- | --- | --- | --- | --- | --- |
 
 ---
 
@@ -304,14 +300,14 @@ Done. Every RT and NODE item, API-2, and TEST-1, TEST-2, TEST-3, TEST-5 and TEST
 
 REL-1, REL-2, REL-5 and REL-6 landed (section 2 lists what only CI can confirm and the maintainer actions).
 
-- [ ] REL-7 Decide on musl
-- [ ] API-8 Crate publishability decision
+- [ ] REL-7 musl targets, after the first green release (decided)
+- [x] API-8 Crates stay unpublished
 
 ### T5: Engine correctness
 
 Required in any case, because the current engine becomes the reference and baseline for "next".
 
-Done. Every ENG item and TEST-4 landed, plus two found on the way: symmetric ellipse rows (circles were one row short per side, from Go) and one-pixel quadratic strokes (sub-pixel strokes over-saturated under the coverage-weighted colour fit). Rotated rectangles deliberately keep no aspect-ratio limit, unlike Go, because the limit measurably hurt quality. Wider quadratic strokes score better still (1.5 px about 6%), but that is a style choice left to the maintainer.
+Done. Every ENG item and TEST-4 landed, plus two found on the way: symmetric ellipse rows (circles were one row short per side, from Go) and one-pixel quadratic strokes (sub-pixel strokes over-saturated under the coverage-weighted colour fit). Rotated rectangles deliberately keep no aspect-ratio limit, unlike Go, because the limit measurably hurt quality. Wider quadratic strokes score better still (1.5 px about 6%) but read as blobs rather than pen strokes; the width stays at 1 px (decided with the maintainer).
 
 ### T6: Performance, gated by benchmarks
 
@@ -321,14 +317,14 @@ Done except the deferred items. Full PERF-0 runner, 8 threads, total search time
 - [x] PERF-4 RGB-only kernels (RM-4): byte-identical output
 - [x] PERF-1 Prefix sums and an exact early exit: same chosen shapes, about half the blended pixels skipped; single-threaded `model_step` 5% (quadratic) to 52% (rectangle) faster
 - [x] PERF-8 Half-resolution ranking of the random phase, rescoring the best 128 at full resolution, for any, circle, ellipse, rotated ellipse and polygon only: quality equal within noise at 100–1000 steps. Rescoring only 4 lost 1.3% at 1000 steps; rectangles, rotated rectangles and triangles gained almost no time, so they rank at full resolution.
-- [x] PERF-11: documented in the README's Deploying section; a CLI batch mode is a maintainer decision
+- [x] PERF-11: documented in the README's Deploying section; no CLI batch mode (decided); the README shows a batch with `xargs -P`
 - [ ] Deferred until the "next" decision: PERF-2 runtime-dispatched x86 SIMD, PERF-3 NEON accumulator tuning (section 15)
 
 ### T7: Documentation
 
 Continuous: each ticket updates the README for the behaviour it changes. This ticket is the final pass.
 
-- [x] API-6, API-7, DOC-2 (Deploying section, with PERF-11's batch-throughput note), DOC-3, DOC-7 (metadata and badges; GitHub topics are the maintainer's), and DOC-6's removal of the copyrighted images
+- [x] API-6, API-7, DOC-2 (Deploying section, with PERF-11's batch-throughput note), DOC-3, DOC-7 (metadata, badges, repository description and topics), and DOC-6's removal of the copyrighted images
 - [x] Gallery generator (`examples/gallery.rs`) and every image regenerated from the final engine; DOC-4 Benchmarks from the PERF-0 runner
 - [ ] Replacement photographs (DOC-6), the maintainer's
 
