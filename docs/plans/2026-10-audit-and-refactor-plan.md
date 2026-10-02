@@ -145,12 +145,7 @@ CLI-1 to CLI-4 landed with RM-7. Deliberate choices: stdout output is SVG only (
 
 ## 5. Engine correctness (ENG)
 
-### Smaller correctness items
-
-| ID | Severity | Status | `next` | Where | Problem | Fix |
-| --- | --- | --- | --- | --- | --- | --- |
-| ENG-18 | Low | Verified | no | `raster.rs` (`rasterize_ellipse`) | Circles and axis-aligned ellipses are `2·rx+1` pixels wide but `2·ry−1` tall: the row loop runs `dy in 0..ry` (inherited from Go), so r = 4 gives 9×7. The geometry test passes because its bound is per unit of perimeter. | Cover rows `-ry..=ry` symmetrically; tighten the geometry test for these kinds; measure. |
-| ENG-19 | Low | Measured | no | `score.rs` (`compute_color`), quadratic | Since the coverage-weighted colour fit (ENG-6, T5), sub-pixel quadratic strokes (width 0.5 at working resolution) get saturated colours that compensate for their partial coverage, but at output size they are mostly fully covered, so the PNG is 1.6–5.1% worse (RMSE) for quadratics while the engine score improves 2–8%. | Fit and score quadratics against coverage that matches the output (e.g. a minimum stroke width of one working pixel, or output-resolution coverage); measure with the runner. |
+All ENG items landed in T5 (see the roadmap). The geometry tests in `crates/primeval-core/src/shapes/geometry_tests.rs`, the NEON-vs-scalar parity tests and the per-kind score parity tests keep them fixed.
 
 ---
 
@@ -385,10 +380,7 @@ REL-1, REL-2, REL-5 and REL-6 landed (section 2 lists what only CI can confirm a
 
 Required in any case, because the current engine becomes the reference and baseline for "next".
 
-Landed: ENG-1 to ENG-4, ENG-6 to ENG-11, ENG-13 to ENG-15, ENG-17 (no aspect-ratio limit, by measurement) and TEST-4.
-
-- [ ] ENG-18 Symmetric ellipse rows
-- [ ] ENG-19 Quadratic colour fit against output coverage
+Done. Every ENG item and TEST-4 landed, plus two found on the way: symmetric ellipse rows (circles were one row short per side, from Go) and one-pixel quadratic strokes (sub-pixel strokes over-saturated under the coverage-weighted colour fit). Rotated rectangles deliberately keep no aspect-ratio limit, unlike Go, because the limit measurably hurt quality. Wider quadratic strokes score better still (1.5 px about 6%), but that is a style choice left to the maintainer.
 
 ### T6: Performance, gated by benchmarks
 
