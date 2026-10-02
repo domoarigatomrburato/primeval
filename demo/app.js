@@ -24,6 +24,7 @@ const ui = {
   resolution: $("#resolution"),
   run: $("#run"),
   stop: $("#stop"),
+  autoRun: $("#auto-run"),
   runState: $("#run-state"),
   step: $("#step"),
   progress: $("#progress"),
@@ -118,6 +119,64 @@ function readOptions() {
 function syncAlpha() {
   ui.alpha.disabled = ui.form.elements["alpha-mode"].value !== "fixed";
   ui.alphaValue.textContent = ui.alpha.value;
+}
+
+// --- Auto-run ---
+
+const AUTO_RUN_KEY = "primeval-demo-auto-run";
+/** How long after the last setting change auto-run waits: one run per pause, not per event. */
+const AUTO_RUN_DELAY_MS = 300;
+let scheduledRun = 0;
+
+/** The viewer's remembered choice; on unless they turned it off. Storage may throw. */
+function loadAutoRun() {
+  try {
+    return localStorage.getItem(AUTO_RUN_KEY) !== "off";
+  } catch {
+    return true;
+  }
+}
+
+function saveAutoRun(on) {
+  try {
+    localStorage.setItem(AUTO_RUN_KEY, on ? "on" : "off");
+  } catch {
+    // Not remembered: the switch still works for this page.
+  }
+}
+
+function cancelScheduledRun() {
+  clearTimeout(scheduledRun);
+  scheduledRun = 0;
+}
+
+/** After a setting change: a run once the changes pause, if auto-run is on and there is an image. */
+function scheduleRun() {
+  cancelScheduledRun();
+  if (!ui.autoRun.checked || state.image === null) {
+    return;
+  }
+  scheduledRun = setTimeout(() => {
+    scheduledRun = 0;
+    if (ui.autoRun.checked && state.image !== null) {
+      run();
+    }
+  }, AUTO_RUN_DELAY_MS);
+}
+
+/** Whether `event`, an `input` or `change` event in the form, changed a render setting. */
+function changesSetting(event) {
+  const target = event.target;
+  // Radios and selects report a change once; text fields and ranges on every input.
+  const discrete = target.type === "radio" || target.tagName === "SELECT";
+  if (event.type !== (discrete ? "change" : "input")) {
+    return false;
+  }
+  return (
+    target.name === "shape" ||
+    target.name === "alpha-mode" ||
+    [ui.count, ui.countRange, ui.alpha, ui.seed, ui.resolution].includes(target)
+  );
 }
 
 // --- Stage ---
@@ -321,6 +380,7 @@ function setDownloads(enabled) {
 }
 
 async function run() {
+  cancelScheduledRun();
   if (state.image === null) {
     showError("No image yet", "Drop an image, paste one, choose a file or pick a sample.");
     ui.choose.focus();
@@ -462,6 +522,7 @@ async function run() {
 }
 
 function stop() {
+  cancelScheduledRun();
   state.run?.controller.abort();
 }
 
@@ -474,7 +535,9 @@ function stem(name) {
 
 /** Loads image bytes from `source` (a File, or a sample's URL) and runs. */
 async function loadImage(source) {
-  // A run in progress goes on until the new image starts its own run.
+  // A run in progress goes on until the new image starts its own run; a
+  // scheduled one is for the image being replaced.
+  cancelScheduledRun();
   const loadId = ++state.loadId;
   let bytes;
   let url;
@@ -681,13 +744,31 @@ function wireControls() {
   }
   ui.alpha.addEventListener("input", syncAlpha);
 
-  ui.newSeed.addEventListener("click", newSeed);
+  ui.newSeed.addEventListener("click", () => {
+    newSeed();
+    scheduleRun();
+  });
+  // After the controls' own listeners, which keep the count fields in step.
+  for (const type of ["input", "change"]) {
+    ui.form.addEventListener(type, (event) => {
+      if (changesSetting(event)) {
+        scheduleRun();
+      }
+    });
+  }
+  ui.autoRun.addEventListener("change", () => {
+    saveAutoRun(ui.autoRun.checked);
+    if (!ui.autoRun.checked) {
+      cancelScheduledRun();
+    }
+  });
   ui.compare.addEventListener("input", () => setSplit(Number(ui.compare.value)));
 }
 
 showThreads();
 newSeed();
 syncAlpha();
+ui.autoRun.checked = loadAutoRun();
 wireControls();
 wireInput();
 wireDownloads();

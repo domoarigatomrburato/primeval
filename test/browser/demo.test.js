@@ -30,9 +30,15 @@ after(async () => {
   }
 });
 
-/** A fresh context and page on `origin`; `serviceWorkers` is Playwright's option. */
-async function openDemo(origin, { serviceWorkers = "block" } = {}) {
+/**
+ * A fresh context and page on `origin`; `serviceWorkers` is Playwright's
+ * option, and `initScript`, if given, runs in the page before the demo.
+ */
+async function openDemo(origin, { serviceWorkers = "block", initScript } = {}) {
   const context = await browser.newContext({ serviceWorkers, acceptDownloads: true });
+  if (initScript !== undefined) {
+    await context.addInitScript(initScript);
+  }
   const requests = [];
   context.on("request", (request) => requests.push(new URL(request.url()).pathname));
   const page = await context.newPage();
@@ -67,6 +73,25 @@ async function setControls(page, { count, resolution }) {
   }
   await page.getByLabel("Working resolution").selectOption(String(resolution));
 }
+
+const autoRun = (page) => page.getByRole("switch", { name: "Auto-run" });
+
+/** Turns auto-run on or off. */
+async function setAutoRun(page, on) {
+  await autoRun(page).setChecked(on);
+}
+
+/** Picks a shape by its label: the radio itself is visually hidden. */
+async function pickShape(page, value) {
+  await page.locator(`label:has(> input[name="shape"][value="${value}"])`).click();
+}
+
+/** Comfortably longer than auto-run's debounce: a scheduled run would have started. */
+const SETTLE_MS = 1000;
+
+/** The live SVG's shape elements, the background `<rect>` aside. */
+const shapeTags = (markup) =>
+  [...markup.matchAll(/<(\w+)[\s>]/g)].map((match) => match[1]).slice(2);
 
 /** Waits for the run that ends after `previous` finished runs, and returns it. */
 async function waitForRun(page, previous) {
@@ -150,6 +175,8 @@ describe("demo, cross-origin isolated by headers", () => {
   test("Stop mid-render shows Stopped and a new run works", async () => {
     const { context, page, errors } = await openDemo(server.origin);
     try {
+      // The Run button's own behavior: no setting change runs.
+      await setAutoRun(page, false);
       await setControls(page, { count: 2000, resolution: 256 });
       await page.getByRole("button", { name: SAMPLE }).click();
       await page.waitForFunction(() => window.primevalDemo.step >= 1, undefined, {
@@ -180,6 +207,7 @@ describe("demo, cross-origin isolated by headers", () => {
   test("a new Run aborts the previous one, whose results are dropped", async () => {
     const { context, page } = await openDemo(server.origin);
     try {
+      await setAutoRun(page, false);
       await setControls(page, { count: 2000, resolution: 256 });
       await page.getByRole("button", { name: SAMPLE }).click();
       await page.waitForFunction(() => window.primevalDemo.step >= 1, undefined, {
@@ -240,6 +268,156 @@ describe("demo, cross-origin isolated by headers", () => {
       const text = await page.getByRole("alert").textContent();
       assert.match(text, /seed/);
       assert.match(text, /must be an integer from 0 to 2\^64 - 1/);
+
+      // Auto-run tries another invalid seed once, and does not loop.
+      await page.getByRole("textbox", { name: "Seed" }).fill("-4");
+      const again = await waitForRun(page, 1);
+      assert.equal(again.outcome, "error");
+      assert.match(await page.getByRole("alert").textContent(), /seed/);
+      await page.waitForTimeout(SETTLE_MS);
+      assert.equal(await page.evaluate(() => window.finishedRuns.length), 2);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("auto-run is on by default, and a setting change aborts the run for a new one", async () => {
+    const { context, page, errors } = await openDemo(server.origin);
+    try {
+      assert.equal(await autoRun(page).isChecked(), true);
+      await setControls(page, { count: 2000, resolution: 256 });
+      await page.getByRole("button", { name: SAMPLE }).click();
+      await page.waitForFunction(() => window.primevalDemo.step >= 1, undefined, {
+        timeout: 20000,
+      });
+
+      await pickShape(page, "circle");
+      const first = await waitForRun(page, 0);
+      assert.equal(first.outcome, "stopped");
+      assert.ok(first.step < 2000, "aborted before the end");
+      // The replaced run says nothing: the new one owns the status.
+      assert.doesNotMatch(await page.locator("#run-state").textContent(), /Stopped|Error/);
+      assert.equal(await page.getByRole("alert").isVisible(), false, "no error shown");
+      await page.waitForFunction(() => window.primevalDemo.step >= 1, undefined, {
+        timeout: 20000,
+      });
+      assert.match(await page.locator("#caption-meta").textContent(), /2000 circle shapes/);
+
+      // Stop stops the run, and auto-run stays on.
+      await page.getByRole("button", { name: "Stop" }).click();
+      const stopped = await waitForRun(page, 1);
+      assert.equal(stopped.outcome, "stopped");
+      assert.match(await page.locator("#run-state").textContent(), /Stopped/);
+      assert.equal(await autoRun(page).isChecked(), true);
+
+      // The next change runs again, with every setting as shown.
+      await page.getByRole("spinbutton", { name: "Shapes" }).fill("6");
+      const done = await waitForRun(page, 2);
+      assert.equal(done.outcome, "done");
+      assert.equal(done.total, 6);
+      assert.deepEqual(shapeTags(done.liveMarkup), Array(6).fill("circle"));
+      assert.match(await page.locator("#run-state").textContent(), /Done/);
+      assert.deepEqual(errors, []);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("auto-run starts one run for several rapid changes", async () => {
+    const { context, page } = await openDemo(server.origin);
+    try {
+      await setControls(page, { count: 4, resolution: 128 });
+      await page.getByRole("button", { name: SAMPLE }).click();
+      assert.equal((await waitForRun(page, 0)).outcome, "done");
+
+      const shapes = page.getByRole("spinbutton", { name: "Shapes" });
+      for (const count of ["5", "6", "7"]) {
+        await shapes.fill(count);
+      }
+      const run = await waitForRun(page, 1);
+      assert.equal(run.outcome, "done");
+      assert.equal(run.total, 7);
+      await page.waitForTimeout(SETTLE_MS);
+      assert.equal(await page.evaluate(() => window.finishedRuns.length), 2);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("with auto-run off, a setting change starts nothing", async () => {
+    const { context, page } = await openDemo(server.origin);
+    try {
+      await setControls(page, { count: 4, resolution: 128 });
+      await page.getByRole("button", { name: SAMPLE }).click();
+      assert.equal((await waitForRun(page, 0)).outcome, "done");
+
+      await setAutoRun(page, false);
+      await pickShape(page, "circle");
+      await page.getByRole("spinbutton", { name: "Shapes" }).fill("5");
+      await page.getByRole("button", { name: "New seed" }).click();
+      // Turning auto-run off also drops a run already scheduled.
+      await setAutoRun(page, true);
+      await page.getByRole("spinbutton", { name: "Shapes" }).fill("6");
+      await setAutoRun(page, false);
+      await page.waitForTimeout(SETTLE_MS);
+      assert.equal(await page.evaluate(() => window.finishedRuns.length), 1);
+      assert.equal(await page.getByRole("button", { name: "Stop" }).isEnabled(), false);
+      assert.match(await page.locator("#run-state").textContent(), /Done/);
+
+      // Run still works.
+      await page.getByRole("button", { name: "Run", exact: true }).click();
+      const run = await waitForRun(page, 1);
+      assert.equal(run.outcome, "done");
+      assert.deepEqual(shapeTags(run.liveMarkup), Array(6).fill("circle"));
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("the auto-run choice survives a reload, and storage failures are harmless", async () => {
+    const { context, page } = await openDemo(server.origin);
+    try {
+      await setAutoRun(page, false);
+      await page.reload();
+      await page.waitForFunction(() => window.primevalDemo?.ready === true);
+      assert.equal(await autoRun(page).isChecked(), false);
+      await setAutoRun(page, true);
+      await page.reload();
+      await page.waitForFunction(() => window.primevalDemo?.ready === true);
+      assert.equal(await autoRun(page).isChecked(), true);
+    } finally {
+      await context.close();
+    }
+
+    const blocked = await openDemo(server.origin, {
+      initScript: () => {
+        Object.defineProperty(window, "localStorage", {
+          get() {
+            throw new DOMException("storage is blocked", "SecurityError");
+          },
+        });
+      },
+    });
+    try {
+      assert.equal(await autoRun(blocked.page).isChecked(), true);
+      await setAutoRun(blocked.page, false);
+      assert.equal(await autoRun(blocked.page).isChecked(), false);
+      assert.deepEqual(blocked.errors, []);
+    } finally {
+      await blocked.context.close();
+    }
+  });
+
+  test("before an image is loaded, a setting change starts nothing", async () => {
+    const { context, page } = await openDemo(server.origin);
+    try {
+      await pickShape(page, "circle");
+      await page.getByRole("spinbutton", { name: "Shapes" }).fill("5");
+      await page.getByRole("button", { name: "New seed" }).click();
+      await page.waitForTimeout(SETTLE_MS);
+      assert.equal(await page.evaluate(() => window.finishedRuns.length), 0);
+      assert.equal(await page.getByRole("alert").isVisible(), false, "no error shown");
+      assert.match(await page.locator("#run-state").textContent(), /Ready/);
     } finally {
       await context.close();
     }
@@ -288,6 +466,7 @@ describe("demo, cross-origin isolated by headers", () => {
       assert.equal(await page.getByRole("textbox", { name: "Seed" }).count(), 1);
       assert.equal(await page.getByRole("progressbar", { name: "Progress" }).count(), 1);
       assert.equal(await page.getByRole("button", { name: "Choose image" }).count(), 1);
+      assert.equal(await page.getByRole("switch", { name: "Auto-run" }).count(), 1);
     } finally {
       await context.close();
     }
