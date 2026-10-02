@@ -16,4 +16,6 @@ extend-exclude = [
 
 [default.extend-identifiers]
 ba = "ba"
+# The `flate2` crate (deny.toml).
+flate2 = "flate2"
 iy = "iy"
