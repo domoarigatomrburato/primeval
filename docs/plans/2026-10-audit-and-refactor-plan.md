@@ -61,7 +61,7 @@ The problems are concentrated at the edges: how binaries are built, how failures
 | --- | --- | --- | --- | --- |
 | 1 | REL-1 | `target-cpu=native` leaks into release prebuilds. The Windows x64 DLL contains AVX-512 and the Linux arm64 addon contains SVE, so both crash with an illegal-instruction signal on common CPUs. On ARM the flag gives zero speedup. | Critical | Reproduced, measured |
 | 2 | RT-1 | `panic = "abort"` turns every Rust panic into the death of the host Node process. Switching to `unwind` costs nothing measurable. | Critical | Reproduced, measured |
-| 3 | RT-2, RT-3, RT-4 | Panics reachable from ordinary input: a 1-pixel working side (e.g. a 2000×5 banner), `background: "a€bc"`, a huge `outputSize`. | Critical | Reproduced |
+| 3 | RT-2, RT-4 | Panics reachable from ordinary input: a 1-pixel working side (e.g. a 2000×5 banner), a huge `outputSize`. (The multi-byte `background` panic, RT-3, is fixed.) | Critical | Reproduced |
 | 4 | REL-2 | Linux prebuilds require glibc ≥ 2.34 (no Debian 11, Ubuntu 20.04, Amazon Linux 2, RHEL 8). | High | Verified |
 | 5 | NODE-1, NODE-2 | Some errors are thrown synchronously and skip the error-class mapping; a throwing `onProgress` crashes the process. | High | Reproduced |
 | 6 | RT-5 | Memory is unbounded: a 258 KB PNG (9000×9000) peaks at 951 MB RSS. | High | Reproduced, measured |
@@ -219,15 +219,6 @@ The problems are concentrated at the edges: how binaries are built, how failures
   - Use `(dim - 1).max(1)` upper bounds in the mutations.
   - Add a regression test per `ShapeKind` for 1×1, 1×N, N×1 and 2×2.
 
-### RT-3: A multi-byte background string panics
-
-- **Severity / status:** Critical. Reproduced. `next: yes` (colour parsing is reused).
-- **Where:** `color.rs:49` `parse_hex_pair(&s[0..2])` dispatches on the byte length (`s.len()`) and then slices a `str`.
-- **Evidence:** `background: "a€bc"` (6 bytes) gives `byte index 2 is not a char boundary; it is inside '€'`, exit 134. The CLI `--background 'a€bc'` crashes the same way.
-- **Fix:**
-  - Reject non-ASCII input first (`if !s.is_ascii()`), then parse bytes.
-  - Add a regression test and a fuzz target (TEST-5).
-
 ### RT-4: Output-size overflows panic
 
 - **Severity / status:** High. Reproduced. `next: partial` (output caps carry over).
@@ -247,25 +238,13 @@ The problems are concentrated at the edges: how binaries are built, how failures
   - `render::prepare` keeps the full decoded `DynamicImage` alive for the whole optimisation (`crates/primeval-render/src/lib.rs:363` onward).
   - `average_background` (`export.rs:173-174`) makes full-resolution RGBA copies.
   - `thumbnail` returns `to_rgba8()` copies (`export.rs:131`), and `Buffer::from_image` clones again (`buffer.rs:111`).
-  - Nothing caps `count`, `resizeInput`, `outputSize` or `repeat`. The Rust-only `workers` option has no upper bound.
+  - Nothing caps `count`, `resizeInput` or `outputSize`.
 - **Fix:**
   - Decode with `image::ImageReader` and explicit `image::Limits` (`max_image_width`, `max_image_height`, `max_alloc`).
   - Compute the background from the thumbnail.
   - `drop` the full image right after taking the thumbnail.
   - Take `RgbaImage` by value (`into_raw`).
   - Add upper bounds in `validate_options`, document them, and test them at every layer.
-
-### RT-6: Path input is a liability
-
-- **Severity / status:** High. Reproduced. `next: yes`. Resolved by RM-2.
-- **Where:** `crates/primeval-render/src/lib.rs:450`, `std::fs::read(path).map_err(|_| ApproximateError::NotFound(path.clone()))`.
-- **Problems:**
-  - It reads the whole file with no size limit (`/dev/zero` grows until out of memory; reasoned, not run).
-  - A FIFO blocks forever and cannot be aborted. Probe result: still pending 2000 ms after abort, and a tokio worker is lost.
-  - Every IO error becomes `NotFound`: a directory or a mode-000 file reports "does not exist or is not readable".
-  - Paths cross napi as `String`, so non-UTF-8 paths cannot be expressed.
-  - On a server, untrusted `kind: "path"` is a file-existence and file-read oracle.
-- **Fix:** remove path input from the Node API and the Rust facade (RM-2). Node's `fs` gives precise errors and the CLI can read the file itself.
 
 ---
 
@@ -278,11 +257,10 @@ The problems are concentrated at the edges: how binaries are built, how failures
   - `src/index.ts:305` `const handle = nativeBinding.startApproximate(nativeRequest);` runs outside the `.catch(mapNativeError)` at `:341`.
   - `approximate()` (`:351`) is not `async`.
 - **Evidence:**
-  - Invalid background: a synchronous `Error "[ValidationError] invalid background color"`, `instanceof ValidationError === false`, `code: "GenericFailure"`.
+  - Errors thrown synchronously by `startApproximate` are now mapped (T2), but they are still thrown synchronously rather than rejected.
   - `count: 0` (checked in TypeScript): a synchronous `ValidationError`.
   - `background: 123`: an unmapped napi conversion error that leaks internal names (`... on NativeRenderOptions.background on NativeApproximateRequest.render`).
   - A native-load failure also throws synchronously.
-  - The CLI prints a full stack trace for `--background zzz`.
   - So `approximate(x).catch(...)` misses whole classes of errors, and the README promise that errors map to the typed classes is false.
 - **Fix:**
   - Make `approximate` `async`, or wrap the whole body so every failure becomes a rejected promise passed through `mapNativeError`.
@@ -299,7 +277,7 @@ The problems are concentrated at the edges: how binaries are built, how failures
 
 - **Severity / status:** High. Reproduced. `next: yes`.
 - **Where:**
-  - `binding/src/binding.rs:83-92` take `count`, `repeat`, `resizeInput` and `outputSize` as `Option<u32>`, and `seed` as `Option<i64>`.
+  - `binding/src/binding.rs:83-92` take `count`, `resizeInput` and `outputSize` as `Option<u32>`, and `seed` as `Option<i64>`.
   - TypeScript checks only `Number.isInteger` and the lower bound.
 - **Evidence:**
   - `count: 2**32 + 1` resolves with `total: 1`.
@@ -319,12 +297,11 @@ The problems are concentrated at the edges: how binaries are built, how failures
   - With the main thread busy for 200 ms after `controller.abort()`, 40 of 40 renders **resolved** instead of rejecting. The wrapper never re-checks `signal.aborted` when the native promise settles.
   - An already-aborted signal still starts native work: decoding happens before the first flag check.
   - Cancellation latency is one optimization step (a reviewer measured 640 ms for `polygon` at `resizeInput: 1024`).
-  - Reading and decoding cannot be cancelled (FIFO, RT-6).
+  - Decoding cannot be cancelled.
 - **Fix:**
   - Reject immediately when `signal.aborted`.
   - On settle, reject with `AbortError` (`cause: signal.reason`) if the signal fired.
   - Check the flag before and after decoding and before encoding.
-  - Remove path input (RM-2).
 
 ### NODE-5: CPU-bound work runs on tokio worker threads
 
@@ -340,7 +317,7 @@ The problems are concentrated at the edges: how binaries are built, how failures
 - **Severity / status:** Medium. Reproduced. `next: yes`.
 - **Where:** `mapNativeError` (`src/index.ts:248-266`) parses a `[Name] message` prefix and builds new errors.
 - **Evidence:**
-  - No `code` and no `cause`; `NotFoundError` has `keys: ['name']`, and the stack starts at `mapNativeError`.
+  - No `code` and no `cause`; error objects have `keys: ['name']`, and the stack starts at `mapNativeError`.
   - A message containing a newline (e.g. a path `a\nb.png`) is not matched and leaks as a plain `Error`.
   - `PrimevalError` (`:76`) is not exported.
 - **Fix:**
@@ -504,7 +481,7 @@ The problems are concentrated at the edges: how binaries are built, how failures
   - Exactly 16 rounds as independent tasks, each with an RNG derived from `(seed, step, round)`, e.g. ChaCha `set_stream`. The output is then independent of thread count, and the load balances better (PERF-9).
   - Document the guarantee as "same seed, same version, same platform".
 
-### ENG-5 to ENG-16: Smaller correctness items
+### ENG-5 to ENG-15: Smaller correctness items
 
 | ID | Severity | Status | `next` | Where | Problem | Fix |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -515,11 +492,9 @@ The problems are concentrated at the edges: how binaries are built, how failures
 | ENG-9 | Low | Verified | no | `shapes.rs:983-984` | RotatedEllipse clamps `ry` to `width - 1`; Ellipse uses the height. | Clamp to `height - 1`. |
 | ENG-10 | Low | Reported | no | `error_grid.rs:80-97`, `:141-144`, `:172-173` | Biased sampling only covers `cell_w × cell_h` per cell, but the last row/column absorbs the remainder, which is then reached only by the 20% uniform samples. | Sample within each cell's real bounds. |
 | ENG-11 | Low | Verified | no | `model.rs:67` | A zero dimension gives a NaN or infinite aspect ratio, `random_range(0..0)` panics, and the score becomes NaN. Public API only. | Validate in the constructor. |
-| ENG-12 | Low | Verified | no | `model.rs:157-171` | The `repeat` loop takes `before` from an energy cached against the previous canvas, which happens to equal the new score. Fragile. | Removed with RM-3. |
 | ENG-13 | Low | Verified | no | `shapes.rs:100-101`, `raster.rs:244`, `score.rs:129`, `state.rs:16` | Public fields with unchecked invariants: `Polygon.order > 4` or `0` panics; `partial_cmp().unwrap()` panics on NaN vertices; `Scanline.alpha > 0xFFFF` overflows `M - sa*ma/M`; `State.cached_energy` is public and mutable. | Restrict visibility (API-1); use `total_cmp`. |
 | ENG-14 | Info | Verified | no | `score.rs` blend | The blend arithmetic is exactly at the overflow bound (`v < M(M+1)`, `div_by_m` exact). Full anti-aliased coverage sums to 65532, not 65535, so "fully covered" pixels are never exactly opaque. | Document the bound, add a `debug_assert`, normalise coverage. |
 | ENG-15 | Nit | Verified | partial | `export.rs:135-137`, `error_grid.rs:37` | `max_size * height / width` and `(cols * rows) as usize` are computed in `u32`. Unreachable with decode limits. | Compute in `u64`. |
-| ENG-16 | Low | Verified | partial | `model.rs:305-312` | The SVG background ignores the background's alpha while the PNG keeps it. | Resolved by RM-4 (opaque backgrounds only). |
 
 ---
 
@@ -674,7 +649,6 @@ Takeaways:
 | API-8 | Medium | Measured | yes | Not publishable: `cargo publish --dry-run` warns "manifest has no description" for core and **fails** for render (path dependency without `version`). `rust-version`, `readme`, `keywords`, `categories` and `documentation` are missing. `binding` lacks `publish = false`. Crate versions (0.1.0) are not aligned with npm. | Decide whether the crates are public. If yes, add the metadata, versioned path deps and version alignment (REL-6); if not, `publish = false` everywhere. |
 | API-9 | Medium | Verified | yes | Render facade ergonomics: `RenderOptions` and `ApproximateError` are not `#[non_exhaustive]`; `ApproximateResult::Raster { format }` can hold `Svg`; `approximate(req, Option<&dyn Fn(ProgressInfo)>, &AtomicBool)` is positional and takes `Fn` rather than `FnMut`, forcing `Arc<Mutex<_>>` in callers; `ShapeKind` and `Color` appear in the API but are not re-exported (the binding imports `primeval_core::shapes::ShapeKind`); the binding helper parsers (`parse_alpha_str`, `parse_alpha_u32`, `parse_background_str`, `parse_seed_i64`) are public and return `String` errors. | A builder or options struct with `progress: Option<&mut dyn FnMut>` and a `CancellationToken`; re-export the types used in the API; move binding helpers behind `pub(crate)` or into the binding. |
 | API-10 | Low | Verified | yes | The binding merges defaults itself (`binding.rs:211-257`, `unwrap_or(defaults.x)`). This complies with `AGENTS.md`, since the defaults come from Rust, but every new surface would have to repeat it. | `RenderOptions::merge(partial)` in render. |
-| API-11 | Low | Verified | yes | `crates/primeval-render/examples/render_svg.rs` hard-codes `photo.jpg`, so `cargo run --example render_svg` fails with NotFound. | Take a path from `std::env::args()`; show progress and cancellation. |
 
 ---
 
@@ -706,7 +680,7 @@ All TOOL items landed in T1. Follow-ups:
 
 | ID | Severity | Status | `next` | Finding | Fix |
 | --- | --- | --- | --- | --- | --- |
-| DOC-1 | Medium | Reproduced | partial | README promises that are false today: "`--seed <N>` for deterministic output" (ENG-4); errors "are mapped to `ValidationError`, `NotFoundError`, and `AbortError`" (NODE-1); an abort "rejects with `AbortError`" (NODE-4); `repeat` described as "extra random mutations to try per step" when it actually adds up to N extra shapes per step (RM-3). | Fix each claim in the same change as its code fix, as `AGENTS.md` requires. |
+| DOC-1 | Medium | Reproduced | partial | README promises that are false today: "`--seed <N>` for deterministic output" (ENG-4); errors are mapped to `ValidationError` and `AbortError` (NODE-1, still partly false); an abort "rejects with `AbortError`" (NODE-4). | Fix each claim in the same change as its code fix, as `AGENTS.md` requires. |
 | DOC-2 | Medium | Verified | yes | Missing operational documentation: minimum glibc, CPU baseline, memory sizing (per-format peaks), concurrency guidance for servers, untrusted-input guidance, the limits introduced by RT-5. | A "Deploying" section in the README. |
 | DOC-3 | Low | Verified | yes | The README examples read `docs/readme/originals/monalisa.jpg`, which does not exist for npm consumers. | Use `photo.jpg` with a note, or `process.argv[2]`. |
 | DOC-4 | Low | Verified | yes | The Benchmarks section cannot be reproduced (the script was removed in `e24492d`). | Replace with the PERF-0 script and its output, or remove the section. |
@@ -721,10 +695,7 @@ The project has never been published, so every removal is free.
 
 | ID | `next` | Remove | Why | What it simplifies |
 | --- | --- | --- | --- | --- |
-| RM-2 | yes | **Path input** (`{ kind: "path" }` in the Node API, `InputSource::Path` in render) | RT-6: unbounded reads, FIFO hangs, file-existence oracle, all IO errors reported as NotFound, UTF-8-only paths. Node's `fs` does this better. | `NotFoundError` disappears; input becomes plain bytes (`approximate(bytes, options)` or `{ input: Uint8Array }`); the CLI uses `fs.readFile` with precise errors. |
-| RM-3 | yes | **`repeat`** | It actually adds up to N extra shapes per step (`model.rs:157-171`), so the shape count stops matching `count` and progress `total` is wrong; it is documented incorrectly; it is a niche upstream knob ("mostly good for beziers"); its loop is fragile (ENG-12). | One option fewer and a clean meaning: `count` = number of shapes. |
-| RM-4 | yes (accepted) | **Alpha channel in the engine**: work in RGB, composite transparent inputs onto the background at decode time, accept only opaque backgrounds (`RGB` / `RRGGBB`) | ENG-16 inconsistency; about 25% of per-pixel work (PERF-4); simpler kernels; transparent output has little value for this product. PERF-0 measures the gain when PERF-4 lands. | 3-byte buffers, RGB-only NEON (`vld3_u8`), one background rule across SVG and PNG. |
-| RM-6 | yes | **Rust-only knobs not exposed to Node**: `prepare()` / `ApproximationRun`, public `workers` | They break the "layers stay aligned" rule; the binding uses only `approximate`. | `workers` becomes an internal performance knob once ENG-4 makes output independent of it. |
+| RM-4 | yes (contract landed in T2; kernels are PERF-4) | **Alpha channel in the engine**: work in RGB, composite transparent inputs onto the background at decode time, accept only opaque backgrounds (`RGB` / `RRGGBB`) | ENG-16 inconsistency; about 25% of per-pixel work (PERF-4); simpler kernels; transparent output has little value for this product. PERF-0 measures the gain when PERF-4 lands. | 3-byte buffers, RGB-only NEON (`vld3_u8`), one background rule across SVG and PNG. |
 | RM-7 | yes | **CLI extras**: `--format`, the `jpeg` alias, `--progress auto\|plain\|off`, defaulting the output format to the input's | `--format svg -o x.png` writes SVG into a `.png`; three spellings of one thing. | Format comes from the `--output` extension only; the **default output is SVG** (the flagship format); `--quiet` replaces `--progress`; revisit the `_primitive` suffix. |
 | RM-9 | no | **Dead code in core** | Profiling hooks (`profile_quadratic` is always false, `QuadraticProfileStats`, `worker.rs:93-139`); `export::output_paths` (`export.rs:153`, CLI file naming); `util::number_string` (`util.rs:42`); `util::rotate` (tests only); `ShapeKind::variants` and `OutputFormat::variants` (used only by regex tests); `Polygon.convex` (always false, so the convexity check is dead); `Quadratic.width` (never mutated); `WorkerCtx::scratch_vertices`; `parse_alpha_u32`; the unused `_round` parameter in `Shape::mutate`; the `approx` dev-dependency. | Less surface; lets the workspace dead-code lints work once API-1 lands. |
 
@@ -770,21 +741,17 @@ Done. Every TOOL item plus REL-3 and REL-4 landed; section 9 lists the follow-up
 
 Removals before hardening, so no effort goes into code that is about to disappear.
 
-- [ ] RM-2 Remove path input; the CLI reads files itself
-- [ ] RM-3 Remove `repeat`
-- [ ] RM-6 Remove Rust-only knobs
 - [ ] RM-7 CLI simplification (format from extension, SVG default, `--quiet`)
 - [ ] RM-9 Delete dead code
 - [ ] API-3 **Engine boundary**: engine produces committed shapes; decode, replay and encoders move to render; core drops `image`
 - [ ] API-1 Restrict core visibility; `#[non_exhaustive]`
 - [ ] API-4 Typed alpha end to end
-- [ ] API-9, API-10, API-11 Render facade ergonomics, `merge`, example
-- [ ] RM-4 RGB-only contract: opaque backgrounds only, transparent inputs composited at decode time (the RGB-only kernels are PERF-4 in T6)
+- [ ] API-9, API-10 Render facade ergonomics, `merge`
 
 ### T3: Runtime robustness
 
 - [ ] RT-1 `panic = "unwind"` + `catch_unwind`, mapped to `InternalError`
-- [ ] RT-2, RT-3, RT-4 Root-cause fixes plus regression tests at the Rust and Node layers
+- [ ] RT-2, RT-4 Root-cause fixes plus regression tests at the Rust and Node layers
 - [ ] RT-5 `ImageReader` + `Limits`, option caps, drop the full image early, fewer copies (PERF-10)
 - [ ] API-2, NODE-6 Typed errors with codes and causes across layers
 - [ ] NODE-1, NODE-2, NODE-3, NODE-4 Async-only errors, safe progress, numeric ranges owned by Rust, reliable abort
@@ -813,12 +780,12 @@ Required in any case, because the current engine becomes the reference and basel
 - [ ] ENG-2 Quadratic duplicates (+ PERF-7)
 - [ ] ENG-3 One coordinate convention; PNG-vs-SVG test
 - [ ] ENG-4 Determinism independent of thread count (+ PERF-9)
-- [ ] ENG-5 to ENG-16
+- [ ] ENG-5 to ENG-15
 - [ ] TEST-4 Property tests for rasterizers and scoring
 
 ### T6: Performance, gated by benchmarks
 
-- [ ] PERF-0 Divan benches and the time+quality script (start this early, in parallel with T2, because RM-4 and every later item need it)
+- [ ] PERF-0 Divan benches and the time+quality script (every later performance item needs it)
 - [ ] PERF-5 Anti-aliased rasterizer interiors (largest measured hotspot)
 - [ ] PERF-1 Prefix sums + early exit
 - [ ] PERF-4 RGB-only kernels (RM-4)
