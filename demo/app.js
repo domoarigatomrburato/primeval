@@ -36,6 +36,9 @@ const ui = {
   errorDetail: $("#error-detail"),
   downloadSvg: $("#download-svg"),
   downloadPng: $("#download-png"),
+  caption: $("#caption"),
+  captionTitle: $("#caption-title"),
+  captionMeta: $("#caption-meta"),
 };
 
 /**
@@ -118,6 +121,24 @@ function syncAlpha() {
 }
 
 // --- Stage ---
+
+/** The museum-label caption: the image's title, then what this run draws it with. */
+function setCaption(title, options) {
+  ui.caption.hidden = false;
+  if (title !== undefined) {
+    // "Work, Author": the work in italics, as on a museum label.
+    const [work, ...author] = title.split(", ");
+    const cite = document.createElement("cite");
+    cite.textContent = work;
+    ui.captionTitle.replaceChildren(cite, author.length > 0 ? `, ${author.join(", ")}` : "");
+  }
+  if (options !== undefined) {
+    const shape = ui.form.querySelector(`input[name="shape"][value="${options.shape}"]`);
+    const kind = shape?.parentElement.textContent.trim().toLowerCase() ?? options.shape;
+    const shapes = kind === "any" ? "shapes of any kind" : `${kind} shapes`;
+    ui.captionMeta.textContent = `${options.count} ${shapes} · seed ${ui.seed.value.trim()}`;
+  }
+}
 
 function setView(view) {
   ui.frame.dataset.view = view;
@@ -320,6 +341,7 @@ async function run() {
   const { signal } = current.controller;
   const image = state.image;
   const live = liveDrawing();
+  setCaption(undefined, options);
   let outcome = "";
   let result = null;
 
@@ -458,6 +480,7 @@ async function loadImage(source) {
   let url;
   let objectUrl = null;
   let name;
+  let title;
   try {
     if (typeof source === "string") {
       const response = await fetch(source);
@@ -467,11 +490,13 @@ async function loadImage(source) {
       bytes = new Uint8Array(await response.arrayBuffer());
       url = source;
       name = stem(source.split("/").pop());
+      title = ui.samples.find((sample) => sampleUrl(sample) === source)?.getAttribute("aria-label");
     } else {
       bytes = new Uint8Array(await source.arrayBuffer());
       objectUrl = URL.createObjectURL(source);
       url = objectUrl;
       name = stem(source.name);
+      title = source.name;
     }
   } catch (error) {
     if (loadId === state.loadId) {
@@ -496,6 +521,7 @@ async function loadImage(source) {
   ui.original.src = url;
   ui.frame.hidden = false;
   ui.stage.dataset.state = "loaded";
+  setCaption(title ?? name);
   setView("original");
   run();
 }

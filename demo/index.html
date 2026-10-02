@@ -67,13 +67,12 @@
     <header class="masthead">
       <a class="brand" href="https://github.com/domoarigatomrburato/primeval">
         <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
-          <circle cx="12" cy="13" r="9" fill="var(--brand-a)" opacity="0.85" />
-          <path d="M14 29 L30 29 L22 11 Z" fill="var(--brand-b)" opacity="0.85" />
-          <rect x="4" y="20" width="12" height="8" rx="1" fill="var(--brand-c)" opacity="0.8" />
+          <circle class="mark-circle" cx="12.5" cy="13" r="8.5" />
+          <path class="mark-triangle" d="M13 28.5h16L21 12.5z" />
         </svg>
         <span class="brand-name">primeval</span>
       </a>
-      <p class="tagline">Images, rebuilt from shapes. In your browser, nothing uploaded.</p>
+      <p class="tagline">Every picture, back to its primitives.</p>
       <span id="threads" class="badge" data-isolated="false">1 thread</span>
     </header>
 
@@ -105,9 +104,9 @@
           </div>
           <div class="dropzone">
             <svg class="dropzone-art" viewBox="0 0 120 80" aria-hidden="true">
-              <circle cx="38" cy="38" r="24" />
-              <path d="M58 72 106 72 82 22Z" />
-              <rect x="14" y="50" width="38" height="22" rx="3" />
+              <rect class="art-rect" x="10" y="44" width="44" height="28" />
+              <circle class="art-circle" cx="44" cy="34" r="24" />
+              <path class="art-triangle" d="M56 72h54L83 18z" />
             </svg>
             <p class="dropzone-title">Drop an image here</p>
             <p class="dropzone-hint">or paste one, or</p>
@@ -124,6 +123,11 @@
           />
           <div class="drop-veil" aria-hidden="true"><span>Drop to rebuild</span></div>
         </div>
+
+        <p id="caption" class="caption" hidden>
+          <span id="caption-title" class="caption-title"></span>
+          <span id="caption-meta" class="caption-meta"></span>
+        </p>
 
         <section class="status" aria-label="Status">
           <div class="status-head">
