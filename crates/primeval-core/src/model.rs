@@ -65,10 +65,18 @@ impl Model {
     }
 
     /// Starts a search for `target` from a canvas filled with `background`.
+    ///
+    /// `target` is at least 2 x 2 pixels: [`Buffer::from_rgba`] rejects
+    /// anything smaller, so a model for an empty or one-pixel-wide canvas
+    /// cannot be created.
     #[must_use]
     pub fn new(target: Buffer, background: Color, options: ModelOptions) -> Self {
         let target_width = target.width();
         let target_height = target.height();
+        debug_assert!(
+            target_width >= 2 && target_height >= 2,
+            "the engine needs a target of at least 2 x 2 pixels"
+        );
         let current = Buffer::new_from_color(target_width, target_height, background);
         let score = score::difference_full_raw(&target, &current);
         let worker_count = options.workers.max(1);
@@ -227,6 +235,41 @@ mod tests {
             model.score,
             score::difference_full_raw(&model.target, &model.current)
         );
+    }
+
+    #[test]
+    fn add_score_matches_full_recomputation_for_every_kind() {
+        use crate::test_util::make_test_round;
+        use rand::{RngExt, SeedableRng};
+
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0xadd);
+        // TODO(ENG-2): include Quadratic once the T5 slice that fixes ENG-2
+        // (with PERF-7) stops quadratic strokes painting pixels twice; until
+        // then its incremental score legitimately differs from a recount.
+        let kinds = ShapeKind::all_kinds()
+            .iter()
+            .copied()
+            .filter(|&kind| kind != ShapeKind::Quadratic);
+        for (index, kind) in kinds.enumerate() {
+            for (width, height) in [(2, 2), (23, 17), (40, 9)] {
+                let mut pixels = vec![0_u8; (width * height * 4) as usize];
+                rng.fill(&mut pixels[..]);
+                let target = Buffer::from_rgba(width, height, pixels).expect("valid length");
+                let background = Color::new(rng.random(), rng.random(), rng.random(), 255);
+                let mut model = Model::new(target, background, ModelOptions::default());
+                let (mut worker, round) = make_test_round(width, height, index as u64);
+
+                for _ in 0..20 {
+                    let shape = Shape::random(kind, &mut worker, &round);
+                    model.add(shape, rng.random_range(1..=255));
+                    assert_eq!(
+                        model.score,
+                        score::difference_full_raw(&model.target, &model.current),
+                        "{kind:?} on {width}x{height}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

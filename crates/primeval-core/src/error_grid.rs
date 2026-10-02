@@ -7,6 +7,16 @@
 use crate::buffer::Buffer;
 use rand::{Rng, RngExt};
 
+/// The number of cells in a `cols x rows` grid, computed in `u64` so large
+/// grid options cannot wrap around in `u32`.
+///
+/// # Panics
+///
+/// Panics if the count does not fit in `usize`.
+fn cell_count(cols: u32, rows: u32) -> usize {
+    usize::try_from(u64::from(cols) * u64::from(rows)).expect("error grid cell count fits in usize")
+}
+
 /// A grid that tracks per-cell RGB error between target and current buffers.
 ///
 /// After calling [`compute`](ErrorGrid::compute), the internal CDF allows
@@ -35,7 +45,7 @@ impl ErrorGrid {
         let rows = rows.max(1);
         let cell_w = (img_w / cols).max(1);
         let cell_h = (img_h / rows).max(1);
-        let n = (cols * rows) as usize;
+        let n = cell_count(cols, rows);
         Self {
             cols,
             rows,
@@ -187,6 +197,14 @@ mod tests {
 
     fn test_rng() -> ChaCha8Rng {
         ChaCha8Rng::seed_from_u64(42)
+    }
+
+    #[test]
+    fn cell_count_does_not_wrap_in_u32() {
+        assert_eq!(cell_count(16, 16), 256);
+        assert_eq!(cell_count(1, 1), 1);
+        // 65536 * 65536 is 0 in wrapping u32 arithmetic.
+        assert_eq!(cell_count(65_536, 65_536), 1_usize << 32);
     }
 
     #[test]

@@ -21,46 +21,31 @@ pub(crate) struct Scanline {
 /// Lines that fall entirely outside the bounds are removed.
 /// Lines that partially overlap have their `x1`/`x2` clamped.
 pub(crate) fn crop_scanlines(lines: &mut Vec<Scanline>, w: i32, h: i32) {
-    let mut write = 0;
-    for read in 0..lines.len() {
-        let mut line = lines[read];
-
-        if line.y < 0 || line.y >= h {
-            continue;
+    lines.retain_mut(|line| match clamp_line(line, w, h) {
+        Some((x1, x2)) => {
+            line.x1 = x1;
+            line.x2 = x2;
+            true
         }
-        if line.x1 >= w {
-            continue;
-        }
-        if line.x2 < 0 {
-            continue;
-        }
-
-        line.x1 = line.x1.clamp(0, w - 1);
-        line.x2 = line.x2.clamp(0, w - 1);
-
-        if line.x1 > line.x2 {
-            continue;
-        }
-
-        lines[write] = line;
-        write += 1;
-    }
-    lines.truncate(write);
+        None => false,
+    });
 }
 
 /// Returns the clamped `(x1, x2)` for a scanline within a buffer of size `w x h`,
-/// or `None` if the line falls entirely outside the bounds.
+/// or `None` if no pixel of the line lies inside the buffer: the row is
+/// outside `0..h`, the span is entirely left of `0` or right of `w - 1`, the
+/// span is empty (`x1 > x2`), or the buffer is empty.
 ///
 /// The buffer is assumed to start at `(0, 0)`.
 #[must_use]
 #[inline]
 pub(crate) fn clamp_line(line: &Scanline, w: i32, h: i32) -> Option<(i32, i32)> {
-    if line.y < 0 || line.y > h - 1 {
+    if w <= 0 || line.y < 0 || line.y >= h || line.x2 < 0 || line.x1 >= w || line.x1 > line.x2 {
         return None;
     }
-    let x1 = line.x1.clamp(0, w - 1);
-    let x2 = line.x2.clamp(0, w - 1);
-    if x1 <= x2 { Some((x1, x2)) } else { None }
+    // `x1 <= x2`, `x2 >= 0` and `x1 < w` with `w >= 1`, so the clamped span is
+    // non-empty and inside `0..w`.
+    Some((line.x1.max(0), line.x2.min(w - 1)))
 }
 
 #[cfg(test)]
@@ -139,6 +124,58 @@ mod tests {
         let (x1, x2) = clamp_line(&line, 10, 10).unwrap();
         assert_eq!(x1, 0);
         assert_eq!(x2, 9);
+    }
+
+    #[test]
+    fn clamp_line_returns_none_for_lines_left_or_right_of_the_image() {
+        assert!(clamp_line(&sl(5, -8, -1), 10, 10).is_none());
+        assert!(clamp_line(&sl(5, 10, 14), 10, 10).is_none());
+        assert!(clamp_line(&sl(5, 12, 12), 10, 10).is_none());
+    }
+
+    #[test]
+    fn clamp_line_returns_none_for_an_empty_image() {
+        assert!(clamp_line(&sl(0, 0, 3), 0, 10).is_none());
+        assert!(clamp_line(&sl(0, 0, 3), 10, 0).is_none());
+        assert!(clamp_line(&sl(0, 0, 0), 0, 0).is_none());
+        assert!(clamp_line(&sl(0, -3, 3), 0, 10).is_none());
+    }
+
+    /// The pixels of `line` inside a `w x h` image, as an inclusive column
+    /// range, computed pixel by pixel.
+    fn visible_columns(line: &Scanline, w: i32, h: i32) -> Option<(i32, i32)> {
+        if line.y < 0 || line.y >= h {
+            return None;
+        }
+        let mut columns = (line.x1..=line.x2).filter(|x| (0..w).contains(x));
+        let first = columns.next()?;
+        Some((first, columns.next_back().unwrap_or(first)))
+    }
+
+    #[test]
+    fn clamp_line_and_crop_scanlines_keep_exactly_the_visible_pixels() {
+        use rand::{RngExt, SeedableRng};
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0x5ca1);
+        for _ in 0..20_000 {
+            let w = rng.random_range(0..12);
+            let h = rng.random_range(0..12);
+            let line = sl(
+                rng.random_range(-4..16),
+                rng.random_range(-16..20),
+                rng.random_range(-16..20),
+            );
+            let expected = visible_columns(&line, w, h);
+            assert_eq!(clamp_line(&line, w, h), expected, "{line:?} in {w}x{h}");
+
+            let mut cropped = vec![line];
+            crop_scanlines(&mut cropped, w, h);
+            let cropped: Vec<_> = cropped.iter().map(|l| (l.y, l.x1, l.x2)).collect();
+            let expected: Vec<_> = expected
+                .map(|(x1, x2)| (line.y, x1, x2))
+                .into_iter()
+                .collect();
+            assert_eq!(cropped, expected, "{line:?} in {w}x{h}");
+        }
     }
 
     #[test]

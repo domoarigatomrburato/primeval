@@ -22,13 +22,35 @@ fn normalized_to_raw_score(score: f64, width: u32, height: u32) -> u64 {
     (s * s * (width as f64 * height as f64 * 4.0)).round() as u64
 }
 
+/// Exclusive upper bound of every blend value `v` passed to [`div_by_m`]:
+/// `M * (M + 1) = 0xFFFF_0000`, which fits in `u32`.
+const BLEND_BOUND: u32 = M * (M + 1);
+
+/// Returns `value / M` without a division.
+///
+/// Exact for every `value < M * (M + 1)`. Write `value = q * M + r` with
+/// `0 <= r < M` and `q <= M`. Since `M = 2^16 - 1`, `value >> 16` is `q - 1`
+/// when `r < q` and `q` otherwise, so `value + 1 + (value >> 16)` is
+/// `q * 2^16 + r` or `q * 2^16 + r + 1`, both below `(q + 1) * 2^16`; shifting
+/// right by 16 gives `q`. The sum stays below `2^32`, so it cannot overflow.
 #[inline]
 fn div_by_m(value: u32) -> u32 {
+    debug_assert!(value < BLEND_BOUND, "blend value {value} out of range");
     (value + 1 + (value >> 16)) >> 16
 }
 
+/// Blends one 8-bit channel: `current` scaled by `a`, plus the premultiplied
+/// 16-bit `source` scaled by the coverage `ma`, back to 8 bits.
+///
+/// Overflow bound: with `sa` the colour's premultiplied alpha,
+/// `a = (M - sa * ma / M) * 0x101`, `source <= sa` and `ma <= M`, and
+/// `k = sa * ma / M` (rounded down), so `sa * ma < (k + 1) * M`. Then
+/// `v = current * a + source * ma <= M * (M - k) + sa * ma
+/// < M * (M - k) + M * (k + 1) = M * (M + 1)`, where `current * 0x101 <= M`.
+/// The NEON blend computes the same `v` per lane, so the bound holds there too.
 #[inline]
 fn blend_channel_scalar(current: u8, source: u32, ma: u32, a: u32) -> u8 {
+    debug_assert!(ma <= M && source <= M, "source={source} ma={ma}");
     let value = u32::from(current) * a + source * ma;
     (div_by_m(value) >> 8) as u8
 }
@@ -290,8 +312,8 @@ mod neon {
     /// # Safety
     ///
     /// `current` must have the same width and height as `target`. Scanlines are
-    /// clipped against `target` only, and the 8-pixel loads read both buffers
-    /// at the same byte offsets.
+    /// clipped against `target`, and the 8-pixel loads read both buffers at the
+    /// same byte offsets. The safe wrapper [`super::compute_color`] checks this.
     pub(super) unsafe fn compute_color(
         target: &Buffer,
         current: &Buffer,
@@ -319,14 +341,17 @@ mod neon {
             let chunk_pixels = pixel_count / 8;
 
             for _ in 0..chunk_pixels {
-                // SAFETY: `clamp_line` keeps `line.y` and `x1..=x2` inside
-                // `target`. Each `vld4_u8` reads 8 pixels (32 bytes) starting at
-                // `byte_index`, and this loop runs `pixel_count / 8` times from
-                // pixel `x1`, so the last pixel read is at most `x2`: the read
-                // from `t_pix` stays inside `target.pixels()` (length
-                // `width * height * 4` by the `Buffer` invariant). The read from
-                // `c_pix` at the same offset relies on this function's contract
-                // that `current` has `target`'s dimensions.
+                // SAFETY: `clamp_line` keeps `line.y` in `0..h` and `x1..=x2`
+                // in `0..w` of `target`. Each `vld4_u8` reads 8 pixels (32
+                // bytes) starting at `byte_index`, and this loop runs
+                // `pixel_count / 8` times from pixel `x1`, so the last pixel
+                // read is at most `x2`: the read stays inside
+                // `target.pixels()`, whose length is `w * h * 4` (the `Buffer`
+                // length invariant, asserted by every constructor). `current`
+                // has `target`'s width and height (this function's contract,
+                // asserted by the safe caller), so by the same invariant
+                // `c_pix.len() == t_pix.len()` and the read at the same offset
+                // is in bounds too.
                 let (target_channels, current_channels) = unsafe {
                     (
                         vld4_u8(t_pix.as_ptr().add(byte_index)),
@@ -405,8 +430,9 @@ mod neon {
     /// # Safety
     ///
     /// `current` must have the same width and height as `target`. Scanlines are
-    /// clipped against `target` only, and the 8-pixel loads read both buffers
-    /// at the same byte offsets.
+    /// clipped against `target`, and the 8-pixel loads read both buffers at the
+    /// same byte offsets. The safe wrapper [`super::energy_from_lines_raw`]
+    /// checks this.
     pub(super) unsafe fn energy_from_lines_raw(
         target: &Buffer,
         current: &Buffer,
@@ -435,9 +461,10 @@ mod neon {
 
             for _ in 0..chunk_pixels {
                 // SAFETY: same bounds argument as in `compute_color`: the loads
-                // stay inside the clipped row of `target`, and the read from
-                // `c_pix` relies on this function's contract that `current` has
-                // `target`'s dimensions.
+                // stay inside the clipped row of `target`, and `current` has
+                // `target`'s dimensions (this function's contract, asserted by
+                // the safe caller), so `c_pix.len() == t_pix.len()` by the
+                // `Buffer` length invariant.
                 let (target_channels, current_channels) = unsafe {
                     (
                         vld4_u8(t_pix.as_ptr().add(byte_index)),
@@ -515,6 +542,10 @@ mod neon {
 /// `1..=255`.
 ///
 /// Returns a zero [`Color`] if no scanline pixels fall within bounds.
+///
+/// # Panics
+///
+/// Panics if `current` and `target` have different dimensions.
 #[must_use]
 pub(crate) fn compute_color(
     target: &Buffer,
@@ -522,13 +553,12 @@ pub(crate) fn compute_color(
     lines: &[Scanline],
     alpha: i32,
 ) -> Color {
+    assert_same_dimensions(target, current);
     debug_assert!((1..=255).contains(&alpha), "alpha must be 1..=255");
     #[cfg(target_arch = "aarch64")]
     {
-        // SAFETY: NOT fully upheld yet (ENG-1). `neon::compute_color` requires
-        // `current` to have `target`'s dimensions; this safe function assumes it
-        // but does not check it, so a smaller `current` causes out-of-bounds
-        // reads. `target`-side bounds are enforced by `clamp_line`.
+        // SAFETY: `assert_same_dimensions` above guarantees that `current` has
+        // `target`'s width and height, the contract of `neon::compute_color`.
         unsafe { neon::compute_color(target, current, lines, alpha) }
     }
 
@@ -536,6 +566,21 @@ pub(crate) fn compute_color(
     {
         scalar::compute_color(target, current, lines, alpha)
     }
+}
+
+/// Asserts the precondition of the NEON scanline kernels: `current` has
+/// `target`'s width and height, so (with the `Buffer` length invariant) any
+/// offset inside `target` is inside `current` too.
+#[inline]
+fn assert_same_dimensions(target: &Buffer, current: &Buffer) {
+    assert!(
+        target.width() == current.width() && target.height() == current.height(),
+        "current must have target's dimensions: target {}x{}, current {}x{}",
+        target.width(),
+        target.height(),
+        current.width(),
+        current.height(),
+    );
 }
 
 #[cfg(test)]
@@ -705,6 +750,10 @@ pub(crate) fn difference_partial(
 /// pixel twice (the quadratic stroke, ENG-2) subtracts that pixel's old
 /// difference twice and can dip below zero part-way through a small canvas.
 /// Wrapping keeps debug builds from panicking and matches release builds.
+///
+/// # Panics
+///
+/// Panics if `current` and `target` have different dimensions.
 #[must_use]
 pub(crate) fn energy_from_lines_raw(
     target: &Buffer,
@@ -713,12 +762,12 @@ pub(crate) fn energy_from_lines_raw(
     color: Color,
     score: u64,
 ) -> u64 {
+    assert_same_dimensions(target, current);
     #[cfg(target_arch = "aarch64")]
     {
-        // SAFETY: NOT fully upheld yet (ENG-1). `neon::energy_from_lines_raw` requires
-        // `current` to have `target`'s dimensions; this safe function assumes it
-        // but does not check it, so a smaller `current` causes out-of-bounds
-        // reads. `target`-side bounds are enforced by `clamp_line`.
+        // SAFETY: `assert_same_dimensions` above guarantees that `current` has
+        // `target`'s width and height, the contract of
+        // `neon::energy_from_lines_raw`.
         unsafe { neon::energy_from_lines_raw(target, current, lines, color, score) }
     }
 
@@ -1184,5 +1233,197 @@ mod tests {
             })
         );
         assert!((normalized - expected).abs() < 1e-12);
+    }
+
+    fn full_row(y: i32, width: i32) -> Scanline {
+        Scanline {
+            y,
+            x1: 0,
+            x2: width - 1,
+            alpha: 0xFFFF,
+        }
+    }
+
+    // A wider `current` keeps every read in bounds even before the check, so
+    // these tests never run the out-of-bounds read they guard against.
+    #[test]
+    #[should_panic(expected = "current must have target's dimensions")]
+    fn compute_color_rejects_current_with_other_dimensions() {
+        let target = Buffer::new(16, 4);
+        let current = Buffer::new(17, 4);
+        let _ = compute_color(&target, &current, &[full_row(3, 16)], 128);
+    }
+
+    #[test]
+    #[should_panic(expected = "current must have target's dimensions")]
+    fn energy_from_lines_raw_rejects_current_with_other_dimensions() {
+        let target = Buffer::new(16, 4);
+        let current = Buffer::new(16, 5);
+        let color = Color::new(10, 20, 30, 128);
+        let _ = energy_from_lines_raw(&target, &current, &[full_row(3, 16)], color, 0);
+    }
+
+    /// The blend computes `v = current * a + source * ma` with
+    /// `a = (M - sa * ma / M) * 0x101`. `v` is largest for `current = 255`
+    /// and a white source (`source = sa`); check the documented bound
+    /// `v < M * (M + 1)` for every colour alpha and every coverage.
+    #[test]
+    fn blend_value_stays_below_the_overflow_bound() {
+        let bound = u64::from(M) * u64::from(M + 1);
+        for alpha in 0_u8..=255 {
+            let [source, .., sa] = Color::new(255, 255, 255, alpha).to_premultiplied_rgba();
+            assert_eq!(source, sa);
+            for ma in 0..=M {
+                let a = (M - sa * ma / M) * 0x101;
+                let value = 255 * u64::from(a) + u64::from(source) * u64::from(ma);
+                assert!(value < bound, "alpha={alpha} ma={ma} value={value}");
+            }
+        }
+    }
+
+    /// `div_by_m(v) == v / M` for every `v < M * (M + 1)`: checked at both
+    /// ends of every quotient's range, where an off-by-one would show.
+    #[test]
+    fn div_by_m_is_exact_below_the_bound() {
+        for q in 0..=M {
+            for r in [0, 1, q.saturating_sub(1), q.min(M - 1), M - 2, M - 1] {
+                let value = q * M + r;
+                assert_eq!(div_by_m(value), q, "q={q} r={r}");
+            }
+        }
+    }
+}
+
+/// NEON and scalar kernels must agree bit for bit; release builds on aarch64
+/// only run the NEON ones, so CI covers them on the macOS arm64 leg.
+#[cfg(all(test, target_arch = "aarch64"))]
+mod neon_parity {
+    use super::{M, blend_channel_scalar, neon, scalar};
+    use crate::buffer::Buffer;
+    use crate::color::Color;
+    use crate::scanline::Scanline;
+    use rand::{RngExt, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
+
+    fn random_buffer(rng: &mut ChaCha8Rng, width: u32, height: u32) -> Buffer {
+        let mut buffer = Buffer::new(width, height);
+        rng.fill(buffer.pixels_mut());
+        buffer
+    }
+
+    /// Scanlines of every kind the kernels must handle: full rows touching
+    /// both edges, lines sticking out on either side or off the canvas,
+    /// lengths around the 8-pixel chunk size, and every coverage extreme.
+    fn random_lines(rng: &mut ChaCha8Rng, width: i32, height: i32) -> Vec<Scanline> {
+        let alpha = |rng: &mut ChaCha8Rng| match rng.random_range(0..4) {
+            0 => 0,
+            1 => M,
+            _ => rng.random_range(0..=M),
+        };
+        let mut lines = Vec::new();
+        for y in -1..=height {
+            lines.push(Scanline {
+                y,
+                x1: -rng.random_range(0..3),
+                x2: width - 1 + rng.random_range(0..3),
+                alpha: alpha(rng),
+            });
+        }
+        for _ in 0..64 {
+            let x1 = rng.random_range(-10..width + 2);
+            let len = rng.random_range(0..2 * width + 20);
+            lines.push(Scanline {
+                y: rng.random_range(-1..=height),
+                x1,
+                x2: x1 + len - rng.random_range(0..2),
+                alpha: alpha(rng),
+            });
+        }
+        lines
+    }
+
+    fn sizes() -> impl Iterator<Item = (u32, u32)> {
+        [
+            (1, 1),
+            (2, 2),
+            (7, 3),
+            (8, 2),
+            (9, 5),
+            (15, 4),
+            (16, 3),
+            (17, 6),
+        ]
+        .into_iter()
+        .chain([(23, 7), (31, 2), (33, 9), (64, 3), (65, 4)])
+    }
+
+    #[test]
+    fn compute_color_matches_scalar_for_every_alpha() {
+        let mut rng = ChaCha8Rng::seed_from_u64(0xc010);
+        for (width, height) in sizes() {
+            let target = random_buffer(&mut rng, width, height);
+            let current = random_buffer(&mut rng, width, height);
+            for alpha in 1..=255 {
+                let lines = random_lines(&mut rng, width as i32, height as i32);
+                let expected = scalar::compute_color(&target, &current, &lines, alpha);
+                // SAFETY: `target` and `current` have the same dimensions.
+                let actual = unsafe { neon::compute_color(&target, &current, &lines, alpha) };
+                assert_eq!(actual, expected, "{width}x{height} alpha={alpha}");
+            }
+        }
+    }
+
+    #[test]
+    fn energy_from_lines_raw_matches_scalar_for_every_alpha() {
+        let mut rng = ChaCha8Rng::seed_from_u64(0xe4e7);
+        for (width, height) in sizes() {
+            let target = random_buffer(&mut rng, width, height);
+            let current = random_buffer(&mut rng, width, height);
+            let score = scalar::difference_full_raw(&target, &current);
+            for alpha in 1..=255 {
+                let lines = random_lines(&mut rng, width as i32, height as i32);
+                let color = Color::new(rng.random(), rng.random(), rng.random(), alpha);
+                let expected =
+                    scalar::energy_from_lines_raw(&target, &current, &lines, color, score);
+                // SAFETY: `target` and `current` have the same dimensions.
+                let actual =
+                    unsafe { neon::energy_from_lines_raw(&target, &current, &lines, color, score) };
+                assert_eq!(actual, expected, "{width}x{height} {color:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn difference_full_raw_matches_scalar() {
+        let mut rng = ChaCha8Rng::seed_from_u64(0xd1ff);
+        for (width, height) in sizes() {
+            let a = random_buffer(&mut rng, width, height);
+            let b = random_buffer(&mut rng, width, height);
+            let expected = scalar::difference_full_raw(&a, &b);
+            // SAFETY: `a` and `b` have the same dimensions.
+            let actual = unsafe { neon::difference_full_raw(&a, &b) };
+            assert_eq!(actual, expected, "{width}x{height}");
+        }
+    }
+
+    #[test]
+    fn blend_matches_scalar_for_every_alpha_and_channel_value() {
+        let mut rng = ChaCha8Rng::seed_from_u64(0xb1e4);
+        for alpha in 1..=255 {
+            let color = Color::new(rng.random(), rng.random(), rng.random(), alpha);
+            let [sr, _, _, sa] = color.to_premultiplied_rgba();
+            for ma in [0, 1, M / 2, M - 1, M, rng.random_range(0..=M)] {
+                let a = (M - sa * ma / M) * 0x101;
+                for chunk in 0_u8..32 {
+                    let current: [u8; 8] = std::array::from_fn(|lane| chunk * 8 + lane as u8);
+                    // SAFETY: only requires NEON, a baseline aarch64 feature.
+                    let simd = unsafe { neon::blend_chunk_u8x8(current, sr, ma, a) };
+                    for lane in 0..8 {
+                        let expected = blend_channel_scalar(current[lane], sr, ma, a);
+                        assert_eq!(simd[lane], expected, "alpha={alpha} ma={ma} lane={lane}");
+                    }
+                }
+            }
+        }
     }
 }

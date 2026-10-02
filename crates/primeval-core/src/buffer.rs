@@ -1,7 +1,15 @@
+/// The smallest width and height of a [`Buffer`] built through the public
+/// API: the engine's search needs a canvas of at least 2 x 2 pixels, so a
+/// [`Model`](crate::Model) cannot be created for anything smaller.
+const MIN_PUBLIC_SIDE: u32 = 2;
+
 /// A contiguous RGBA pixel buffer with no row padding.
 ///
 /// Pixels are stored in row-major order as `[R, G, B, A]` quads.
-/// The total byte length is always exactly `width * height * 4`.
+/// The total byte length is always exactly `width * height * 4`; every
+/// constructor checks this with a hard assertion or rejects the input, and the
+/// unsafe NEON scoring kernels rely on it. Buffers built through the public API
+/// ([`Buffer::from_rgba`]) are also at least 2 x 2 pixels.
 #[derive(Clone, Debug)]
 pub struct Buffer {
     width: u32,
@@ -19,11 +27,7 @@ impl Buffer {
     #[must_use]
     pub(crate) fn new(width: u32, height: u32) -> Self {
         let len = pixel_byte_len(width, height);
-        Self {
-            width,
-            height,
-            pixels: vec![0u8; len],
-        }
+        Self::from_parts(width, height, vec![0u8; len])
     }
 
     /// Creates a buffer filled with a single color.
@@ -36,9 +40,20 @@ impl Buffer {
         let len = pixel_byte_len(width, height);
         let mut pixels = Vec::with_capacity(len);
         let pixel = [color.r, color.g, color.b, color.a];
-        for _ in 0..(width as usize * height as usize) {
+        for _ in 0..len / 4 {
             pixels.extend_from_slice(&pixel);
         }
+        Self::from_parts(width, height, pixels)
+    }
+
+    /// Assembles a buffer, asserting the length invariant
+    /// `pixels.len() == width * height * 4` that the NEON kernels rely on.
+    fn from_parts(width: u32, height: u32, pixels: Vec<u8>) -> Self {
+        assert_eq!(
+            pixels.len(),
+            pixel_byte_len(width, height),
+            "buffer pixel length must be width * height * 4"
+        );
         Self {
             width,
             height,
@@ -85,17 +100,18 @@ impl Buffer {
 
     /// Creates a buffer from raw row-major RGBA bytes.
     ///
-    /// Returns `None` unless `pixels.len()` is exactly `width * height * 4`.
+    /// Returns `None` unless both sides are at least 2 pixels (the smallest
+    /// canvas the engine supports) and `pixels.len()` is exactly
+    /// `width * height * 4`.
     #[must_use]
     pub fn from_rgba(width: u32, height: u32, pixels: Vec<u8>) -> Option<Self> {
+        if width < MIN_PUBLIC_SIDE || height < MIN_PUBLIC_SIDE {
+            return None;
+        }
         let len = (width as usize)
             .checked_mul(height as usize)?
             .checked_mul(4)?;
-        (pixels.len() == len).then_some(Self {
-            width,
-            height,
-            pixels,
-        })
+        (pixels.len() == len).then(|| Self::from_parts(width, height, pixels))
     }
 }
 
@@ -162,6 +178,16 @@ mod tests {
         assert!(Buffer::from_rgba(3, 2, vec![0; 23]).is_none());
         assert!(Buffer::from_rgba(3, 2, vec![0; 25]).is_none());
         assert!(Buffer::from_rgba(u32::MAX, u32::MAX, Vec::new()).is_none());
+    }
+
+    #[test]
+    fn from_rgba_rejects_sides_below_two() {
+        assert!(Buffer::from_rgba(0, 0, Vec::new()).is_none());
+        assert!(Buffer::from_rgba(0, 5, Vec::new()).is_none());
+        assert!(Buffer::from_rgba(1, 1, vec![0; 4]).is_none());
+        assert!(Buffer::from_rgba(1, 5, vec![0; 20]).is_none());
+        assert!(Buffer::from_rgba(5, 1, vec![0; 20]).is_none());
+        assert!(Buffer::from_rgba(2, 2, vec![0; 16]).is_some());
     }
 
     #[test]

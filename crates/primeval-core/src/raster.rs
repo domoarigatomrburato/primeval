@@ -145,6 +145,28 @@ fn stroke_segment(
     }
 }
 
+/// Fixed-point scale of one sub-row's horizontal coverage of a pixel: a fully
+/// covered sub-row contributes exactly `SUB_ROW_ONE`.
+const SUB_ROW_ONE: f64 = 65536.0;
+
+/// The coverage of one sub-row span over one pixel, `overlap` in `0..=1`, in
+/// units of [`SUB_ROW_ONE`].
+#[inline]
+fn sub_row_coverage(overlap: f64) -> u32 {
+    (overlap * SUB_ROW_ONE) as u32
+}
+
+/// Converts the summed [`sub_row_coverage`] of one pixel over `sub_rows`
+/// sub-rows into a scanline alpha in `0..=0xFFFF`.
+///
+/// The sum is scaled once, so a pixel covered in every sub-row gets exactly
+/// `0xFFFF`. (Scaling each sub-row to `0xFFFF / 4` first summed to 65532.)
+#[inline]
+fn coverage_to_alpha(covered: u32, sub_rows: usize) -> u32 {
+    let full = sub_rows as u64 * SUB_ROW_ONE as u64;
+    ((u64::from(covered) * 0xFFFF / full) as u32).min(0xFFFF)
+}
+
 /// Fills a closed polygon directly into `worker.lines`, bypassing the
 /// tiny-skia pixmap pipeline.
 ///
@@ -252,18 +274,17 @@ pub(crate) fn fill_polygon_direct(
         for px in ix_min..=ix_max {
             let px_left = px as f64;
             let px_right = px_left + 1.0;
-            let mut coverage: u32 = 0;
+            let mut covered: u32 = 0;
 
             for &(sl, sr, _) in &spans[..num_spans] {
                 // How much of this pixel is inside this span?
                 let overlap_l = sl.max(px_left);
                 let overlap_r = sr.min(px_right);
                 if overlap_r > overlap_l {
-                    let frac = overlap_r - overlap_l; // 0..1
-                    coverage += (frac * (65535.0 / NUM_AA as f64)) as u32;
+                    covered += sub_row_coverage(overlap_r - overlap_l);
                 }
             }
-            let alpha = coverage.min(0xFFFF);
+            let alpha = coverage_to_alpha(covered, NUM_AA);
 
             if alpha != run_alpha || px == ix_min {
                 // Flush previous run if it had coverage.
@@ -365,18 +386,17 @@ pub(crate) fn fill_rotated_ellipse_direct(
         for px in ix_min..=ix_max {
             let pixel_left = px as f64;
             let pixel_right = pixel_left + 1.0;
-            let mut coverage = 0_u32;
+            let mut covered = 0_u32;
 
             for &(span_left, span_right) in spans.iter().flatten() {
                 let overlap_left = span_left.max(pixel_left);
                 let overlap_right = span_right.min(pixel_right);
                 if overlap_right > overlap_left {
-                    let overlap = overlap_right - overlap_left;
-                    coverage += (overlap * (65535.0 / NUM_AA as f64)) as u32;
+                    covered += sub_row_coverage(overlap_right - overlap_left);
                 }
             }
 
-            let alpha = coverage.min(0xFFFF);
+            let alpha = coverage_to_alpha(covered, NUM_AA);
             if px == ix_min {
                 run_alpha = alpha;
                 continue;
@@ -508,6 +528,46 @@ mod tests {
         let swapped_mask = render_mask(&swapped, 48, 48);
 
         assert_eq!(vertical_mask.pixels(), swapped_mask.pixels());
+    }
+
+    /// The alpha of the span covering `(x, y)`, if any.
+    fn alpha_at(lines: &[Scanline], x: i32, y: i32) -> Option<u32> {
+        lines
+            .iter()
+            .find(|line| line.y == y && line.x1 <= x && x <= line.x2)
+            .map(|line| line.alpha)
+    }
+
+    #[test]
+    fn fill_polygon_direct_gives_fully_covered_pixels_full_alpha() {
+        let mut lines = Vec::new();
+        let square = [(2.0, 2.0), (12.0, 2.0), (12.0, 12.0), (2.0, 12.0)];
+        fill_polygon_direct(&mut lines, &square, 16, 16);
+
+        assert_eq!(alpha_at(&lines, 7, 7), Some(0xFFFF));
+        assert_eq!(alpha_at(&lines, 2, 2), Some(0xFFFF));
+        assert_eq!(alpha_at(&lines, 11, 11), Some(0xFFFF));
+        assert_eq!(alpha_at(&lines, 12, 7), None);
+    }
+
+    #[test]
+    fn fill_polygon_direct_gives_partial_pixels_proportional_alpha() {
+        let mut lines = Vec::new();
+        // Columns 2 and 11 are half covered; rows are fully covered.
+        let rect = [(2.5, 2.0), (11.5, 2.0), (11.5, 12.0), (2.5, 12.0)];
+        fill_polygon_direct(&mut lines, &rect, 16, 16);
+
+        assert_eq!(alpha_at(&lines, 2, 7), Some(0xFFFF / 2));
+        assert_eq!(alpha_at(&lines, 7, 7), Some(0xFFFF));
+        assert_eq!(alpha_at(&lines, 11, 7), Some(0xFFFF / 2));
+    }
+
+    #[test]
+    fn fill_rotated_ellipse_direct_gives_fully_covered_pixels_full_alpha() {
+        let mut lines = Vec::new();
+        fill_rotated_ellipse_direct(&mut lines, 16.0, 16.0, 10.0, 6.0, 0.7, 32, 32);
+
+        assert_eq!(alpha_at(&lines, 16, 16), Some(0xFFFF));
     }
 
     #[test]
