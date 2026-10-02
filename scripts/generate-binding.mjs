@@ -76,9 +76,15 @@ function detectLinuxLibc() {
   let report = null
   if (typeof process.report?.getReport === 'function') {
     // Skip collecting network data, which can be slow; only the header and
-    // shared objects are needed here.
+    // shared objects are needed here. The setting is process-wide, so put
+    // it back for the application's own reports.
+    const excludeNetwork = process.report.excludeNetwork
     process.report.excludeNetwork = true
-    report = process.report.getReport()
+    try {
+      report = process.report.getReport()
+    } finally {
+      process.report.excludeNetwork = excludeNetwork
+    }
   }
   const header = report?.header
   if (

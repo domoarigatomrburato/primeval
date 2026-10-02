@@ -105,8 +105,9 @@ test("binding loader reports both local and package load failures with install g
   ]);
 });
 
-test("binding loader excludes network data before reading the linux process report", () => {
+test("binding loader excludes network data while reading the linux process report, then restores the setting", () => {
   const processMock = glibcProcess();
+  processMock.report.excludeNetwork = false;
   const excludeNetworkAtReport = [];
   const getReport = processMock.report.getReport;
   processMock.report.getReport = () => {
@@ -121,4 +122,20 @@ test("binding loader excludes network data before reading the linux process repo
   run();
 
   assert.deepEqual(excludeNetworkAtReport, [true]);
+  assert.equal(processMock.report.excludeNetwork, false);
+});
+
+test("binding loader restores the report network setting when reading the report throws", () => {
+  const processMock = glibcProcess();
+  processMock.report.excludeNetwork = false;
+  processMock.report.getReport = () => {
+    throw new Error("report failed");
+  };
+  const run = runGeneratedBindingLoader({
+    processMock,
+    requireImpl: () => ({ NativeTask: class {}, startApproximate() {} }),
+  });
+
+  assert.throws(run, /report failed/);
+  assert.equal(processMock.report.excludeNetwork, false);
 });
