@@ -8,7 +8,8 @@
 //!   --primitive PATH    the Go binary (default: `primitive` on PATH, else
 //!                       $HOME/go/bin/primitive)
 //!   --image PATH        add an input image (repeatable); replaces the
-//!                       photographs in docs/readme/originals/
+//!                       default corpus, the paintings americangothic.jpg
+//!                       and monalisa.jpg in docs/readme/originals/
 //!   --shapes LIST       comma-separated shape kinds (default: all nine)
 //!   --steps LIST        comma-separated step counts (default: 200,1000)
 //!   --reps N            runs per tool and configuration (default: 3)
@@ -89,6 +90,10 @@ const ALL_SHAPES: [ShapeKind; 9] = [
     ShapeKind::RotatedEllipse,
     ShapeKind::Polygon,
 ];
+/// The default corpus: the two paintings in `docs/readme/originals/`, in
+/// file-name order. A fixed list, so adding a gallery image does not change
+/// the benchmark.
+const DEFAULT_IMAGES: [&str; 2] = ["americangothic.jpg", "monalisa.jpg"];
 /// How to install the Go tool, for the error when it is missing.
 const INSTALL_HINT: &str = "install it with `go install github.com/fogleman/primitive@latest` \
                             or pass --primitive PATH";
@@ -291,7 +296,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
         }
     };
     if images.is_empty() {
-        images = default_images()?;
+        images = default_images();
     }
     let shapes = shapes.unwrap_or_else(|| ALL_SHAPES.to_vec());
     for &shape in &shapes {
@@ -320,27 +325,10 @@ fn find_primitive() -> Option<PathBuf> {
     })
 }
 
-/// The JPEG, PNG and WebP files in `docs/readme/originals/`, sorted.
-fn default_images() -> Result<Vec<PathBuf>, BoxError> {
+/// The default corpus, [`DEFAULT_IMAGES`] in `docs/readme/originals/`.
+fn default_images() -> Vec<PathBuf> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/readme/originals");
-    let mut paths = Vec::new();
-    for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        let supported = path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| {
-                matches!(
-                    extension.to_ascii_lowercase().as_str(),
-                    "jpg" | "jpeg" | "png" | "webp"
-                )
-            });
-        if supported {
-            paths.push(path);
-        }
-    }
-    paths.sort();
-    Ok(paths)
+    DEFAULT_IMAGES.iter().map(|name| dir.join(name)).collect()
 }
 
 /// Go's `-m` value for a shape kind.

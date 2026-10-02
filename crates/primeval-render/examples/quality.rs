@@ -7,7 +7,7 @@
 //!
 //!   --quick             smoke run: 10 steps, shape kind any
 //!   --image PATH        add an input image (repeatable); replaces the
-//!                       default photographs
+//!                       default paintings
 //!   --no-synthetic      skip the generated images
 //!   --shapes LIST       comma-separated shape kinds (default: all, plus any)
 //!   --steps LIST        comma-separated step counts (default: 100,200)
@@ -18,10 +18,12 @@
 //! table to stdout, sorted by image, shape and steps. Progress goes to
 //! stderr. The header records the commit and the machine.
 //!
-//! Corpus: the public-domain photographs `docs/readme/originals/monalisa.jpg`
-//! and `americangothic.jpg`, plus three deterministic 512 × 512 images this
-//! tool generates (`synthetic-gradient`, `synthetic-shapes`,
-//! `synthetic-texture`). Inputs are expected to be opaque.
+//! Corpus: the public-domain paintings `docs/readme/originals/monalisa.jpg`
+//! and `americangothic.jpg` ([`DEFAULT_PHOTOS`], a fixed list, so adding a
+//! gallery image does not change the benchmark), plus three deterministic
+//! 512 × 512 images this tool generates (`synthetic-gradient`,
+//! `synthetic-shapes`, `synthetic-texture`). Inputs are expected to be
+//! opaque.
 //!
 //! Columns:
 //!

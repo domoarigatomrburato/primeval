@@ -78,7 +78,7 @@ The SVGs and thumbnails in `docs/images/`, `docs/gallery.md` and the README's al
 cargo run --release -p primeval-render --example gallery  # several minutes
 ```
 
-To add a photograph, drop a JPEG, PNG or WebP file you may redistribute into `docs/readme/originals/` and run the same command. Name it with dashes (`the-kiss.jpg` becomes "The Kiss" in the gallery) or add its title to `TITLES` in `crates/primeval-render/examples/gallery.rs`. The doc comment there lists the step counts, seed and output sizes.
+To add an image, drop a JPEG, PNG or WebP file you may redistribute into `docs/readme/originals/`, add its row (work, author, licence and source) to [`docs/readme/originals/SOURCES.md`](docs/readme/originals/SOURCES.md), and run the same command; `test/readme.test.js` fails while an image has no row. The benchmark runners keep their fixed corpus of the two paintings, so a new image changes only the gallery. Name it with dashes (`the-kiss.jpg` becomes "The Kiss" in the gallery) or add its title to `TITLES` in `crates/primeval-render/examples/gallery.rs`. The doc comment there lists the step counts, seed and output sizes.
 
 ## Profiling
 

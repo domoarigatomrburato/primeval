@@ -12,15 +12,15 @@ Give it an input image and it searches for a layered approximation you can expor
 <table>
   <tr>
     <td align="center"><img src="docs/images/thumbs/monalisa/any-200.jpg" alt="Mona Lisa with mixed shapes after 200 steps." width="100%" /></td>
-    <td align="center"><img src="docs/images/thumbs/monalisa/quadratic-1000.jpg" alt="Mona Lisa with quadratic curves after 1000 steps." width="100%" /></td>
-    <td align="center"><img src="docs/images/thumbs/americangothic/polygon-50.jpg" alt="American Gothic with polygon shapes after 50 steps." width="100%" /></td>
-    <td align="center"><img src="docs/images/thumbs/americangothic/circle-200.jpg" alt="American Gothic with circles after 200 steps." width="100%" /></td>
+    <td align="center"><img src="docs/images/thumbs/mae-jemison/triangle-200.jpg" alt="Portrait of Mae Jemison with triangles after 200 steps." width="100%" /></td>
+    <td align="center"><img src="docs/images/thumbs/grand-prismatic-spring/quadratic-1000.jpg" alt="Aerial photograph of Grand Prismatic Spring with quadratic curves after 1000 steps." width="100%" /></td>
+    <td align="center"><img src="docs/images/thumbs/downy-woodpecker/polygon-200.jpg" alt="Photograph of a downy woodpecker with polygon shapes after 200 steps." width="100%" /></td>
   </tr>
   <tr>
     <td align="center"><sub>Mona Lisa · mixed · 200 steps</sub></td>
-    <td align="center"><sub>Mona Lisa · quadratic · 1000 steps</sub></td>
-    <td align="center"><sub>American Gothic · polygon · 50 steps</sub></td>
-    <td align="center"><sub>American Gothic · circle · 200 steps</sub></td>
+    <td align="center"><sub>Mae Jemison · triangle · 200 steps</sub></td>
+    <td align="center"><sub>Grand Prismatic Spring · quadratic · 1000 steps</sub></td>
+    <td align="center"><sub>Downy Woodpecker · polygon · 200 steps</sub></td>
   </tr>
 </table>
 
@@ -28,7 +28,7 @@ Inspired by Michael Fogleman's original [`primitive`](https://github.com/foglema
 
 ## Progression Gallery
 
-Browse the full example gallery in [`docs/gallery.md`](docs/gallery.md).
+Browse the full example gallery in [`docs/gallery.md`](docs/gallery.md). The sample images are in the public domain; [`docs/readme/originals/SOURCES.md`](docs/readme/originals/SOURCES.md) credits their sources.
 
 ## Highlights
 
@@ -366,7 +366,7 @@ const result = await approximate({
 
 ## Benchmarks
 
-Wall time per call and final score for 200 steps of each shape mode on the two photographs in `docs/readme/originals/`, with default options (`resizeInput: 256`, `outputSize: 1024`, alpha and background `auto`), seed 42 and PNG output. The time covers decoding, the search and the PNG encode. The score is the normalised RMSE between the canvas and the input at working resolution (lower is better).
+Wall time per call and final score for 200 steps of each shape mode on the two paintings in `docs/readme/originals/`, *American Gothic* (`americangothic.jpg`) and *Mona Lisa* (`monalisa.jpg`), with default options (`resizeInput: 256`, `outputSize: 1024`, alpha and background `auto`), seed 42 and PNG output. The time covers decoding, the search and the PNG encode. The score is the normalised RMSE between the canvas and the input at working resolution (lower is better).
 
 | Shape | American Gothic time | American Gothic score | Mona Lisa time | Mona Lisa score |
 | --- | ---: | ---: | ---: | ---: |
@@ -390,7 +390,7 @@ Times vary between runs and machines. Scores are deterministic for a given commi
 
 ### Compared with Go primitive
 
-The same two photographs through the original Go [`primitive`](https://github.com/fogleman/primitive) and primeval, with the same settings: the shape kind, the step count, alpha 128 (Go's default), working size 256, output size 1024, the average colour as background, and PNG output. Speedup is Go's time over primeval's, summed over both images. RMSE is the RGB error (0–255, lower is better) of each PNG against the original resized to 1024 with Lanczos3, averaged over both images.
+The same two paintings, *American Gothic* and *Mona Lisa*, through the original Go [`primitive`](https://github.com/fogleman/primitive) and primeval, with the same settings: the shape kind, the step count, alpha 128 (Go's default), working size 256, output size 1024, the average colour as background, and PNG output. Speedup is Go's time over primeval's, summed over both images. RMSE is the RGB error (0–255, lower is better) of each PNG against the original resized to 1024 with Lanczos3, averaged over both images.
 
 | Shape | 200 steps speedup | Go RMSE | primeval RMSE | 1000 steps speedup | Go RMSE | primeval RMSE |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |

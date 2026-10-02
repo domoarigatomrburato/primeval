@@ -115,6 +115,18 @@ test("the gallery shows every original and every generated image", () => {
   }
 });
 
+test("SOURCES.md credits every original image", () => {
+  const sources = fs.readFileSync(path.join(repoRoot, "docs/readme/originals/SOURCES.md"), "utf8");
+  const rows = new Set([...sources.matchAll(/^\| `([^`]+)` \|/gm)].map(([, file]) => file));
+  const images = fs
+    .readdirSync(path.join(repoRoot, "docs/readme/originals"))
+    .filter((name) => /\.(?:jpe?g|png|webp)$/i.test(name));
+  assert.ok(images.length > 0, "docs/readme/originals has no images");
+  for (const image of images) {
+    assert.ok(rows.has(image), `docs/readme/originals/SOURCES.md has no row for ${image}`);
+  }
+});
+
 test("the Benchmarks section cites the runner and commit of each table", () => {
   const readme = fs.readFileSync(path.join(repoRoot, "README.md"), "utf8");
   const section = readme.split("\n## Benchmarks\n")[1].split("\n## ")[0];
