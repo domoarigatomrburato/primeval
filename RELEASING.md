@@ -8,7 +8,7 @@ Release automation is defined in [.github/workflows/quality.yml](.github/workflo
 
 The npm package, the platform packages, and the Cargo crates share one version. `package.json` is the source; the Cargo workspace carries it in `[workspace.package]`, and every crate inherits it with `version.workspace = true`. `npm run check:napi-targets` (part of `npm run verify`) fails if they drift.
 
-Versioning restarts at the first real release. The existing `v0.1.1` tag was never published to npm, and the maintainer removes it; nothing in the repository depends on it.
+Versioning restarts at the first real release. A `v0.1.1` tag existed but nothing was ever published from it, and it has been deleted; give the first release a version that was never tagged (for example `0.1.2`).
 
 ## Before Tagging
 
@@ -57,6 +57,16 @@ When a `v*` tag is pushed, [.github/workflows/napi-prebuilds.yml](.github/workfl
 7. Publish with `scripts/release-packages.mjs publish`: every platform package, then the root package last, with provenance. A package whose version is already on the registry is skipped.
 8. Verify with `npm view` that every package is on the registry at the tag version, and fail otherwise.
 9. Create the GitHub Release with generated notes, unless it already exists.
+
+## First Release
+
+npm trusted publishing (OIDC) can only be set up for a package that already exists, so the first release of every package publishes with a token:
+
+1. On npmjs.com, create a granular access token with read and write access to the `@aleburato` scope and a short expiry, for example 7 days.
+2. Add it to the repository as the Actions secret `NPM_TOKEN`. The publish step passes it to npm as `NODE_AUTH_TOKEN`.
+3. Release as described above.
+4. On npmjs.com, add a trusted publisher to each of the six packages (`@aleburato/primeval` and the five platform packages in `package.json` `optionalDependencies`): repository `domoarigatomrburato/primeval`, workflow `napi-prebuilds.yml`.
+5. Delete the `NPM_TOKEN` secret and revoke the token. Later releases publish through OIDC, which needs npm 11.5.1 or newer on the runner.
 
 ## Re-running A Failed Release
 

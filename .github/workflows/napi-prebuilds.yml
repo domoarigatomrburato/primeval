@@ -154,6 +154,11 @@ jobs:
         run: node scripts/release-packages.mjs publish npm "$TAG"
         env:
           TAG: ${{ github.ref_name }}
+          # Trusted publishing (OIDC) cannot create a package, so the first
+          # release publishes with a short-lived token; once every package has
+          # a trusted publisher, the secret is deleted and this is empty
+          # (RELEASING.md, "First Release").
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Verify published packages
         run: node scripts/release-packages.mjs verify "$TAG"
