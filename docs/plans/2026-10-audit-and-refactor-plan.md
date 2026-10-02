@@ -269,14 +269,16 @@ Takeaways:
 3. **The slowest shapes are rasterization-bound, not scoring-bound.** Polygon and quadratic cost 32 ns/pixel and rotated-ellipse 10.5, against 2.4–3.9 for circle and rectangle. Rotated-ellipse and polygon alone are 51% of the total run time.
 4. **Thread scaling is weak.** 1→8 workers gives 3.9× (3.475 s → 0.893 s, `any`, 50 steps), and 4→8 workers only +27% (1.136 s → 0.893 s). 12 workers on 8 cores is slower (1.273 s) because it runs 24 rounds instead of 16 and oversubscribes.
 
-### PERF-0: Benchmark and quality infrastructure
+### PERF-0: Benchmark and quality infrastructure (landed)
 
-- **Severity / status:** High (enabling). Verified absent. `next: yes`.
-- **Problem:** there is no `benches/`, Criterion or Divan. The README's comparison with Go comes from a script that was removed (`e24492d`), so it cannot be reproduced.
-- **Fix:**
-  - Add Divan (or Criterion) benches: rasterizer per shape, `compute_color`, `energy_from_lines_raw`, `difference_full_raw`, a seeded `Model::step` per shape with one worker, `render_output` at 1024, and encoders.
-  - Add an end-to-end script that records **time and quality** (RMSE, and SSIM later) at fixed step counts on a licence-clean corpus (DOC-6), with output as a stable table for diffing.
-  - Run it on arm64 and x86. The harness in Appendix A is the starting point.
+Divan benches live behind each crate's non-default `bench` feature; `examples/quality.rs` in `primeval-render` prints a time and quality table (engine score and output RMSE) over two public-domain photos and three synthetic images. `CONTRIBUTING.md` ("Benchmarks") explains how to run them. Baseline at `425201e` on the M3 (8 logical cores):
+
+- `Model::step`, first step of a fresh 256×256 model, one worker: rectangle 118 ms, quadratic 61 ms, circle 133 ms, triangle 151 ms, ellipse 162 ms, `any` 174 ms, rotated rectangle 197 ms, rotated ellipse 620 ms, polygon 778 ms.
+- Rasterizing 256 shapes: rectangle 3.3 µs, circle 6.5 µs, ellipse 6.7 µs, triangle 12.5 µs, quadratic 49 µs, rotated rectangle 73 µs, polygon 640 µs, rotated ellipse 1.29 ms.
+- Writers for a 200-shape drawing at 1024 px: SVG 0.22 ms, PNG (render and encode) 32 ms.
+- Full runner: 228.6 s over 90 runs. Quadratic quality is far behind every other kind (score 0.12–0.24 against 0.03–0.05 on the photos).
+
+Until ENG-4 lands, runner results depend on the core count: compare runs on the same machine only.
 
 ### PERF-1: Per-step precomputation and an exact early exit
 
@@ -479,7 +481,6 @@ Required in any case, because the current engine becomes the reference and basel
 
 ### T6: Performance, gated by benchmarks
 
-- [ ] PERF-0 Divan benches and the time+quality script (every later performance item needs it)
 - [ ] PERF-5 Anti-aliased rasterizer interiors (largest measured hotspot)
 - [ ] PERF-1 Prefix sums + early exit
 - [ ] PERF-4 RGB-only kernels (RM-4)
