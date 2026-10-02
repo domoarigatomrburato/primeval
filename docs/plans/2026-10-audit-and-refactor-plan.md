@@ -198,16 +198,6 @@ Divan benches live behind each crate's non-default `bench` feature; `examples/qu
 
 Since ENG-4 (T5), runner quality is identical across thread counts; times still depend on the machine.
 
-### PERF-1: Per-step precomputation and an exact early exit
-
-- **Severity / status:** Medium. Estimated (about 2× fewer per-pixel operations on scoring-bound shapes). `next: no`.
-- **Where:** `compute_color` (scalar `score.rs:39-88`, NEON `:247-308`) re-sums Σ(t−c) and Σc for every candidate. `energy_from_lines_raw` (scalar `:108-169`, NEON `:330-414`) recomputes the "before" error (t−c)² for every candidate. Yet `target` and `current` are constant for the whole step.
-- **Fix:**
-  - Once per step (it can be folded into `ErrorGrid::compute`), build per-row prefix sums of (t−c) and c per channel, and of the per-pixel error.
-  - `compute_color` becomes O(scanlines).
-  - The energy becomes `score − Σ before(prefix) + Σ after`, so only the blend plus one square remains per pixel.
-  - Because `after ≥ 0`, the running total only grows once "before" is subtracted, so the loop can stop as soon as `total ≥ best_energy`. Hill climbing rejects most moves, so this prunes well; how well is unmeasured.
-
 ### PERF-2: x86 has no SIMD path and its loops are bounds-checked
 
 - **Severity / status:** Medium on x86. Verified. `next: no`.
@@ -346,7 +336,7 @@ Done. Every ENG item and TEST-4 landed, plus two found on the way: symmetric ell
 ### T6: Performance, gated by benchmarks
 
 - [x] PERF-5, PERF-6, PERF-10: coverage evaluated only at span-end pixels, reusable row scratch, integer error-grid sums (bit-identical output)
-- [ ] PERF-1 Prefix sums + early exit
+- [x] PERF-1 Prefix sums + exact early exit: same chosen shapes, about half the blended pixels skipped (clean runner timings still to record)
 - [x] PERF-4 RGB-only kernels (RM-4): byte-identical output, 16% faster search on the runner
 - [ ] PERF-8 Reduced-resolution random phase (needs quality metrics)
 - [ ] PERF-11 (docs only)
