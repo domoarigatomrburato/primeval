@@ -7,18 +7,27 @@
 //
 // This file is the single source of truth for the nightly pin, the threaded
 // RUSTFLAGS, the build-std flags, the output layout and the size budget; CI
-// and the docs call its subcommands instead of repeating them.
+// and the docs call its subcommands (`install-tools` installs what the builds
+// need) instead of repeating them, and the other scripts import the layout.
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 
+import { lockedVersion } from "./napi-targets.mjs";
+
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TARGET = "wasm32-unknown-unknown";
 const PROFILE = "wasm-release";
 const CRATE = "primeval-wasm";
 const OUT_NAME = "primeval";
+
+/**
+ * The files wasm-bindgen writes into each variant's `outDir`, besides the
+ * `snippets/` the glue imports.
+ */
+export const OUTPUT_FILES = { glue: `${OUT_NAME}.js`, wasm: `${OUT_NAME}_bg.wasm` };
 
 /**
  * The nightly for the threaded build, which needs `-Z build-std`. Bump it
@@ -75,11 +84,12 @@ function variant({ name, targetDir, toolchain, cargoArgs, env, shared }) {
     env,
     shared,
     wasm: path.join(targetDir, TARGET, PROFILE, `${CRATE.replaceAll("-", "_")}.wasm`),
-    outDir: path.join("wasm", name),
+    // POSIX separators: also the path inside the npm tarball.
+    outDir: `wasm/${name}`,
   };
 }
 
-/** The two builds; paths are relative to the repository root. */
+/** The two builds, by name; paths are relative to the repository root. */
 export const VARIANTS = {
   single: variant({
     name: "single",
@@ -150,19 +160,41 @@ export function wasmBindgenArgs(build) {
   ];
 }
 
-/** The version of package `name` in a Cargo.lock. */
-export function lockedVersion(cargoLock, name) {
-  const escaped = name.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&");
-  const version = cargoLock.match(new RegExp(`^name = "${escaped}"\\nversion = "([^"]+)"`, "m"));
-  if (!version) {
-    throw new Error(`Cargo.lock has no ${name} package`);
-  }
-  return version[1];
-}
-
 /** The version in `wasm-bindgen --version` output, or null. */
 export function parseWasmBindgenVersion(output) {
   return output.match(/^wasm-bindgen (\d+\.\d+\.\d+\S*)\s*$/m)?.[1] ?? null;
+}
+
+/**
+ * What `install-tools` runs: the nightly with rust-src (for build-std) and
+ * the wasm target, then wasm-bindgen-cli at `required` (the crate's version
+ * in Cargo.lock) built with its own lockfile, unless `installed` (the CLI's
+ * version, or null) already matches.
+ */
+export function installToolsCommands({ required, installed }) {
+  const commands = [
+    {
+      command: "rustup",
+      args: [
+        "toolchain",
+        "install",
+        NIGHTLY_TOOLCHAIN,
+        "--profile",
+        "minimal",
+        "--component",
+        "rust-src",
+        "--target",
+        TARGET,
+      ],
+    },
+  ];
+  if (installed !== required) {
+    commands.push({
+      command: "cargo",
+      args: ["install", "wasm-bindgen-cli", "--locked", "--version", required],
+    });
+  }
+  return commands;
 }
 
 /**
@@ -265,19 +297,34 @@ function run({ command, args, env = {} }) {
 }
 
 function requiredWasmBindgenVersion() {
-  return lockedVersion(fs.readFileSync(path.join(REPO_ROOT, "Cargo.lock"), "utf8"), "wasm-bindgen");
+  const cargoLock = fs.readFileSync(path.join(REPO_ROOT, "Cargo.lock"), "utf8");
+  const version = lockedVersion(cargoLock, "wasm-bindgen");
+  if (version === null) {
+    throw new Error("Cargo.lock has no wasm-bindgen package");
+  }
+  return version;
+}
+
+/** The wasm-bindgen CLI to run. */
+function wasmBindgenCommand() {
+  return process.env.WASM_BINDGEN || "wasm-bindgen";
+}
+
+/** The version of the installed wasm-bindgen CLI, or null. */
+function installedWasmBindgenVersion() {
+  const result = spawnSync(wasmBindgenCommand(), ["--version"], { encoding: "utf8" });
+  return result.status === 0 ? parseWasmBindgenVersion(result.stdout) : null;
 }
 
 /** The wasm-bindgen CLI to run; it must match the crate in Cargo.lock. */
 function checkedWasmBindgen() {
-  const command = process.env.WASM_BINDGEN || "wasm-bindgen";
+  const command = wasmBindgenCommand();
   const required = requiredWasmBindgenVersion();
-  const result = spawnSync(command, ["--version"], { encoding: "utf8" });
-  const found = result.status === 0 ? parseWasmBindgenVersion(result.stdout) : null;
+  const found = installedWasmBindgenVersion();
   if (found !== required) {
     throw new Error(
       `${command} ${found ?? "is not installed"}; the wasm-bindgen crate is ${required}. ` +
-        `Install the matching CLI: cargo install wasm-bindgen-cli --version ${required} --locked`,
+        "Install the matching CLI: node scripts/build-wasm.mjs install-tools",
     );
   }
   return command;
@@ -291,7 +338,7 @@ function build(names) {
     fs.rmSync(path.join(REPO_ROOT, variantBuild.outDir), { recursive: true, force: true });
     run({ command: wasmBindgen, args: wasmBindgenArgs(variantBuild) });
 
-    const output = path.join(variantBuild.outDir, `${OUT_NAME}_bg.wasm`);
+    const output = `${variantBuild.outDir}/${OUTPUT_FILES.wasm}`;
     const bytes = fs.readFileSync(path.join(REPO_ROOT, output));
     const shared = importedMemory(bytes)?.shared ?? false;
     const gzip = gzipSync(bytes, { level: 9 }).length;
@@ -321,8 +368,7 @@ function usage() {
       "Usage:",
       "  node scripts/build-wasm.mjs [build [single|threaded]]  build into wasm/ (default: both)",
       "  node scripts/build-wasm.mjs clippy                     clippy for wasm32 on the pinned stable",
-      "  node scripts/build-wasm.mjs nightly                    print the nightly toolchain",
-      "  node scripts/build-wasm.mjs install-nightly            install the nightly toolchain",
+      "  node scripts/build-wasm.mjs install-tools              install the nightly and wasm-bindgen-cli",
       "  node scripts/build-wasm.mjs wasm-bindgen-version       print the required wasm-bindgen-cli version",
     ].join("\n"),
   );
@@ -344,26 +390,17 @@ function main([command = "build", ...args]) {
       case "clippy":
         run(cargoClippyCommand());
         break;
-      case "nightly":
-        console.log(NIGHTLY_TOOLCHAIN);
+      case "install-tools": {
+        const required = requiredWasmBindgenVersion();
+        const installed = installedWasmBindgenVersion();
+        for (const step of installToolsCommands({ required, installed })) {
+          run(step);
+        }
+        if (installed === required) {
+          console.log(`wasm-bindgen-cli ${required} is already installed`);
+        }
         break;
-      case "install-nightly":
-        run({
-          command: "rustup",
-          args: [
-            "toolchain",
-            "install",
-            NIGHTLY_TOOLCHAIN,
-            "--profile",
-            "minimal",
-            // rust-src for build-std.
-            "--component",
-            "rust-src",
-            "--target",
-            TARGET,
-          ],
-        });
-        break;
+      }
       case "wasm-bindgen-version":
         console.log(requiredWasmBindgenVersion());
         break;

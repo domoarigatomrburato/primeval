@@ -26,7 +26,7 @@ const SEARCH_ROUNDS: u64 = 16;
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug)]
 pub struct ModelOptions {
-    /// Deterministic RNG seed. `None` seeds from the system clock.
+    /// Deterministic RNG seed. `None` seeds from the platform's entropy source.
     ///
     /// The same seed gives the same output for the same version on the same
     /// platform, whatever the number of threads.
@@ -94,7 +94,7 @@ impl Model {
         let current = Buffer::new_from_color(target_width, target_height, background);
         let score = score::difference_full_raw(&target, &current);
         let coarse = Coarse::new(&target, &current);
-        let seed = options.seed.unwrap_or_else(crate::util::system_clock_seed);
+        let seed = options.seed.unwrap_or_else(crate::util::entropy_seed);
         let scratch = WorkerCtx::new(
             target_width as i32,
             target_height as i32,

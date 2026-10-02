@@ -6,7 +6,7 @@
 // pool (nested workers) with it. The page picks the build (threaded when
 // cross-origin isolated, single-threaded otherwise) before fetching anything,
 // compiles its `.wasm` once, and posts the compiled module to every worker.
-import { InternalError, mapNativeError } from "./errors.js";
+import { InternalError, mapNativeError, messageOf } from "./errors.js";
 import { abortError, normalizeRequest } from "./request.js";
 import type { ProgressInfo } from "./types.js";
 import type {
@@ -59,10 +59,6 @@ function compiledModule(variant: WasmVariant): Promise<WebAssembly.Module> {
 function channelName(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   return `primeval-panic-${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
-}
-
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 /**
@@ -129,9 +125,6 @@ function runInWorker(
           break;
         case "error":
           fail(errorFromWorker(message.error));
-          break;
-        case "panic":
-          fail(errorFromWorker({ code: "INTERNAL", message: message.message }));
           break;
       }
     };

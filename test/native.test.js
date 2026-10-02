@@ -5,6 +5,7 @@ import { test } from "node:test";
 import { AbortError, approximate, PrimevalError, ValidationError } from "@aleburato/primeval";
 
 import { rgbPng } from "./helpers/png.js";
+import { svgShapeLines } from "./helpers/svg.js";
 
 const LONG_RENDER = { count: 100000, resizeInput: 16, outputSize: 16, seed: 7 };
 
@@ -456,14 +457,6 @@ test("native approximate emits monotonic progress exactly count times", async ()
   assert.ok(progress.every((info) => info.total === 6));
   assert.ok(progress.every((info, index) => index === 0 || info.step > progress[index - 1].step));
 });
-
-/** The shape lines of an SVG document: those between the background and `</svg>`. */
-function svgShapeLines(svg) {
-  const lines = svg.trimEnd().split("\n");
-  assert.match(lines[1], /^<rect width=/);
-  assert.equal(lines.at(-1), "</svg>");
-  return lines.slice(2, -1);
-}
 
 for (const shape of ["quadratic", "rotated-ellipse", "any"]) {
   test(`progress shapes are the final SVG's ${shape} shape lines in order`, async () => {

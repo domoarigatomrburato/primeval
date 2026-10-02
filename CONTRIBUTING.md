@@ -26,13 +26,10 @@ npm run build
 npm run build:node
 ```
 
-The WebAssembly builds (`npm run build:wasm`, also part of `npm run verify`) need two more tools. `scripts/build-wasm.mjs` pins both:
+The WebAssembly builds (`npm run build:wasm`, also part of `npm run verify`) need two more tools, both pinned by `scripts/build-wasm.mjs`: the dated nightly for the threaded build, with rust-src, and wasm-bindgen-cli at the version of the wasm-bindgen crate in `Cargo.lock`. `install-tools` installs both, skipping the CLI when the installed one already matches:
 
 ```bash
-# The dated nightly for the threaded build, with rust-src
-node scripts/build-wasm.mjs install-nightly
-# wasm-bindgen-cli at the version of the wasm-bindgen crate in Cargo.lock
-cargo install wasm-bindgen-cli --locked --version "$(node scripts/build-wasm.mjs wasm-bindgen-version)"
+node scripts/build-wasm.mjs install-tools
 npm run build:wasm
 ```
 

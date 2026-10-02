@@ -3,7 +3,7 @@ use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::{Env, JsError};
 use napi_derive::napi;
 use primeval_js::{
-    JsAlpha, JsRenderOptions, JsSeed, js_message, js_option_name, normalize_request, panic_error,
+    JsAlpha, JsRenderOptions, JsSeed, js_error_fields, normalize_request, panic_error,
 };
 use primeval_render::{
     ApproximateError, ApproximateRequest, ApproximateResult, CancellationToken, Execution,
@@ -197,13 +197,14 @@ fn bigint_seed(seed: &BigInt) -> JsSeed {
 /// `Error<S: AsRef<str>>`; the promise path takes `Error<Status>`, so the
 /// error object is created here and passed through as a reference.
 fn js_error(env: &Env, error: &ApproximateError) -> Error {
-    let unknown = JsError::from(Error::new(error.code(), js_message(error))).into_unknown(*env);
-    if let ApproximateError::InvalidOption { option } = error
+    let fields = js_error_fields(error);
+    let unknown = JsError::from(Error::new(fields.code, fields.message)).into_unknown(*env);
+    if let Some(invalid) = fields.invalid_option
         && let Ok(mut object) = Object::from_unknown(unknown)
     {
         // Failing to add a property still leaves a usable coded error.
-        let _ = object.set("option", js_option_name(*option));
-        let _ = object.set("requirement", option.requirement());
+        let _ = object.set("option", invalid.option);
+        let _ = object.set("requirement", invalid.requirement);
     }
     Error::from(unknown)
 }
@@ -296,7 +297,7 @@ mod tests {
             Err(error @ ApproximateError::Internal { .. }) => {
                 assert_eq!(error.code(), "INTERNAL");
                 assert_eq!(
-                    js_message(&error),
+                    primeval_js::js_message(&error),
                     "internal render error: render panicked: boom 7"
                 );
             }

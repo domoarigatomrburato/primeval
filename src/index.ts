@@ -1,5 +1,5 @@
 import { toDataUriWith } from "./data-uri.js";
-import { InternalError, mapNativeError } from "./errors.js";
+import { InternalError, mapNativeError, messageOf } from "./errors.js";
 import {
   getNativeBinding,
   type NativeApproximateRequest,
@@ -8,6 +8,7 @@ import {
   type NativeHandle,
 } from "./native-binding.js";
 import { abortError, normalizeRequest } from "./request.js";
+import { toResult } from "./result.js";
 import type { ApproximateRequest, SvgResult } from "./types.js";
 
 export {
@@ -53,30 +54,11 @@ function loadNativeBinding(): NativeBinding {
   try {
     return getNativeBinding();
   } catch (error) {
-    throw new InternalError(error instanceof Error ? error.message : String(error), {
-      cause: error,
-    });
+    throw new InternalError(messageOf(error), { cause: error });
   }
 }
 
-function toResult(result: NativeApproximateResult): ApproximateResult {
-  if (result.format === "svg") {
-    return {
-      format: "svg",
-      data: result.data.toString("utf8"),
-      mimeType: "image/svg+xml",
-      width: result.width,
-      height: result.height,
-    };
-  }
-  return {
-    format: "png",
-    data: result.data,
-    mimeType: "image/png",
-    width: result.width,
-    height: result.height,
-  };
-}
+const decodeSvg = (data: Buffer): string => data.toString("utf8");
 
 // Async, so every failure, including validation and a native load failure,
 // is a rejection.
@@ -147,7 +129,7 @@ async function run(request: unknown): Promise<ApproximateResult> {
   if ("error" in outcome) {
     throw mapNativeError(outcome.error);
   }
-  return toResult(outcome.result);
+  return toResult(outcome.result, decodeSvg);
 }
 
 /**

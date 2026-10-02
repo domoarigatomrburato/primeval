@@ -3,8 +3,8 @@
 // (browser-runtime.ts). No Node APIs: a PNG result's `data` is a `Uint8Array`.
 import { approximateInWorker } from "./browser-runtime.js";
 import { toDataUriWith } from "./data-uri.js";
+import { toResult } from "./result.js";
 import type { ApproximateRequest, SvgResult } from "./types.js";
-import type { WorkerResult } from "./worker-protocol.js";
 
 export {
   AbortError,
@@ -39,28 +39,7 @@ export type PngResult = {
 /** The result of `approximate()`, discriminated by `format`. */
 export type ApproximateResult = SvgResult | PngResult;
 
-function toResult(result: WorkerResult): ApproximateResult {
-  if (result.format === "svg") {
-    return {
-      format: "svg",
-      data: new TextDecoder().decode(result.data),
-      mimeType: "image/svg+xml",
-      width: result.width,
-      height: result.height,
-    };
-  }
-  return {
-    format: "png",
-    data: result.data,
-    mimeType: "image/png",
-    width: result.width,
-    height: result.height,
-  };
-}
-
-async function run(request: unknown): Promise<ApproximateResult> {
-  return toResult(await approximateInWorker(request));
-}
+const decodeSvg = (data: Uint8Array): string => new TextDecoder().decode(data);
 
 /**
  * Approximates an image with shapes and encodes the result as SVG or PNG.
@@ -74,7 +53,8 @@ export function approximate(request: ApproximateRequest & { output: "svg" }): Pr
 export function approximate(request: ApproximateRequest & { output: "png" }): Promise<PngResult>;
 export function approximate(request: ApproximateRequest): Promise<ApproximateResult>;
 export function approximate(request: ApproximateRequest): Promise<ApproximateResult> {
-  return run(request);
+  // `approximateInWorker` is async: a validation error is a rejection too.
+  return approximateInWorker(request).then((result) => toResult(result, decodeSvg));
 }
 
 const BASE64_CHUNK = 0x8000;

@@ -2,14 +2,17 @@
 // instantiate the glue the entry imported with the module the page compiled,
 // run one task, and post the outcome. The page terminates the worker when the
 // call settles.
+import { messageOf, optionFields } from "./errors.js";
+import type { ProgressInfo } from "./types.js";
 import type { WorkerError, WorkerMessage, WorkerRequest, WorkerResult } from "./worker-protocol.js";
 
 /**
  * The surface of binding-wasm's wasm-bindgen glue (`wasm/<variant>/primeval.js`)
- * that the workers use. Written by hand: the glue and its declarations exist
- * only after `npm run build:wasm`, and a clean checkout must type-check
- * without them. Where they exist, each entry's assignment of the glue to this
- * type checks it against the generated declarations.
+ * that the workers use, and its only contract here. Written by hand: the glue
+ * and its declarations exist only after `npm run build:wasm`, and a clean
+ * checkout type-checks against the untyped stand-ins in wasm-glue.d.ts
+ * instead. Where they exist, each entry's assignment of the glue to this type
+ * checks it against the generated declarations.
  */
 export interface Glue {
   default(options: {
@@ -20,7 +23,7 @@ export interface Glue {
     input: Uint8Array,
     output: string,
     render: object,
-    onProgress?: (info: { step: number; total: number; score: number; shape: string }) => void,
+    onProgress?: (info: ProgressInfo) => void,
   ): WorkerResult;
   setPanicReporter(channel: string, report: (message: string) => void): void;
   __panicForTests(inPool: boolean): void;
@@ -49,10 +52,6 @@ export const scope = globalThis as unknown as WorkerScope;
 const post = (message: WorkerMessage, transfer: Transferable[] = []): void =>
   scope.postMessage(message, transfer);
 
-export function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 /** A thrown value as plain data; without a stable code it is internal. */
 function workerError(error: unknown): WorkerError {
   const fields = (typeof error === "object" && error !== null ? error : {}) as Record<
@@ -62,9 +61,7 @@ function workerError(error: unknown): WorkerError {
   return {
     code: typeof fields.code === "string" ? fields.code : "INTERNAL",
     message: messageOf(error),
-    ...(typeof fields.option === "string"
-      ? { option: fields.option, requirement: String(fields.requirement) }
-      : {}),
+    ...optionFields(fields),
   };
 }
 
@@ -80,7 +77,9 @@ export async function runRequest(
   try {
     await glue.default({ module_or_path: request.module });
     // Before the pool starts, so the hook covers every thread.
-    glue.setPanicReporter(request.channel, (message) => post({ type: "panic", message }));
+    glue.setPanicReporter(request.channel, (message) =>
+      post({ type: "error", error: { code: "INTERNAL", message } }),
+    );
     await startPool?.(request.module);
   } catch (error) {
     post({
@@ -107,8 +106,8 @@ export async function runRequest(
     );
     post({ type: "result", result }, [result.data.buffer]);
   } catch (error) {
-    // After a panic on this thread, the hook's "panic" message is already
-    // ahead of this one on the same port.
+    // After a panic on this thread, the hook's error is already ahead of this
+    // one on the same port, and the page keeps the first.
     post({ type: "error", error: workerError(error) });
   }
 }

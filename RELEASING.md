@@ -55,7 +55,7 @@ When a `v*` tag is pushed, [.github/workflows/napi-prebuilds.yml](.github/workfl
 5. Smoke test each artifact with `scripts/smoke-test-addon.mjs`: load it through the package loader and render a small image to SVG and PNG.
 6. Build both WebAssembly builds for the browser entry with `npm run build:wasm`, on the pinned stable toolchain, the dated nightly, and the matching wasm-bindgen-cli (all pinned through `scripts/build-wasm.mjs`). The build fails if the threaded `.wasm` does not import a shared memory, the single-threaded one does, or either is over the size budget in that script.
 7. Assemble per-platform npm packages and verify that every expected package contains the correct `.node` payload.
-8. Put the wasm build in `wasm/`, build the root package, and check with `scripts/release-packages.mjs verify-root` (run by `publish` before it publishes anything) that its tarball has every `dist/` module and every wasm file both builds need. A missing or incomplete wasm build fails the release here.
+8. Put the wasm build in `wasm/`, build the root package, and check with `scripts/release-packages.mjs verify-root` (run by `publish` before it publishes anything, and by `npm run verify:wasm` on every pull request) that its tarball has every `dist/` module and every wasm file both builds need. A missing or incomplete wasm build fails the release here.
 9. Publish with `scripts/release-packages.mjs publish`: every platform package, then the root package last, with provenance. A package whose version is already on the registry is skipped.
 10. Verify with `npm view` that every package is on the registry at the tag version, and fail otherwise.
 11. Create the GitHub Release with generated notes, unless it already exists.

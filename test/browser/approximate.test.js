@@ -7,7 +7,8 @@ import { after, before, describe, test } from "node:test";
 import { chromium } from "playwright";
 
 import * as native from "../../dist/index.js";
-import { startServer } from "./server.js";
+import { startServer } from "../../scripts/static-server.mjs";
+import { svgShapeLines } from "../helpers/svg.js";
 
 const FIXTURE = "monalisa.jpg";
 const SMALL = { count: 4, resizeInput: 16, outputSize: 32, seed: 7 };
@@ -191,11 +192,9 @@ for (const isolated of [true, false]) {
         { name: FIXTURE, render: { ...SMALL, count: 6, shape: "quadratic" } },
       );
 
-      const lines = svg.trimEnd().split("\n");
-      assert.equal(lines.at(-1), "</svg>");
       assert.equal(shapes.length, 6);
       assert.ok(shapes.every((shape) => typeof shape === "string"));
-      assert.deepEqual(shapes, lines.slice(2, -1));
+      assert.deepEqual(shapes, svgShapeLines(svg));
     });
 
     test("a throwing onProgress rejects with the thrown value and stops the render", async () => {

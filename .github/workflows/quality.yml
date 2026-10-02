@@ -100,16 +100,14 @@ jobs:
       # The pinned stable, with the wasm target from rust-toolchain.toml.
       - run: rustup toolchain install
 
-      # The dated nightly for the threaded build, pinned in the script.
-      - run: node scripts/build-wasm.mjs install-nightly
-
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: wasm-checks
 
-      # The CLI must match the wasm-bindgen crate in Cargo.lock; cargo skips
-      # the install when the cached binary already has that version.
-      - run: cargo install wasm-bindgen-cli --locked --version "$(node scripts/build-wasm.mjs wasm-bindgen-version)"
+      # The dated nightly for the threaded build and wasm-bindgen-cli at the
+      # version of the crate in Cargo.lock, both pinned in the script. After
+      # the cache restore: the install is skipped when the cached CLI matches.
+      - run: node scripts/build-wasm.mjs install-tools
 
       - run: npm ci
 

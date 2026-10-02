@@ -9,7 +9,8 @@ import { after, before, describe, test } from "node:test";
 import { chromium } from "playwright";
 
 import { buildSite } from "../../scripts/demo.mjs";
-import { startServer } from "./server.js";
+import { startServer } from "../../scripts/static-server.mjs";
+import { pngSize } from "../helpers/png.js";
 
 const SAMPLE = /Mona Lisa/;
 
@@ -41,7 +42,20 @@ async function openDemo(origin, { serviceWorkers = "block" } = {}) {
   await page.waitForFunction(() => window.primevalDemo?.ready === true, undefined, {
     timeout: 10000,
   });
+  await collectRuns(page);
   return { context, page, requests, errors };
+}
+
+/**
+ * Keeps, in the page, a copy of each run's record as the run finishes
+ * (`primevalDemo.onRun`): the demo keeps only the last one, and the copy
+ * reads its markup at once, before a later run changes the stage.
+ */
+async function collectRuns(page) {
+  await page.evaluate(() => {
+    window.finishedRuns = [];
+    window.primevalDemo.onRun = (run) => window.finishedRuns.push({ ...run });
+  });
 }
 
 async function setControls(page, { count, resolution }) {
@@ -56,15 +70,10 @@ async function setControls(page, { count, resolution }) {
 
 /** Waits for the run that ends after `previous` finished runs, and returns it. */
 async function waitForRun(page, previous) {
-  await page.waitForFunction((count) => window.primevalDemo.runs.length > count, previous, {
+  await page.waitForFunction((count) => window.finishedRuns.length > count, previous, {
     timeout: 20000,
   });
-  return page.evaluate((index) => window.primevalDemo.runs[index], previous);
-}
-
-function pngSize(bytes) {
-  assert.deepEqual([...bytes.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10], "a PNG file");
-  return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+  return page.evaluate((index) => window.finishedRuns[index], previous);
 }
 
 describe("demo, cross-origin isolated by headers", () => {
@@ -87,15 +96,14 @@ describe("demo, cross-origin isolated by headers", () => {
 
       assert.equal(run.outcome, "done");
       assert.equal(run.total, 12);
-      // Every step's shape reached the live SVG, and the final SVG equals it,
-      // as markup and as the DOM the stage renders.
+      // Every step's shape reached the live SVG, which the stage keeps: it is
+      // the DOM the final SVG parses to.
       assert.equal(run.liveShapeCount, 12);
-      assert.equal(run.liveText, run.finalText);
       assert.equal(run.liveMarkup, run.finalMarkup);
       assert.equal(
-        await page.locator("#result svg > :not(rect:first-of-type)").count(),
-        12,
-        "the stage shows the final SVG's shapes",
+        await page.locator("#result > svg").evaluate((svg) => svg.outerHTML),
+        run.finalMarkup,
+        "the stage shows the final SVG",
       );
       assert.match(await page.locator("#step").textContent(), /12\s*\/\s*12/);
 
@@ -118,6 +126,16 @@ describe("demo, cross-origin isolated by headers", () => {
       await page.getByRole("button", { name: "Run", exact: true }).click();
       const again = await waitForRun(page, 1);
       assert.equal(again.finalText, run.finalText);
+      // The demo itself keeps only the last run.
+      const kept = await page.evaluate(() => ({
+        runCount: window.primevalDemo.runCount,
+        lastRun: window.primevalDemo.lastRun,
+        keys: Object.keys(window.primevalDemo),
+      }));
+      assert.equal(kept.runCount, 2);
+      assert.equal(kept.lastRun.finalText, again.finalText);
+      assert.equal(kept.lastRun.liveMarkup, kept.lastRun.finalMarkup);
+      assert.deepEqual(kept.keys.sort(), ["lastRun", "onRun", "ready", "runCount", "step"]);
 
       // A new seed gives another result.
       const seed = await page.getByRole("textbox", { name: "Seed" }).inputValue();
@@ -174,7 +192,7 @@ describe("demo, cross-origin isolated by headers", () => {
       const second = await waitForRun(page, 1);
       assert.equal(second.outcome, "done");
       assert.equal(second.liveShapeCount, 10);
-      assert.equal(second.liveText, second.finalText);
+      assert.equal(second.liveMarkup, second.finalMarkup);
     } finally {
       await context.close();
     }
@@ -305,6 +323,7 @@ describe("demo, served without isolation headers", () => {
         timeout: 15000,
       });
       await page.waitForFunction(() => window.primevalDemo?.ready === true);
+      await collectRuns(page);
       assert.equal(loads, 2, "the first load and the bootstrap's one reload");
 
       const threads = await page.evaluate(() => navigator.hardwareConcurrency);
@@ -340,7 +359,7 @@ describe("demo, served without isolation headers", () => {
       await page.getByRole("button", { name: SAMPLE }).click();
       const run = await waitForRun(page, 0);
       assert.equal(run.outcome, "done");
-      assert.equal(run.liveText, run.finalText);
+      assert.equal(run.liveMarkup, run.finalMarkup);
       const wasm = requests.filter((pathname) => pathname.endsWith(".wasm"));
       assert.deepEqual(wasm, ["/wasm/single/primeval_bg.wasm"]);
     } finally {

@@ -14,7 +14,7 @@ Main components:
 - `src/index.ts`: single-source TypeScript wrapper for the npm package; `src/errors.ts` holds its error classes and the mapping from native error codes; `src/native-binding.ts` is the native boundary shim
 - `src/browser.ts`: browser entry (the `browser` condition of `exports`), run by `src/browser-runtime.ts` in one Web Worker per call (`src/worker-single.ts` or `src/worker-threaded.ts`, which also runs the rayon pool workers; shared logic in `src/worker-common.ts`); `src/types.ts`, `src/request.ts` and `src/data-uri.ts` are shared with `src/index.ts`, and `tsconfig.browser.json` builds the browser files without Node types
 - `src/cli.ts`: Node CLI entrypoint distributed via npm package `bin`
-- `scripts/`: binding-loader generation, `napi.targets` tooling, the wasm build (`build-wasm.mjs`, the single source of the nightly pin, threaded flags, output layout and the gzip size budget per `.wasm`), and the demo site (`demo.mjs`: `npm run demo:build` assembles `site/`, `npm run demo` also serves it)
+- `scripts/`: binding-loader generation, `napi.targets` tooling, the wasm build (`build-wasm.mjs`, the single source of the nightly pin, threaded flags, output layout and the gzip size budget per `.wasm`), the demo site (`demo.mjs`: `npm run demo:build` assembles `site/`, `npm run demo` also serves it), and the static server it shares with `test/browser/` (`static-server.mjs`)
 - `test/`: Node/package tests; `test/tooling/`: packaging, loader, and release-metadata tests; `test/browser/`: the browser entry in headless Chromium (Playwright), and the demo
 - `demo/`: the browser demo, plain HTML, CSS and ES modules with no build step, deployed to GitHub Pages by `.github/workflows/pages.yml`; `demo/coi-sw.js` is its cross-origin isolation service worker
 - `docs/readme/`: source images (`originals/`, also the test fixtures) and alpha comparisons used by the README
@@ -67,9 +67,7 @@ Test prerequisites:
 
 - `npm test` imports the package through `dist/` and loads the local native addon. After editing `src/`, run `npm run build` first. After editing Rust used by the binding, run `npm run build:node` first (a release build with fat LTO, the slowest step); otherwise the tests run against a stale addon.
 - `npm run test:tooling` packs the package and installs it into a temp project. It is only relevant when touching `scripts/`, `package.json`, binding loading, or packaging.
-- `npm run build:wasm` and `npm run verify:wasm` (so also `npm run verify`) need two extra tools; nothing else uses them:
-  - the dated nightly with `rust-src`: `node scripts/build-wasm.mjs install-nightly`;
-  - wasm-bindgen-cli at the version of the `wasm-bindgen` crate in `Cargo.lock` (the build checks it): `cargo install wasm-bindgen-cli --locked --version "$(node scripts/build-wasm.mjs wasm-bindgen-version)"`.
+- `npm run build:wasm` and `npm run verify:wasm` (so also `npm run verify`) need two extra tools, which nothing else uses: the dated nightly with `rust-src`, and wasm-bindgen-cli at the version of the `wasm-bindgen` crate in `Cargo.lock` (the build checks it). `node scripts/build-wasm.mjs install-tools` installs both.
 - `npm run test:browser` runs `test/browser/` in Playwright's Chromium headless shell, with and without cross-origin isolation. It needs `npm run build`, `npm run build:wasm` and `npm run build:node` first, and the browser once per machine (see `CONTRIBUTING.md`). Run it when touching the browser entry, `binding-wasm`, or the shared `src/` modules.
 - The first build in a fresh checkout or worktree is cold and much slower. Do it once; never wipe `target/`, `node_modules/`, or `dist/` to start fresh.
 
@@ -83,7 +81,7 @@ While working:
 
 Final gate, once, before handing off or committing:
 
-- `npm run verify` runs exactly what CI runs: `verify:rust` (fmt check, clippy, rustdoc, cargo test), `verify:node` (napi targets check, typecheck, build, native build, tests, tooling tests), `verify:pack`, and `verify:wasm` (wasm32 clippy on the stable toolchain, both builds with their shared-memory checks, the TypeScript and native builds, then the browser tests). Run the full gate after any Rust change, since `test/contracts.test.js` checks the Node layer against Rust sources. If no `.rs` file, `Cargo.toml`, `Cargo.lock`, or `rust-toolchain.toml` changed, `npm run verify:node && npm run verify:pack` is enough, plus `npm run verify:wasm` if `scripts/build-wasm.mjs`, the browser entry or the `src/` modules it shares changed.
+- `npm run verify` runs exactly what CI runs: `verify:rust` (fmt check, clippy, rustdoc, cargo test), `verify:node` (napi targets check, typecheck, build, native build, tests, tooling tests), `verify:pack`, and `verify:wasm` (wasm32 clippy on the stable toolchain, both builds with their shared-memory checks, the TypeScript and native builds, the root package contents check, then the browser tests). Run the full gate after any Rust change, since `test/contracts.test.js` checks the Node layer against Rust sources. If no `.rs` file, `Cargo.toml`, `Cargo.lock`, or `rust-toolchain.toml` changed, `npm run verify:node && npm run verify:pack` is enough, plus `npm run verify:wasm` if `scripts/build-wasm.mjs`, the browser entry or the `src/` modules it shares changed.
 - If a step fails, fix it and re-run only that step. Re-run the full gate only if the fix could affect other steps.
 - Do not re-run a gate that passed if nothing has changed since.
 

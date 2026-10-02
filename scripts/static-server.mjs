@@ -1,12 +1,13 @@
-// A static server for the browser tests and the demo (scripts/demo.mjs). It
-// serves a directory, the repository root by default, with or without the
-// cross-origin isolation headers (COOP/COEP) that threads need. A directory
-// URL serves its `index.html`.
+// A static server for the demo (scripts/demo.mjs) and the browser tests
+// (test/browser/). It serves a directory, the repository root by default,
+// with or without the cross-origin isolation headers (COOP/COEP) that
+// threads need. A directory URL serves its `index.html`.
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const repoRoot = process.cwd();
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const TYPES = {
   ".css": "text/css; charset=utf-8",

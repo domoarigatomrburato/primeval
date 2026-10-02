@@ -1,6 +1,6 @@
 # Browser support through WebAssembly, and a demo on GitHub Pages
 
-Status: W0 done (2026-10-02), go; W1 next. Supersedes the "Browser/WASM support is explicitly out of scope" rule in `AGENTS.md` once W1 lands. Comes before the algorithm change (section 16 of `2026-10-audit-and-refactor-plan.md`); everything here except the engine itself carries over to a new engine.
+Status: W0–W5 done (2026-10-02, PR #10) except W3b, the bundler fixture build; then the demo goes live once Pages is enabled. `AGENTS.md` already lists browsers in scope. Comes before the algorithm change (section 16 of `2026-10-audit-and-refactor-plan.md`); everything here except the engine itself carries over to a new engine.
 
 ## Goal
 
@@ -8,11 +8,11 @@ Status: W0 done (2026-10-02), go; W1 next. Supersedes the "Browser/WASM support 
 
 ## Constraints
 
-- **Threads need nightly Rust.** Threaded WebAssembly needs the standard library rebuilt with atomics (`-Z build-std=panic_abort,std`), which is nightly-only; `wasm-bindgen-rayon` provides the rayon pool on Web Workers. The main gate stays on the pinned stable toolchain; only the threaded wasm build uses a second, dated nightly pin (`nightly-2026-09-25` works).
+- **Threads need nightly Rust.** Threaded WebAssembly needs the standard library rebuilt with atomics (`-Z build-std=panic_abort,std`), which is nightly-only; an in-repo pool (`binding-wasm/src/pool.rs`) runs rayon on self-spawning module workers. The main gate stays on the pinned stable toolchain; only the threaded wasm build uses a second, dated nightly pin (`nightly-2026-09-25` works).
 - **Threads need cross-origin isolation.** `SharedArrayBuffer` exists only on pages served with COOP/COEP headers (`crossOriginIsolated === true`). Many sites cannot set them. So the package ships **two wasm builds**: threaded (used when the page is isolated) and single-threaded on stable (used otherwise), chosen at runtime; only one is fetched.
-- **GitHub Pages cannot set headers.** The demo uses a service worker that adds COOP/COEP (the `coi-serviceworker` approach, vendored with its licence).
+- **GitHub Pages cannot set headers.** The demo registers its own service worker (`demo/coi-sw.js`) that adds COOP/COEP, with one guarded reload.
 - **No NEON in wasm.** The scalar kernels run (bit-identical to NEON by test). SIMD128 kernels are a later, optional step.
-- **`SystemTime::now()` panics on wasm32-unknown-unknown.** The engine's default seed must come from the wasm binding there (`crypto.getRandomValues`); the engine itself is unchanged.
+- **`SystemTime::now()` panics on wasm32-unknown-unknown.** The engine seeds an absent seed from `getrandom` (OS entropy; `crypto.getRandomValues` in browsers), not the clock.
 - **`panic = "abort"` on wasm.** A panic kills the instance, so a worker that panicked is never reused.
 
 ## W0 results (spike, 2026-10-02)
@@ -61,18 +61,18 @@ Wasm is 1.5–1.9× slower than native per thread (quadratic the most, plausibly
 
 ## Design
 
-- **Rust:** a new crate `binding-wasm` (`primeval-wasm`, `publish = false`) over `primeval-render`, so decoding, validation, defaults, errors and the SVG/PNG writers are the same code as on Node. Rust stays the only owner of defaults and vocabularies; the binding fills an absent seed from `crypto.getRandomValues`, because the engine's clock seed cannot run there. Built with opt-level 3, fat LTO, `panic = "abort"`, and the name section stripped.
+- **Rust:** a new crate `binding-wasm` (`primeval-wasm`, `publish = false`) over `primeval-render`, so decoding, validation, defaults, errors and the SVG/PNG writers are the same code as on Node. Rust stays the only owner of defaults and vocabularies; JS request parsing shared with the napi binding lives in `crates/primeval-js`. Built with opt-level 3, fat LTO, `panic = "abort"`, and the name section stripped.
 - **JS API:** the same `approximate(request)` with the same options, result types, error classes and codes, `onProgress` and `AbortSignal`.
-- **One worker per call.** Each `approximate()` call runs in a fresh module Web Worker that the package starts (`new Worker(new URL("./worker.js", import.meta.url), { type: "module" })`) and terminates when the call settles. Startup is a few tens of milliseconds against renders of seconds, and it solves four problems at once:
+- **One worker per call.** Each `approximate()` call runs in a fresh module Web Worker that the package starts (`worker-single.js` or `worker-threaded.js`, each a literal `new Worker(new URL(…, import.meta.url), { type: "module" })` so bundlers can follow it) and terminates when the call settles. Startup is a few tens of milliseconds against renders of seconds, and it solves four problems at once:
   - memory that never shrinks;
   - recovery from a panic, since an aborted instance is never reused;
   - cancellation, since `AbortSignal` terminates the worker in both builds;
   - isolation between concurrent calls.
   The compiled `WebAssembly.Module` is cached on the page and posted to each worker, so it is fetched and compiled once.
-- **Build selection:** `globalThis.crossOriginIsolated === true` selects the threaded build, with `initThreadPool(navigator.hardwareConcurrency)` in the worker; otherwise the single-threaded build. Selection happens before any download.
+- **Build selection:** `globalThis.crossOriginIsolated === true` selects the threaded build, with a pool of `navigator.hardwareConcurrency` threads in the worker; otherwise the single-threaded build. Selection happens before any download.
 - **Panics:** a panic hook in every thread (pool workers included) reports the message to the page on a per-call `BroadcastChannel`; the page then terminates the worker and rejects with the same error class Node uses for an internal failure. This also covers the hanging rayon task.
 - **Input/output:** input `Uint8Array` (and `ArrayBuffer`); PNG output is a `Uint8Array` in the browser (a `Buffer` on Node). Decode limits and option bounds are the Rust ones.
-- **Packaging:** conditional exports in the one root package: `"node"` → the native addon as today, `"browser"` → the wasm entry. The wasm files ship in the root package. Size budget enforced in CI: each `.wasm` at most 512 KiB gzip. wasm-bindgen-rayon's `no-bundler` variant (pool workers from `blob:` URLs, so strict pages need CSP `worker-src blob:`) is used from W2; W3 decides between it and the bundler variant with the fixture builds.
+- **Packaging:** conditional exports in the one root package: `"node"` → the native addon as today, `"browser"` → the wasm entry. The wasm files ship in the root package. Size budget enforced in CI: each `.wasm` at most 512 KiB gzip. wasm-bindgen-rayon was dropped in W3a: its `no-bundler` variant needs `blob:` workers (CSP `worker-src blob:`) and its bundler variant breaks without a bundler, so the pool is in-repo and works both ways.
 
 ## Proposed public addition (approved 2026-10-02)
 
@@ -82,16 +82,17 @@ Wasm is 1.5–1.9× slower than native per thread (quadratic the most, plausibly
 
 | Slice | Content | Done when |
 | --- | --- | --- |
-| W0 spike | Both builds, size, time per step, native/wasm equality, memory, failure modes. | Done 2026-10-02 (above); go. |
-| W1 wasm crate | `binding-wasm`, the build script (nightly pin for the threaded build, stable for the other, link args, shared-memory check, name section stripped), seed from the binding, `AGENTS.md` direction updated, CI builds both and checks the shared memory. | Both builds produced in CI; Rust tests unchanged. |
-| W2 browser runtime | Worker per call, module cache, build selection, thread pool, progress, cancellation, panic hook and channel, error mapping; tests in headless Chromium (Playwright, pinned) with and without cross-origin isolation, including a panic in a pool task and the native-equality tripwire. | API parity tests pass in the browser; the Node test suite is untouched. |
-| W3 packaging | Conditional exports, types, packed-install test for the browser entry, a Vite and a webpack fixture build, the rayon worker variant decision, size budget, README "Browser" section. | `npm run verify` covers it; the tarball contains both builds. |
-| W4 live shapes | `onProgress` `shape`, in Rust render, binding, wasm and TypeScript, documented. | Contract tests cover it. |
-| W5 demo | `demo/`: drop an image, pick shape, count and alpha, watch it draw, compare with the original, download SVG/PNG; deployed to GitHub Pages by a workflow, with the COOP/COEP service worker. | Live at `https://domoarigatomrburato.github.io/primeval/`, linked from the README. |
+| W0 spike | Both builds, size, time per step, native/wasm equality, memory, failure modes. | Done 2026-10-02 (above). |
+| W1 wasm crate | `binding-wasm`, the build script (nightly pin for the threaded build, stable for the other, link args, shared-memory check, name section stripped), seed from the binding, `AGENTS.md` direction updated, CI builds both and checks the shared memory. | Done. |
+| W2 browser runtime | Worker per call, module cache, build selection, thread pool, progress, cancellation, panic hook and channel, error mapping; tests in headless Chromium (Playwright, pinned) with and without cross-origin isolation, including a panic in a pool task and the native-equality tripwire. | Done. |
+| W3a packaging | Conditional exports, types, packed-install test for the browser entry, the in-repo pool, size budget, README "Browser" section, release `wasm` job. | Done. |
+| W3b bundler fixture | A Vite fixture build test (`vite` devDependency, download pending approval; webpack dropped), then the README states that Vite and the unbundled path are tested. | `npm run verify` builds the fixture and runs it in Chromium. |
+| W4 live shapes | `onProgress` `shape`, in Rust render, binding, wasm and TypeScript, documented. | Done. |
+| W5 demo | `demo/`: drop an image, pick shape, count and alpha, watch it draw, compare with the original, download SVG/PNG; deployed to GitHub Pages by a workflow, with the COOP/COEP service worker. | Built and tested; live at `https://domoarigatomrburato.github.io/primeval/` once Pages is enabled and PR #10 merges, then linked from the README. |
 | Later | WASM fallback on Node where no native prebuild exists (StackBlitz/WebContainers, musl before REL-7); SIMD128 kernels; Firefox and WebKit in the browser tests (Playwright browsers not yet downloaded); `libm` everywhere for cross-platform identical output (engine redesign). | Separate decisions. |
 
 ## Risks
 
-- Bundler compatibility for wasm plus nested workers is the main maintenance cost; the fixture builds in W3 exist to catch regressions.
+- Bundler compatibility for wasm plus nested workers is the main maintenance cost; the W3b fixture build exists to catch regressions.
 - The nightly pin can break with wasm-bindgen updates or the `atomics` flag phase-out; bump it deliberately, like the stable pin.
 - Only Chromium is measured. Safari and Firefox support nested workers and cross-origin isolation, but the 1 GiB shared-memory reservation on low-memory devices is unverified.

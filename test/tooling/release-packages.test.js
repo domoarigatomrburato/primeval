@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
 
+import { OUTPUT_FILES, VARIANTS } from "../../scripts/build-wasm.mjs";
 import {
   assertTagMatchesVersion,
   glueSnippets,
@@ -159,7 +160,18 @@ const GLUE = [
 ].join("\n");
 
 const ROOT_INPUTS = {
-  pkg: { files: ["dist/*.js", "dist/index.d.ts", "wasm/single/snippets/**", "README.md"] },
+  pkg: {
+    files: [
+      "dist/*.js",
+      "dist/index.d.ts",
+      "wasm/single/primeval.js",
+      "wasm/single/primeval_bg.wasm",
+      "wasm/single/snippets/**",
+      "wasm/threaded/primeval.js",
+      "wasm/threaded/primeval_bg.wasm",
+      "README.md",
+    ],
+  },
   sourceModules: ["index", "browser"],
   glueSources: { single: GLUE, threaded: GLUE },
 };
@@ -197,6 +209,17 @@ test("without a built glue, the root package still needs its glue and .wasm", ()
   for (const variant of ["single", "threaded"]) {
     assert.ok(required.includes(`wasm/${variant}/primeval.js`), variant);
     assert.ok(required.includes(`wasm/${variant}/primeval_bg.wasm`), variant);
+    assert.ok(!required.some((file) => file.startsWith(`wasm/${variant}/snippets/`)), variant);
+  }
+});
+
+test("package.json files list every wasm build's glue and .wasm by name", () => {
+  // requiredRootFiles takes them from the literal `files` entries.
+  const { files } = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
+  for (const { outDir } of Object.values(VARIANTS)) {
+    for (const file of Object.values(OUTPUT_FILES)) {
+      assert.ok(files.includes(`${outDir}/${file}`), `${outDir}/${file}`);
+    }
   }
 });
 
@@ -256,11 +279,7 @@ test("the release publishes the wasm build of its own workflow run", () => {
 
   const wasm = job("wasm");
   assert.match(wasm, /- run: rustup toolchain install\n/);
-  assert.match(wasm, /- run: node scripts\/build-wasm\.mjs install-nightly\n/);
-  assert.match(
-    wasm,
-    /- run: cargo install wasm-bindgen-cli --locked --version "\$\(node scripts\/build-wasm\.mjs wasm-bindgen-version\)"\n/,
-  );
+  assert.match(wasm, /- run: node scripts\/build-wasm\.mjs install-tools\n/);
   assert.match(wasm, /- run: npm run build:wasm\n/);
   assert.match(wasm, /uses: actions\/upload-artifact@[0-9a-f]{40} /);
   assert.match(wasm, /name: wasm\n\s+path: wasm\/\n\s+if-no-files-found: error\n/);

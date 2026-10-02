@@ -18,6 +18,7 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
+import { OUTPUT_FILES, VARIANTS } from "./build-wasm.mjs";
 import {
   packageSuffixForTarget,
   readPackageMetadata,
@@ -38,9 +39,6 @@ export function releasePackages(pkg, npmDir, rootDir) {
   ];
 }
 
-/** The wasm builds the browser entry chooses between (scripts/build-wasm.mjs). */
-const WASM_VARIANTS = ["single", "threaded"];
-
 /** The `./snippets/...` files a wasm-bindgen glue imports, relative to its directory. */
 export function glueSnippets(glueSource) {
   return [...glueSource.matchAll(/^import\b[^'"]*['"]\.\/(snippets\/[^'"]+)['"]/gm)].map(
@@ -50,10 +48,10 @@ export function glueSnippets(glueSource) {
 
 /**
  * The files the root tarball must contain: `package.json`, every literal
- * (non-glob) `files` entry, the compiled module of every `src/*.ts`
- * (`sourceModules`, without extension), and for each wasm build its glue,
- * its `.wasm` and the snippets the glue imports (`glueSources[variant]`, the
- * glue's source when it is built).
+ * (non-glob) `files` entry (each wasm build's glue and `.wasm` among them),
+ * the compiled module of every `src/*.ts` (`sourceModules`, without
+ * extension), and the snippets each wasm build's glue imports
+ * (`glueSources[variant]`, the glue's source when it is built).
  */
 export function requiredRootFiles({ pkg, sourceModules, glueSources }) {
   const files = new Set(["package.json"]);
@@ -65,12 +63,10 @@ export function requiredRootFiles({ pkg, sourceModules, glueSources }) {
   for (const module of sourceModules) {
     files.add(`dist/${module}.js`);
   }
-  for (const variant of WASM_VARIANTS) {
-    files.add(`wasm/${variant}/primeval.js`);
-    files.add(`wasm/${variant}/primeval_bg.wasm`);
+  for (const [variant, { outDir }] of Object.entries(VARIANTS)) {
     const glue = glueSources[variant];
     for (const snippet of glue === undefined ? [] : glueSnippets(glue)) {
-      files.add(`wasm/${variant}/${snippet}`);
+      files.add(`${outDir}/${snippet}`);
     }
   }
   return [...files];
@@ -84,8 +80,8 @@ export function readRootPackageInputs(rootDir) {
     .filter((file) => file.endsWith(".ts") && !file.endsWith(".d.ts"))
     .map((file) => file.slice(0, -".ts".length));
   const glueSources = {};
-  for (const variant of WASM_VARIANTS) {
-    const glue = path.join(rootDir, "wasm", variant, "primeval.js");
+  for (const [variant, { outDir }] of Object.entries(VARIANTS)) {
+    const glue = path.join(rootDir, outDir, OUTPUT_FILES.glue);
     if (fs.existsSync(glue)) {
       glueSources[variant] = fs.readFileSync(glue, "utf8");
     }

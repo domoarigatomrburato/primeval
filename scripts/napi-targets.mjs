@@ -226,6 +226,14 @@ export function updateCargoWorkspaceVersion(cargoToml, version) {
   return lines.join("\n");
 }
 
+/** The version of package `name` in a Cargo.lock, or null if it has none. */
+export function lockedVersion(cargoLock, name) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&");
+  return (
+    cargoLock.match(new RegExp(`^name = "${escaped}"\\nversion = "([^"]+)"`, "m"))?.[1] ?? null
+  );
+}
+
 /** Reads the root Cargo.toml, every workspace member manifest, and Cargo.lock. */
 export function readCargoWorkspace(rootDir) {
   const cargoToml = fs.readFileSync(path.join(rootDir, "Cargo.toml"), "utf8");
@@ -266,10 +274,7 @@ export function validateCargoVersions(version, { cargoToml, members, cargoLock }
       throw new Error(`${member}/Cargo.toml must set version.workspace = true`);
     }
 
-    const escapedName = name.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&");
-    const lockVersion = cargoLock.match(
-      new RegExp(`^name = "${escapedName}"\\nversion = "([^"]+)"`, "m"),
-    )?.[1];
+    const lockVersion = lockedVersion(cargoLock, name);
     if (lockVersion !== version) {
       throw new Error(
         `Cargo.lock entry ${name} is ${lockVersion ?? "missing"}, expected ${version}; run cargo update --workspace`,

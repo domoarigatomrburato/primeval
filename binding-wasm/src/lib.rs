@@ -3,13 +3,11 @@
 //! It runs the same `primeval-render` code as the napi binding and shares its
 //! request layer (`primeval-js`), so options, defaults, errors and output are
 //! the same. It differs where the platform does: the render runs
-//! synchronously on the calling thread (a Web Worker), an absent seed comes
-//! from `crypto.getRandomValues` because the engine's clock seed cannot run on
-//! `wasm32-unknown-unknown`, and the threaded build (feature `threads`)
-//! exports what the browser runtime starts the rayon pool with
-//! (`PoolBuilder`, `startPoolWorker`, `wasmMemory`). A panic aborts the
-//! instance; [`set_panic_reporter`] installs a hook that reports its message
-//! first.
+//! synchronously on the calling thread (a Web Worker), and the threaded
+//! build (feature `threads`) exports what the browser runtime starts the
+//! rayon pool with (`PoolBuilder`, `startPoolWorker`, `wasmMemory`). A panic
+//! aborts the instance; [`set_panic_reporter`] installs a hook that reports
+//! its message first.
 //! `scripts/build-wasm.mjs` builds both variants.
 #![warn(missing_docs)]
 
@@ -19,9 +17,9 @@ mod pool;
 mod request;
 
 use js_sys::{Error, Function, Object, Reflect, TypeError, Uint8Array};
-use primeval_js::{JsRenderOptions, js_message, js_option_name, normalize_request};
+use primeval_js::{JsRenderOptions, js_error_fields, js_option_name, normalize_request};
 use primeval_render::{ApproximateError, ApproximateResult, CancellationToken, Execution};
-use request::{JsField, RENDER_FIELDS, fill_seed, render_options};
+use request::{JsField, render_options};
 use wasm_bindgen::prelude::*;
 
 #[doc(hidden)]
@@ -49,15 +47,13 @@ pub use pool::{PoolBuilder, memory, start_pool_worker};
 /// nor an object is a `TypeError`.
 #[wasm_bindgen]
 pub fn approximate(
-    input: &[u8],
+    input: Vec<u8>,
     output: String,
     render: JsValue,
     on_progress: Option<Function>,
 ) -> Result<JsValue, JsValue> {
     let render = read_render(&render)?;
-    let mut request =
-        normalize_request(input.to_vec(), &output, render).map_err(|error| js_error(&error))?;
-    fill_seed(&mut request.render, random_seed)?;
+    let request = normalize_request(input, &output, render).map_err(|error| js_error(&error))?;
 
     let token = CancellationToken::new();
     let mut thrown = None;
@@ -99,18 +95,10 @@ fn read_render(render: &JsValue) -> Result<JsRenderOptions, JsValue> {
     if !render.is_object() {
         return Err(TypeError::new("render must be an object").into());
     }
-    let mut fields = Vec::with_capacity(RENDER_FIELDS.len());
-    for option in RENDER_FIELDS {
-        let value = Reflect::get(render, &JsValue::from_str(js_option_name(option)))?;
-        fields.push((option, js_field(value)));
-    }
-    render_options(|option| {
-        fields
-            .iter()
-            .find(|(field, _)| *field == option)
-            .map_or(JsField::Absent, |(_, value)| value.clone())
-    })
-    .map_err(|error| js_error(&error))
+    render_options(
+        |option| Reflect::get(render, &JsValue::from_str(js_option_name(option))).map(js_field),
+        |error| js_error(&error),
+    )
 }
 
 /// The JavaScript type of one field value.
@@ -127,26 +115,6 @@ fn js_field(value: JsValue) -> JsField {
     } else {
         JsField::Other
     }
-}
-
-/// A seed from `crypto.getRandomValues`, read into a JavaScript-owned buffer
-/// because the API rejects views of a shared (threaded) wasm memory.
-fn random_seed() -> Result<u64, JsValue> {
-    let random = || -> Result<u64, JsValue> {
-        let crypto = Reflect::get(&js_sys::global(), &JsValue::from_str("crypto"))?;
-        let get_random_values: Function =
-            Reflect::get(&crypto, &JsValue::from_str("getRandomValues"))?.dyn_into()?;
-        let bytes = Uint8Array::new_with_length(8);
-        get_random_values.call1(&crypto, &bytes)?;
-        let mut seed = [0_u8; 8];
-        bytes.copy_to(&mut seed);
-        Ok(u64::from_le_bytes(seed))
-    };
-    random().map_err(|_| {
-        js_error(&ApproximateError::internal(
-            "crypto.getRandomValues is unavailable for a random seed",
-        ))
-    })
 }
 
 /// `{ format, data, mimeType, width, height }`, the fields of the napi
@@ -170,11 +138,12 @@ fn result_object(result: ApproximateResult) -> JsValue {
 /// option also carries `option` (its JavaScript name) and `requirement`, as
 /// in the napi binding.
 fn js_error(error: &ApproximateError) -> JsValue {
-    let object = Error::new(&js_message(error));
-    set(&object, "code", error.code().into());
-    if let ApproximateError::InvalidOption { option } = error {
-        set(&object, "option", js_option_name(*option).into());
-        set(&object, "requirement", option.requirement().into());
+    let fields = js_error_fields(error);
+    let object = Error::new(&fields.message);
+    set(&object, "code", fields.code.into());
+    if let Some(invalid) = fields.invalid_option {
+        set(&object, "option", invalid.option.into());
+        set(&object, "requirement", invalid.requirement.into());
     }
     object.into()
 }

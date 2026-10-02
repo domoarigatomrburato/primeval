@@ -3,7 +3,8 @@
 // and the first message tells the two roles apart. The glue import is static
 // so that bundlers bundle it with its snippets and `.wasm` asset.
 import * as glueModule from "../wasm/threaded/primeval.js";
-import { messageOf, runRequest, scope, type ThreadedGlue } from "./worker-common.js";
+import { messageOf } from "./errors.js";
+import { runRequest, scope, type ThreadedGlue } from "./worker-common.js";
 import type { PoolWorkerInit, PoolWorkerMessage, WorkerRequest } from "./worker-protocol.js";
 
 const glue: ThreadedGlue = glueModule;

@@ -13,43 +13,15 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { OUTPUT_FILES, VARIANTS } from "./build-wasm.mjs";
+
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 /** The port `serve` listens on, on 127.0.0.1. */
-export const DEMO_PORT = 8417;
+const DEMO_PORT = 8417;
 
 const BROWSER_ENTRY = "dist/browser.js";
-const WASM_FILES = ["primeval.js", "primeval_bg.wasm"];
-const VARIANTS = ["single", "threaded"];
 const SAMPLES_DIR = "docs/readme/originals";
-
-/**
- * The `dist/` files the browser entry loads: its static imports and the
- * workers it starts, followed transitively. Paths outside `dist/` (the wasm
- * glue) are copied with `wasm/`.
- */
-function browserDistFiles(repoRoot) {
-  const distDir = path.join(repoRoot, "dist");
-  const found = new Set();
-  const pending = [path.basename(BROWSER_ENTRY)];
-  while (pending.length > 0) {
-    const name = pending.pop();
-    if (found.has(name)) {
-      continue;
-    }
-    found.add(name);
-    const source = fs.readFileSync(path.join(distDir, name), "utf8");
-    const specifiers = source.matchAll(/(?:\bfrom\s+|new URL\(\s*)"\.\/([\w.-]+\.js)"/g);
-    for (const [, specifier] of specifiers) {
-      pending.push(specifier);
-    }
-  }
-  return [...found].sort();
-}
-
-function copyTree(from, to) {
-  fs.cpSync(from, to, { recursive: true });
-}
 
 /**
  * Writes the site to `siteDir` (default `site/`), replacing it. Throws, before
@@ -58,7 +30,9 @@ function copyTree(from, to) {
 export function buildSite({ repoRoot = REPO_ROOT, siteDir = path.join(repoRoot, "site") } = {}) {
   const required = [
     BROWSER_ENTRY,
-    ...VARIANTS.flatMap((variant) => WASM_FILES.map((file) => `wasm/${variant}/${file}`)),
+    ...Object.values(VARIANTS).flatMap(({ outDir }) =>
+      Object.values(OUTPUT_FILES).map((file) => `${outDir}/${file}`),
+    ),
   ];
   const missing = required.filter((file) => !fs.existsSync(path.join(repoRoot, file)));
   if (missing.length > 0) {
@@ -69,22 +43,26 @@ export function buildSite({ repoRoot = REPO_ROOT, siteDir = path.join(repoRoot, 
   }
 
   fs.rmSync(siteDir, { recursive: true, force: true });
-  copyTree(path.join(repoRoot, "demo"), siteDir);
+  fs.cpSync(path.join(repoRoot, "demo"), siteDir, { recursive: true });
 
+  // Every module the package ships (`dist/*.js`); the page never loads the
+  // Node-only ones.
   fs.mkdirSync(path.join(siteDir, "dist"), { recursive: true });
-  for (const file of browserDistFiles(repoRoot)) {
-    fs.copyFileSync(path.join(repoRoot, "dist", file), path.join(siteDir, "dist", file));
+  for (const file of fs.readdirSync(path.join(repoRoot, "dist"))) {
+    if (file.endsWith(".js")) {
+      fs.copyFileSync(path.join(repoRoot, "dist", file), path.join(siteDir, "dist", file));
+    }
   }
 
-  for (const variant of VARIANTS) {
-    const from = path.join(repoRoot, "wasm", variant);
-    const to = path.join(siteDir, "wasm", variant);
+  for (const { outDir } of Object.values(VARIANTS)) {
+    const from = path.join(repoRoot, outDir);
+    const to = path.join(siteDir, outDir);
     fs.mkdirSync(to, { recursive: true });
-    for (const file of WASM_FILES) {
+    for (const file of Object.values(OUTPUT_FILES)) {
       fs.copyFileSync(path.join(from, file), path.join(to, file));
     }
     if (fs.existsSync(path.join(from, "snippets"))) {
-      copyTree(path.join(from, "snippets"), path.join(to, "snippets"));
+      fs.cpSync(path.join(from, "snippets"), path.join(to, "snippets"), { recursive: true });
     }
   }
 
@@ -109,8 +87,8 @@ async function main(args) {
   const siteDir = buildSite();
   console.log(`demo: wrote ${path.relative(REPO_ROOT, siteDir)}/`);
   if (command === "serve") {
-    // The test server, reused: same MIME types and header switch.
-    const { startServer } = await import("../test/browser/server.js");
+    // The browser tests' server: same MIME types and header switch.
+    const { startServer } = await import("./static-server.mjs");
     const isolated = flags.includes("--isolated");
     const { origin } = await startServer({ isolated, root: siteDir, port: DEMO_PORT });
     console.log(

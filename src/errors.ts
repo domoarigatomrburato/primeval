@@ -85,6 +85,24 @@ export class InternalError extends PrimevalError {
   }
 }
 
+/** The message of a thrown value: an `Error`'s message, or the value as a string. */
+export function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The `option` and `requirement` of a native invalid-option error, or none
+ * when it names no option.
+ */
+export function optionFields(error: { option?: unknown; requirement?: unknown }): {
+  option?: OptionName;
+  requirement?: string;
+} {
+  return typeof error.option === "string"
+    ? { option: error.option as OptionName, requirement: String(error.requirement) }
+    : {};
+}
+
 // Maps on the native `code` only, never on the message text. Errors without
 // a known code pass through unchanged.
 export function mapNativeError(error: unknown): unknown {
@@ -99,9 +117,7 @@ export function mapNativeError(error: unknown): unknown {
       return new ValidationError(error.message, {
         ...options,
         code: native.code,
-        ...(typeof native.option === "string"
-          ? { option: native.option as OptionName, requirement: String(native.requirement) }
-          : {}),
+        ...optionFields(native),
       });
     case "ABORTED":
       return new AbortError(error.message, options);

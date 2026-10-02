@@ -130,12 +130,10 @@ jobs:
       # The pinned stable, with the wasm target from rust-toolchain.toml.
       - run: rustup toolchain install
 
-      # The dated nightly for the threaded build, pinned in the script.
-      - run: node scripts/build-wasm.mjs install-nightly
-
-      # The CLI must match the wasm-bindgen crate in Cargo.lock. Built from
-      # source with its lockfile, without a cache (see above).
-      - run: cargo install wasm-bindgen-cli --locked --version "$(node scripts/build-wasm.mjs wasm-bindgen-version)"
+      # The dated nightly for the threaded build and wasm-bindgen-cli at the
+      # version of the crate in Cargo.lock, both pinned in the script. The CLI
+      # is built from source with its lockfile, without a cache (see above).
+      - run: node scripts/build-wasm.mjs install-tools
 
       # Fails on a build over the size budget or without the shared memory.
       - run: npm run build:wasm

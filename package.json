@@ -82,7 +82,7 @@
     "verify:rust": "cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo clippy --all-targets --all-features -- -D warnings && cargo doc --no-deps --workspace && cargo test",
     "verify:node": "npm run lint && npm run check:napi-targets && npm run typecheck && npm run build && npm run build:node && npm test && npm run test:tooling",
     "verify:pack": "npm run prepare:package && npm pack --dry-run --ignore-scripts",
-    "verify:wasm": "node scripts/build-wasm.mjs clippy && npm run build:wasm && npm run build && npm run build:node && npm run test:browser",
+    "verify:wasm": "node scripts/build-wasm.mjs clippy && npm run build:wasm && npm run build && npm run build:node && node scripts/release-packages.mjs verify-root && npm run test:browser",
     "verify": "npm run verify:rust && npm run verify:node && npm run verify:pack && npm run verify:wasm",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.browser.json",
     "test": "node --test test/index.test.js test/contracts.test.js test/native.test.js test/cli.test.js test/readme.test.js test/types.test.js",

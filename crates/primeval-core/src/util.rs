@@ -22,17 +22,25 @@ pub(crate) fn rotate_sc(x: f64, y: f64, sin_t: f64, cos_t: f64) -> (f64, f64) {
     (x * cos_t - y * sin_t, x * sin_t + y * cos_t)
 }
 
+/// A non-deterministic seed from the OS entropy source, or from
+/// `crypto.getRandomValues` in a browser.
+///
+/// # Panics
+///
+/// If the platform has no entropy source.
 #[must_use]
-pub(crate) fn system_clock_seed() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock should be after unix epoch")
-        .as_nanos() as u64
+pub(crate) fn entropy_seed() -> u64 {
+    getrandom::u64().expect("the platform should provide an entropy source")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn entropy_seeds_differ() {
+        assert_ne!(entropy_seed(), entropy_seed());
+    }
 
     #[test]
     fn radians_and_degrees_roundtrip() {

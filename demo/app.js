@@ -39,18 +39,31 @@ const ui = {
 };
 
 /**
- * A test and debugging seam: `runs` records each finished run (outcome, and
- * the live and final SVG to compare), `step` the current run's last step.
+ * A test and debugging seam: `step` is the current run's last step,
+ * `runCount` counts the finished runs and `lastRun` describes the last one
+ * (see `runRecord`); `onRun`, when set, is called with each run's record as
+ * the run finishes.
  */
-const debug = { ready: false, step: 0, runs: [] };
+const debug = {
+  ready: false,
+  runCount: 0,
+  lastRun: null,
+  onRun: null,
+  get step() {
+    return state.run?.progress.step ?? 0;
+  },
+};
 window.primevalDemo = debug;
 
 const state = {
-  /** The loaded image: `{ bytes, url, name, objectUrl }`. */
+  /** The loaded image: `{ bytes, name, objectUrl }`. */
   image: null,
   /** Bumped by every image load, so a slower earlier load is dropped. */
   loadId: 0,
-  /** The current run: `{ controller }`; any other run's results are stale. */
+  /**
+   * The current or last run: `{ controller, progress }`, `progress` being its
+   * last `onProgress` info; any other run's results are stale.
+   */
   run: null,
   /** The finished result: `{ svg, width, height, name }`. */
   result: null,
@@ -128,8 +141,8 @@ function setAspect(width, height) {
 
 // --- Status ---
 
-const timer = { start: 0, drawStart: 0, frame: 0 };
-let progress = { step: 0, total: 0, score: undefined };
+const timer = { start: 0, frame: 0 };
+const NO_PROGRESS = { step: 0, total: 0, score: undefined };
 let announced = 0;
 
 function formatSeconds(ms) {
@@ -146,16 +159,17 @@ function announce(text) {
 }
 
 function renderStatus(now = performance.now()) {
-  const { step, total, score } = progress;
+  const { step, total, score } = state.run?.progress ?? NO_PROGRESS;
   ui.step.textContent = `${step} / ${total}`;
   ui.progress.max = Math.max(total, 1);
   ui.progress.value = step;
   ui.score.textContent = score === undefined ? "–" : score.toFixed(4);
+  // The rendering call starts with the run.
+  const seconds = timer.start > 0 ? (now - timer.start) / 1000 : 0;
   if (timer.start > 0) {
     ui.elapsed.textContent = formatSeconds(now - timer.start);
   }
-  const drawing = timer.drawStart > 0 ? (now - timer.drawStart) / 1000 : 0;
-  ui.rate.textContent = step > 0 && drawing > 0 ? String(Math.round(step / drawing)) : "–";
+  ui.rate.textContent = step > 0 && seconds > 0 ? String(Math.round(step / seconds)) : "–";
   // Screen readers hear every quarter, not every step.
   const quarter = total > 0 ? Math.floor((step / total) * 4) : 0;
   if (quarter > announced && step < total) {
@@ -220,36 +234,65 @@ function svgFrame(document) {
   };
 }
 
-/** A live `<svg>` in the stage that appends shapes once per animation frame. */
-function startLive(frame) {
-  ui.result.innerHTML = frame.head + frame.tail;
-  const svg = ui.result.querySelector("svg");
-  const shapes = [];
+/**
+ * The live `<svg>` in the stage, which `start(frame)` puts there. Shapes
+ * pushed before it wait; `flush()`, once per animation frame, appends the
+ * shapes pushed since the last one.
+ */
+function liveDrawing() {
+  let svg = null;
   let pending = [];
   return {
-    svg,
+    get svg() {
+      return svg;
+    },
+    start(frame) {
+      ui.result.innerHTML = frame.head + frame.tail;
+      svg = ui.result.querySelector("svg");
+    },
     push(shape) {
-      shapes.push(shape);
       pending.push(shape);
     },
     flush() {
-      if (pending.length > 0) {
+      if (svg !== null && pending.length > 0) {
         svg.insertAdjacentHTML("beforeend", pending.map((shape) => `${shape}\n`).join(""));
         pending = [];
       }
     },
-    /** The document the live drawing amounts to. */
-    text: () => frame.head + shapes.map((shape) => `${shape}\n`).join("") + frame.tail,
     count: () => svg.querySelectorAll(":scope > :not(rect:first-of-type)").length,
   };
 }
 
-// --- Running ---
-
-function setRunning(running) {
-  ui.stop.disabled = !running;
-  ui.stage.dataset.running = String(running);
+/**
+ * What `debug` reports of a finished run. A done run's markup is serialized
+ * only when read: the live SVG the stage kept, and the DOM the final SVG
+ * parses to, which the stage would show had it parsed it instead.
+ */
+function runRecord({ outcome, progress, total, live, result }) {
+  const record = { outcome, step: progress.step, total };
+  if (outcome !== "done") {
+    return record;
+  }
+  return {
+    ...record,
+    width: result.width,
+    height: result.height,
+    finalText: result.data,
+    get liveShapeCount() {
+      return live.count();
+    },
+    get liveMarkup() {
+      return live.svg.outerHTML;
+    },
+    get finalMarkup() {
+      const parsed = document.createElement("template");
+      parsed.innerHTML = result.data;
+      return parsed.content.querySelector("svg").outerHTML;
+    },
+  };
 }
+
+// --- Running ---
 
 function setDownloads(enabled) {
   ui.downloadSvg.disabled = !enabled;
@@ -263,35 +306,36 @@ async function run() {
     return;
   }
   state.run?.controller.abort();
-  const current = { controller: new AbortController() };
+  const options = readOptions();
+  const current = {
+    controller: new AbortController(),
+    progress: {
+      step: 0,
+      total: Number.isFinite(options.count) ? options.count : 0,
+      score: undefined,
+    },
+  };
   state.run = current;
   const isCurrent = () => state.run === current;
   const { signal } = current.controller;
   const image = state.image;
-  const options = readOptions();
-  const record = { outcome: "", step: 0, total: options.count };
-  let live;
+  const live = liveDrawing();
+  let outcome = "";
+  let result = null;
 
   clearError();
   setDownloads(false);
   state.result = null;
-  setRunning(true);
+  ui.stop.disabled = false;
   setRunState("busy", "Preparing");
-  progress = {
-    step: 0,
-    total: Number.isFinite(options.count) ? options.count : 0,
-    score: undefined,
-  };
   announced = 0;
-  debug.step = 0;
   timer.start = performance.now();
-  timer.drawStart = 0;
   announce(`Rendering ${options.count} shapes`);
   const tick = (now) => {
     if (!isCurrent()) {
       return;
     }
-    live?.flush();
+    live.flush();
     renderStatus(now);
     timer.frame = requestAnimationFrame(tick);
   };
@@ -299,59 +343,45 @@ async function run() {
   timer.frame = requestAnimationFrame(tick);
 
   try {
-    // The frame of the live SVG: the same options give the same canvas and
-    // background at any count.
-    const first = await approximate({
+    // Both calls start at once. The first gives the frame of the live SVG:
+    // the same options give the same canvas and background at any count.
+    // The second's shapes wait for it.
+    const frame = approximate({
       input: image.bytes,
       output: "svg",
       render: { ...options, count: 1 },
       execution: { signal },
+    }).then((first) => {
+      // Not once the run has ended: the other call can fail or stop it first.
+      if (isCurrent() && outcome === "") {
+        setAspect(first.width, first.height);
+        live.start(svgFrame(first.data));
+        setView("result");
+        setRunState("busy", "Drawing");
+      }
     });
-    if (!isCurrent()) {
-      return;
-    }
-    setAspect(first.width, first.height);
-    live = startLive(svgFrame(first.data));
-    setView("result");
-    setRunState("busy", "Drawing");
-    timer.drawStart = performance.now();
-
-    const result = await approximate({
+    const rendering = approximate({
       input: image.bytes,
       output: "svg",
       render: options,
       execution: {
         signal,
         onProgress(info) {
-          if (!isCurrent()) {
-            return;
+          if (isCurrent()) {
+            live.push(info.shape);
+            current.progress = info;
           }
-          live.push(info.shape);
-          progress = info;
-          record.step = info.step;
-          debug.step = info.step;
         },
       },
     });
+    [, result] = await Promise.all([frame, rendering]);
     if (!isCurrent()) {
       return;
     }
+    // The live SVG stays: it is the final document's DOM by construction
+    // (see the demo tests).
     live.flush();
-    Object.assign(record, {
-      liveShapeCount: live.count(),
-      liveText: live.text(),
-      liveMarkup: live.svg.outerHTML,
-    });
-    // The final document replaces the live one; they are the same by
-    // construction (see the demo tests).
-    ui.result.innerHTML = result.data;
-    Object.assign(record, {
-      outcome: "done",
-      finalText: result.data,
-      finalMarkup: ui.result.querySelector("svg").outerHTML,
-      width: result.width,
-      height: result.height,
-    });
+    outcome = "done";
     state.result = {
       svg: result.data,
       width: result.width,
@@ -360,39 +390,51 @@ async function run() {
     };
     const took = performance.now() - timer.start;
     setRunState("done", "Done");
-    announce(`Done: ${progress.total} shapes in ${formatSeconds(took)}`);
+    announce(`Done: ${current.progress.total} shapes in ${formatSeconds(took)}`);
     setDownloads(true);
     setView("compare");
   } catch (error) {
-    record.outcome = error?.name === "AbortError" ? "stopped" : "error";
+    outcome = error?.name === "AbortError" ? "stopped" : "error";
+    if (outcome === "error") {
+      // Stops the other call, which this run no longer needs.
+      current.controller.abort();
+    }
     if (!isCurrent()) {
       return;
     }
-    live?.flush();
-    if (record.outcome === "stopped") {
+    live.flush();
+    if (outcome === "stopped") {
       setRunState("stopped", "Stopped");
-      announce(`Stopped at ${progress.step} of ${progress.total} shapes`);
-      if (live !== undefined) {
+      announce(`Stopped at ${current.progress.step} of ${current.progress.total} shapes`);
+      if (live.svg !== null) {
         setView("compare");
       }
     } else {
       setRunState("error", "Error");
       showRenderError(error);
-      if (live === undefined) {
+      if (live.svg === null) {
         setView("original");
       }
     }
   } finally {
-    if (record.outcome === "") {
+    if (outcome === "") {
       // Finished just as a newer run replaced it.
-      record.outcome = "stopped";
+      outcome = "stopped";
     }
-    debug.runs.push(record);
+    debug.runCount += 1;
+    debug.lastRun = runRecord({
+      outcome,
+      progress: current.progress,
+      total: options.count,
+      live,
+      result,
+    });
+    debug.onRun?.(debug.lastRun);
     if (isCurrent()) {
       cancelAnimationFrame(timer.frame);
       renderStatus();
       timer.start = 0;
-      setRunning(false);
+      ui.stop.disabled = true;
     }
   }
 }
@@ -446,7 +488,7 @@ async function loadImage(source) {
   if (state.image?.objectUrl) {
     URL.revokeObjectURL(state.image.objectUrl);
   }
-  state.image = { bytes, url, name, objectUrl };
+  state.image = { bytes, name, objectUrl };
   for (const sample of ui.samples) {
     sample.setAttribute("aria-pressed", String(url === sampleUrl(sample)));
   }

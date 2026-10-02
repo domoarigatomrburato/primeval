@@ -33,6 +33,64 @@ test("demo:build fails clearly when dist/ or wasm/ is missing", () => {
   }
 });
 
+test("demo:build copies the demo, the dist JavaScript, both wasm builds and the samples", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "primeval-demo-root-"));
+  const write = (file, content = "") => {
+    fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+    fs.writeFileSync(path.join(root, file), content);
+  };
+  try {
+    for (const file of [
+      "demo/index.html",
+      "demo/app.js",
+      "dist/browser.js",
+      "dist/worker-single.js",
+      "dist/index.js",
+      "dist/browser.d.ts",
+      "dist/browser.js.map",
+      "wasm/single/primeval.js",
+      "wasm/single/primeval_bg.wasm",
+      "wasm/single/primeval.d.ts",
+      "wasm/threaded/primeval.js",
+      "wasm/threaded/primeval_bg.wasm",
+      "wasm/threaded/snippets/rayon-0123/workerHelpers.js",
+      "docs/readme/originals/monalisa.jpg",
+      "docs/readme/originals/README.md",
+    ]) {
+      write(file);
+    }
+    const siteDir = buildSite({ repoRoot: root, siteDir: path.join(root, "site") });
+    const site = fs
+      .readdirSync(siteDir, { recursive: true })
+      .filter((file) => fs.statSync(path.join(siteDir, file)).isFile())
+      .map((file) => file.split(path.sep).join("/"))
+      .sort();
+
+    assert.deepEqual(site, [
+      "app.js",
+      "dist/browser.js",
+      "dist/index.js",
+      "dist/worker-single.js",
+      "index.html",
+      "samples/monalisa.jpg",
+      "wasm/single/primeval.js",
+      "wasm/single/primeval_bg.wasm",
+      "wasm/threaded/primeval.js",
+      "wasm/threaded/primeval_bg.wasm",
+      "wasm/threaded/snippets/rayon-0123/workerHelpers.js",
+    ]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("demo.mjs takes the static server and the wasm layout from scripts/", () => {
+  const source = readRepoFile("scripts", "demo.mjs");
+  assert.match(source, /from "\.\/static-server\.mjs"|import\("\.\/static-server\.mjs"\)/);
+  assert.match(source, /from "\.\/build-wasm\.mjs"/);
+  assert.doesNotMatch(source, /test\/|primeval_bg\.wasm/);
+});
+
 test("the demo scripts and the generated site are wired up", () => {
   const { scripts } = JSON.parse(readRepoFile("package.json"));
   assert.equal(scripts["demo:build"], "node scripts/demo.mjs build");
@@ -55,8 +113,7 @@ test("the Pages workflow builds the site without caches and deploys it", () => {
   const order = [
     "- run: npm ci\n",
     "- run: rustup toolchain install\n",
-    "- run: node scripts/build-wasm.mjs install-nightly\n",
-    '- run: cargo install wasm-bindgen-cli --locked --version "$(node scripts/build-wasm.mjs wasm-bindgen-version)"\n',
+    "- run: node scripts/build-wasm.mjs install-tools\n",
     "- run: npm run build\n",
     "- run: npm run build:wasm\n",
     "- run: npm run demo:build\n",

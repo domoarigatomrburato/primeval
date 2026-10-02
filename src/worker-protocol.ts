@@ -50,9 +50,8 @@ export interface WorkerResult {
 export type WorkerMessage =
   | { type: "progress"; info: ProgressInfo }
   | { type: "result"; result: WorkerResult }
-  | { type: "error"; error: WorkerError }
-  /** A panic on the worker's own thread, posted by the panic hook before the trap. */
-  | { type: "panic"; message: string };
+  /** Also posted by the panic hook, before the trap, for a panic on the worker's own thread. */
+  | { type: "error"; error: WorkerError };
 
 /** The one message a threaded worker sends each of its pool workers. */
 export interface PoolWorkerInit {

@@ -141,6 +141,42 @@ pub fn js_message(error: &ApproximateError) -> String {
     message
 }
 
+/// The properties of the JavaScript `Error` a binding throws for an
+/// [`ApproximateError`]; each binding builds the object itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JsErrorFields {
+    /// The stable error code, [`ApproximateError::code`].
+    pub code: &'static str,
+    /// The message, [`js_message`].
+    pub message: String,
+    /// The option of an [`ApproximateError::InvalidOption`].
+    pub invalid_option: Option<JsInvalidOption>,
+}
+
+/// The `option` and `requirement` properties of an invalid-option error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JsInvalidOption {
+    /// The option's JavaScript name, [`js_option_name`].
+    pub option: &'static str,
+    /// What the option accepts, [`RenderOption::requirement`].
+    pub requirement: &'static str,
+}
+
+/// The JavaScript error properties for `error`.
+pub fn js_error_fields(error: &ApproximateError) -> JsErrorFields {
+    JsErrorFields {
+        code: error.code(),
+        message: js_message(error),
+        invalid_option: match error {
+            ApproximateError::InvalidOption { option } => Some(JsInvalidOption {
+                option: js_option_name(*option),
+                requirement: option.requirement(),
+            }),
+            _ => None,
+        },
+    }
+}
+
 /// The message of a panic payload, or a placeholder for a non-string one.
 pub fn panic_message(payload: &(dyn Any + Send)) -> &str {
     payload
@@ -355,6 +391,31 @@ mod tests {
         assert_eq!(
             js_message(&error),
             "internal render error: PNG encoding failed: disk full"
+        );
+    }
+
+    #[test]
+    fn js_error_fields_carry_the_code_message_and_invalid_option() {
+        assert_eq!(
+            js_error_fields(&ApproximateError::invalid_option(RenderOption::ResizeInput)),
+            JsErrorFields {
+                code: "INVALID_OPTION",
+                message: format!("resizeInput {}", RenderOption::ResizeInput.requirement()),
+                invalid_option: Some(JsInvalidOption {
+                    option: "resizeInput",
+                    requirement: RenderOption::ResizeInput.requirement(),
+                }),
+            }
+        );
+
+        let internal = ApproximateError::internal("boom");
+        assert_eq!(
+            js_error_fields(&internal),
+            JsErrorFields {
+                code: "INTERNAL",
+                message: js_message(&internal),
+                invalid_option: None,
+            }
         );
     }
 
