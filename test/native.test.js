@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
-import zlib from "node:zlib";
 import { AbortError, approximate, PrimevalError, ValidationError } from "@aleburato/primeval";
+
+import { rgbPng } from "./helpers/png.js";
 
 const LONG_RENDER = { count: 100000, resizeInput: 16, outputSize: 16, seed: 7 };
 
@@ -164,44 +165,9 @@ test("native approximate maps invalid bytes to ValidationError", async () => {
   );
 });
 
-// A minimal 8-bit RGB PNG, so tests can build odd sizes without fixtures.
-function solidPng(width, height) {
-  const crcTable = Array.from({ length: 256 }, (_, n) => {
-    let c = n;
-    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    return c >>> 0;
-  });
-  const crc = (bytes) => {
-    let c = 0xffffffff;
-    for (const byte of bytes) c = crcTable[(c ^ byte) & 0xff] ^ (c >>> 8);
-    return (c ^ 0xffffffff) >>> 0;
-  };
-  const chunk = (type, data) => {
-    const body = Buffer.concat([Buffer.from(type, "ascii"), data]);
-    const out = Buffer.alloc(body.length + 8);
-    out.writeUInt32BE(data.length, 0);
-    body.copy(out, 4);
-    out.writeUInt32BE(crc(body), body.length + 4);
-    return out;
-  };
-  const header = Buffer.alloc(13);
-  header.writeUInt32BE(width, 0);
-  header.writeUInt32BE(height, 4);
-  header[8] = 8;
-  header[9] = 2;
-  const row = Buffer.concat([Buffer.from([0]), Buffer.alloc(width * 3, 0x80)]);
-  const raw = Buffer.concat(Array.from({ length: height }, () => row));
-  return Buffer.concat([
-    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-    chunk("IHDR", header),
-    chunk("IDAT", zlib.deflateSync(raw)),
-    chunk("IEND", Buffer.alloc(0)),
-  ]);
-}
-
 test("native approximate rejects a 1000x1 image as INVALID_IMAGE", async () => {
   await assert.rejects(
-    approximate({ input: solidPng(1000, 1), output: "svg", render: render() }),
+    approximate({ input: rgbPng(1000, 1), output: "svg", render: render() }),
     (error) =>
       error instanceof ValidationError &&
       error.code === "INVALID_IMAGE" &&
@@ -212,7 +178,7 @@ test("native approximate rejects a 1000x1 image as INVALID_IMAGE", async () => {
 
 test("native approximate renders a 2000x5 banner on a 256x2 canvas", async () => {
   const result = await approximate({
-    input: solidPng(2000, 5),
+    input: rgbPng(2000, 5),
     output: "svg",
     render: render({ count: 2, resizeInput: 256 }),
   });
@@ -503,4 +469,47 @@ test("aborting after the render settled is a no-op", async () => {
   controller.abort();
 
   assert.equal(result.format, "svg");
+});
+
+test("16 concurrent renders settle like sequential ones, with no progress after settling", async () => {
+  const count = 6;
+  const seeds = Array.from({ length: 16 }, (_, seed) => seed);
+  const late = [];
+  const steps = seeds.map(() => []);
+
+  const concurrent = await Promise.all(
+    seeds.map(async (seed) => {
+      let settled = false;
+      try {
+        return await approximate({
+          input: FIXTURE_IMAGE,
+          output: seed % 2 === 0 ? "svg" : "png",
+          render: render({ count, seed }),
+          execution: {
+            onProgress(info) {
+              if (settled) {
+                late.push({ seed, step: info.step });
+              }
+              steps[seed].push(info.step);
+            },
+          },
+        });
+      } finally {
+        settled = true;
+      }
+    }),
+  );
+  // Give any queued progress call the chance to arrive late.
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  assert.deepEqual(late, []);
+  for (const seed of seeds) {
+    assert.deepEqual(steps[seed], [1, 2, 3, 4, 5, 6], `seed ${seed}`);
+    const sequential = await approximate({
+      input: FIXTURE_IMAGE,
+      output: seed % 2 === 0 ? "svg" : "png",
+      render: render({ count, seed }),
+    });
+    assert.deepEqual(concurrent[seed], sequential, `seed ${seed}`);
+  }
 });

@@ -1,3 +1,4 @@
+use crate::RenderOption;
 use primeval_core::ParseError;
 use std::str::FromStr;
 
@@ -10,11 +11,6 @@ pub enum OutputFormat {
 }
 
 impl OutputFormat {
-    #[must_use]
-    pub const fn variants() -> &'static [&'static str] {
-        &["svg", "png"]
-    }
-
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -45,8 +41,8 @@ impl FromStr for OutputFormat {
             "svg" => Ok(Self::Svg),
             "png" => Ok(Self::Png),
             _ => Err(ParseError::new(format!(
-                "output must be one of: {}",
-                Self::variants().join(", ")
+                "output {}",
+                RenderOption::Output.requirement()
             ))),
         }
     }
@@ -81,8 +77,6 @@ mod tests {
                 format
             );
         }
-
-        assert_eq!(OutputFormat::variants(), &["svg", "png"]);
     }
 
     #[test]

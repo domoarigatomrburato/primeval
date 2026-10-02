@@ -189,21 +189,6 @@ impl Shape {
 
 impl ShapeKind {
     #[must_use]
-    pub const fn variants() -> &'static [&'static str] {
-        &[
-            "any",
-            "triangle",
-            "rectangle",
-            "ellipse",
-            "circle",
-            "rotated-rectangle",
-            "quadratic",
-            "rotated-ellipse",
-            "polygon",
-        ]
-    }
-
-    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             ShapeKind::Any => "any",
@@ -246,10 +231,10 @@ impl FromStr for ShapeKind {
             "quadratic" => Ok(Self::Quadratic),
             "rotated-ellipse" => Ok(Self::RotatedEllipse),
             "polygon" => Ok(Self::Polygon),
-            _ => Err(ParseError::new(format!(
-                "shape must be one of: {}",
-                Self::variants().join(", ")
-            ))),
+            _ => Err(ParseError::new(
+                "shape must be one of: any, triangle, rectangle, ellipse, circle, \
+                 rotated-rectangle, quadratic, rotated-ellipse, polygon",
+            )),
         }
     }
 }

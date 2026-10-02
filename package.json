@@ -46,7 +46,7 @@
     "verify:pack": "npm run prepare:package && npm pack --dry-run --ignore-scripts",
     "verify": "npm run verify:rust && npm run verify:node && npm run verify:pack",
     "typecheck": "tsc --noEmit",
-    "test": "node --test test/index.test.js test/contracts.test.js test/native.test.js test/cli.test.js test/types.test.js",
+    "test": "node --test test/index.test.js test/contracts.test.js test/native.test.js test/cli.test.js test/readme.test.js test/types.test.js",
     "test:tooling": "node --test test/tooling/*.test.js",
     "prepack": "npm run prepare:package",
     "lint": "biome check --error-on-warnings",

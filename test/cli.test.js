@@ -3,7 +3,7 @@ import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { test } from "node:test";
+import { afterEach, test } from "node:test";
 
 const repoRoot = process.cwd();
 const fixturePath = path.join(repoRoot, "docs", "readme", "originals", "monalisa.jpg");
@@ -23,9 +23,19 @@ function runCli(args, options = {}) {
   });
 }
 
+const tmpDirs = [];
+
 function makeTmpDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "primeval-node-cli-test-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "primeval-node-cli-test-"));
+  tmpDirs.push(dir);
+  return dir;
 }
+
+afterEach(() => {
+  for (const dir of tmpDirs.splice(0)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 function copyFixture(tmpDir, name = "monalisa.jpg") {
   const input = path.join(tmpDir, name);
@@ -473,4 +483,33 @@ test("cli reports an invalid background without a stack trace", () => {
     /^--background must be auto or an opaque hex color \(RGB or RRGGBB\)\n$/,
   );
   assert.equal(fs.existsSync(output), false);
+});
+
+test("cli reports an output path under a regular file without rendering", () => {
+  const tmpDir = makeTmpDir();
+  const file = path.join(tmpDir, "file.txt");
+  fs.writeFileSync(file, "not a directory");
+  const output = path.join(file, "out.svg");
+
+  const result = runCli([fixturePath, "-o", output, ...LONG_RENDER_ARGS], { timeout: 10_000 });
+
+  assertRuntimeError(result, /^cannot access output .*out\.svg: .*\n$/);
+  assert.equal(result.stderr.split("\n").length, 2, result.stderr);
+  assert.deepEqual(fs.readdirSync(tmpDir), ["file.txt"]);
+});
+
+test("cli reports an unwritable output directory without leaving a file", (t) => {
+  if (process.platform === "win32" || process.getuid?.() === 0) {
+    t.skip("file permissions are not enforced here");
+    return;
+  }
+  const outputDir = path.join(makeTmpDir(), "locked");
+  fs.mkdirSync(outputDir, { mode: 0o500 });
+  const output = path.join(outputDir, "out.png");
+
+  const result = runCli([fixturePath, "-o", output, ...RENDER_ARGS]);
+
+  assertRuntimeError(result, /^cannot write output .*out\.png: .*\n$/);
+  assert.equal(result.stderr.split("\n").length, 2, result.stderr);
+  assert.deepEqual(fs.readdirSync(outputDir), []);
 });

@@ -3,8 +3,10 @@
 import {
   type ApproximateResult,
   approximate,
+  type OutputFormat,
   type PngResult,
   type RenderOptions,
+  type Shape,
   type SvgResult,
   ValidationError,
 } from "../../dist/index.js";
@@ -27,3 +29,20 @@ export const pngBytes = async (): Promise<Buffer> =>
 export const background: RenderOptions["background"][] = ["auto", "#336699", undefined];
 
 export const option = (error: ValidationError): string | undefined => error.option;
+
+// The vocabularies mirror Rust; test/contracts.test.js checks the same lists
+// at runtime against the native binding and the CLI.
+type Equal<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+export const shapes: Equal<
+  Shape,
+  | "any"
+  | "triangle"
+  | "rectangle"
+  | "ellipse"
+  | "circle"
+  | "rotated-rectangle"
+  | "quadratic"
+  | "rotated-ellipse"
+  | "polygon"
+> = true;
+export const outputFormats: Equal<OutputFormat, "svg" | "png"> = true;

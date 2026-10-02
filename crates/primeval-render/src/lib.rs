@@ -1255,14 +1255,23 @@ mod tests {
 
     #[test]
     fn requirements_name_the_accepted_values() {
-        assert_eq!(
-            RenderOption::Shape.requirement(),
-            format!("must be one of: {}", ShapeKind::variants().join(", "))
-        );
-        assert_eq!(
-            RenderOption::Output.requirement(),
-            format!("must be one of: {}", OutputFormat::variants().join(", "))
-        );
+        // Every listed name parses back to the value that prints it.
+        let listed = |option: RenderOption| {
+            option
+                .requirement()
+                .strip_prefix("must be one of: ")
+                .expect("a list requirement")
+                .split(", ")
+                .collect::<Vec<_>>()
+        };
+        for name in listed(RenderOption::Shape) {
+            assert_eq!(name.parse::<ShapeKind>().expect(name).as_str(), name);
+        }
+        assert_eq!(listed(RenderOption::Shape).len(), 9);
+        for name in listed(RenderOption::Output) {
+            assert_eq!(name.parse::<OutputFormat>().expect(name).as_str(), name);
+        }
+        assert_eq!(listed(RenderOption::Output).len(), 2);
         for (option, range) in [
             (RenderOption::Count, COUNT_RANGE),
             (RenderOption::ResizeInput, RESIZE_INPUT_RANGE),

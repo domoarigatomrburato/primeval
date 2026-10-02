@@ -118,29 +118,36 @@ test("packed package can be installed and render in a consumer project", {
       )}\n`,
     );
 
+    // The shape `napi create-npm-dirs` generates for npm/<target>/package.json:
+    // the `.node` file is the package's `main` and its only file.
+    const binaryFile = path.basename(currentBinaryPath);
     fs.mkdirSync(platformPackageDir, { recursive: true });
-    fs.copyFileSync(
-      currentBinaryPath,
-      path.join(platformPackageDir, path.basename(currentBinaryPath)),
-    );
+    fs.copyFileSync(currentBinaryPath, path.join(platformPackageDir, binaryFile));
     writeFile(
       path.join(platformPackageDir, "package.json"),
       `${JSON.stringify(
         {
           name: currentTarget.packageName,
           version: packageJson.version,
-          main: "index.js",
+          cpu: [currentTarget.arch],
+          main: binaryFile,
+          files: [binaryFile],
+          license: packageJson.license,
+          engines: packageJson.engines,
+          os: [currentTarget.platform],
+          ...(currentTarget.abi === "gnu" ? { libc: ["glibc"] } : {}),
+          ...(currentTarget.abi === "musl" ? { libc: ["musl"] } : {}),
         },
         null,
         2,
       )}\n`,
     );
-    writeFile(
-      path.join(platformPackageDir, "index.js"),
-      `module.exports = require("./${path.basename(currentBinaryPath)}");\n`,
-    );
-
-    run(npmCommand(), ["install", "./local-platform"], { cwd: tempDir });
+    // Install the packed tarball, so `files` decides what ships.
+    const platformTarball = run(npmCommand(), ["pack", "--json", "--pack-destination", tempDir], {
+      cwd: platformPackageDir,
+    });
+    const [{ filename: platformFilename }] = JSON.parse(platformTarball.stdout);
+    run(npmCommand(), ["install", path.join(tempDir, platformFilename)], { cwd: tempDir });
     run(npmCommand(), ["install", tarballPath], { cwd: tempDir });
 
     const installedDist = path.join(tempDir, "node_modules", "@aleburato", "primeval", "dist");
@@ -162,13 +169,14 @@ test("packed package can be installed and render in a consumer project", {
       'import { readFile } from "node:fs/promises";',
       'import { approximate } from "@aleburato/primeval";',
       `const input = await readFile(${JSON.stringify(fixturePath)});`,
-      "const result = await approximate({",
-      "  input,",
-      '  output: "svg",',
-      "  render: { count: 4, resizeInput: 8, outputSize: 16, seed: 7 },",
-      "});",
-      'if (result.format !== "svg" || !result.data.startsWith("<svg")) {',
-      '  throw new Error("unexpected packed-install result");',
+      "const render = { count: 4, resizeInput: 8, outputSize: 16, seed: 7 };",
+      'const svg = await approximate({ input, output: "svg", render });',
+      'if (svg.format !== "svg" || !svg.data.startsWith("<svg")) {',
+      '  throw new Error("unexpected packed-install SVG result");',
+      "}",
+      'const png = await approximate({ input, output: "png", render });',
+      'if (png.format !== "png" || png.data.readUInt32BE(0) !== 0x89504e47) {',
+      '  throw new Error("unexpected packed-install PNG result");',
       "}",
       'process.stdout.write("ok\\n");',
     ].join("\n");
@@ -177,6 +185,22 @@ test("packed package can be installed and render in a consumer project", {
       cwd: tempDir,
     });
     assert.match(smokeResult.stdout, /^ok$/m);
+
+    // The installed `bin` shim, as a user runs it.
+    const bin = path.join(tempDir, "node_modules", ".bin", "primeval");
+    const runBin = (args) =>
+      process.platform === "win32"
+        ? run(`${bin}.cmd`, args, { cwd: tempDir, shell: true })
+        : run(bin, args, { cwd: tempDir });
+    assert.equal(runBin(["--version"]).stdout, `${packageJson.version}\n`);
+    for (const [output, isFormat] of [
+      ["out.svg", (bytes) => bytes.toString("utf8").startsWith("<svg")],
+      ["out.png", (bytes) => bytes.readUInt32BE(0) === 0x89504e47],
+    ]) {
+      const cli = runBin([fixturePath, "-o", output, "--count", "4", "--resize-input", "8"]);
+      assert.equal(cli.stderr, "");
+      assert.ok(isFormat(fs.readFileSync(path.join(tempDir, output))), output);
+    }
   } finally {
     if (tarballPath) {
       fs.rmSync(tarballPath, { force: true });

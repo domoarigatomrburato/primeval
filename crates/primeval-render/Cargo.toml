@@ -14,3 +14,7 @@ workspace = true
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 primeval-core = { path = "../primeval-core" }
 tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
+
+[dev-dependencies]
+rand = { version = "0.10", default-features = false }
+rand_chacha = "0.10"
