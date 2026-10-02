@@ -1,8 +1,9 @@
 //! High-level render facade for `primeval`.
 //!
 //! This crate handles the full decode -> optimize -> encode path on top of
-//! `primeval-core`. It accepts either image bytes or filesystem paths, runs the
-//! approximation search, and returns SVG or raster output.
+//! `primeval-core`. It takes encoded image bytes (JPEG, PNG, or WebP), runs the
+//! approximation search, and returns SVG or PNG output. Reading files is up to
+//! the caller.
 //!
 //! The Node package and napi binding in this repository build on the same API.
 //! If you want the canonical Rust-side defaults and validation behavior, this is
@@ -12,15 +13,14 @@
 //!
 //! ```no_run
 //! use primeval_render::{
-//!     approximate, ApproximateRequest, ApproximateResult, InputSource, OutputFormat,
-//!     RenderOptions,
+//!     approximate, ApproximateRequest, ApproximateResult, OutputFormat, RenderOptions,
 //! };
 //! use std::sync::atomic::AtomicBool;
 //!
 //! let cancelled = AtomicBool::new(false);
 //! let result = approximate(
 //!     ApproximateRequest {
-//!         input: InputSource::Path("photo.jpg".into()),
+//!         input: std::fs::read("photo.jpg")?,
 //!         output: OutputFormat::Svg,
 //!         render: RenderOptions {
 //!             count: 100,
@@ -40,23 +40,13 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-use image::DynamicImage;
+use image::{DynamicImage, RgbaImage};
 use primeval_core::export::{average_background, encode_png, thumbnail};
 use primeval_core::shapes::ShapeKind;
 use primeval_core::{Buffer, Color, Model, ModelOptions};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use primeval_core::OutputFormat;
-
-/// Source image input for a render request.
-#[derive(Clone, Debug, PartialEq)]
-pub enum InputSource {
-    /// Raw encoded image bytes in JPEG, PNG, or WebP format.
-    Bytes(Vec<u8>),
-    /// A filesystem path to a JPEG, PNG, or WebP image file.
-    Path(PathBuf),
-}
 
 /// Alpha strategy for new shapes during optimization.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -72,7 +62,7 @@ pub enum AlphaOption {
 pub enum BackgroundOption {
     /// Derive the background color from the input image.
     Auto,
-    /// Use an explicit RGBA color.
+    /// Use an explicit opaque color (alpha 255).
     Color(Color),
 }
 
@@ -85,8 +75,6 @@ pub struct RenderOptions {
     pub shape: ShapeKind,
     /// Alpha handling for new shapes.
     pub alpha: AlphaOption,
-    /// Extra hill-climb repetitions after each accepted step.
-    pub repeat: usize,
     /// Deterministic RNG seed. `None` chooses a non-deterministic seed.
     pub seed: Option<u64>,
     /// Background fill strategy.
@@ -95,8 +83,6 @@ pub struct RenderOptions {
     pub resize_input: u32,
     /// Maximum dimension of the final output replay.
     pub output_size: u32,
-    /// Worker override. `None` uses available parallelism.
-    pub workers: Option<usize>,
 }
 
 impl Default for RenderOptions {
@@ -105,12 +91,10 @@ impl Default for RenderOptions {
             count: 100,
             shape: ShapeKind::Any,
             alpha: AlphaOption::Auto,
-            repeat: 0,
             seed: None,
             background: BackgroundOption::Auto,
             resize_input: 256,
             output_size: 1024,
-            workers: None,
         }
     }
 }
@@ -118,15 +102,9 @@ impl Default for RenderOptions {
 /// Full request for a single rendered output.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ApproximateRequest {
-    pub input: InputSource,
+    /// Encoded image bytes in JPEG, PNG, or WebP format.
+    pub input: Vec<u8>,
     pub output: OutputFormat,
-    pub render: RenderOptions,
-}
-
-/// Request used when preparing a reusable approximation run.
-#[derive(Clone, Debug, PartialEq)]
-pub struct RenderRequest {
-    pub input: InputSource,
     pub render: RenderOptions,
 }
 
@@ -189,7 +167,6 @@ impl ApproximateResult {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ApproximateError {
     Validation(String),
-    NotFound(PathBuf),
     Aborted,
     Internal(String),
 }
@@ -208,9 +185,6 @@ impl std::fmt::Display for ApproximateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Validation(message) => write!(f, "validation error: {message}"),
-            Self::NotFound(path) => {
-                write!(f, "input path not found or unreadable: {}", path.display())
-            }
             Self::Aborted => f.write_str("render aborted"),
             Self::Internal(message) => write!(f, "internal render error: {message}"),
         }
@@ -250,7 +224,9 @@ pub fn parse_background_str(value: &str) -> Result<BackgroundOption, String> {
         return Ok(BackgroundOption::Auto);
     }
 
-    let color = Color::from_hex(value).ok_or_else(|| "invalid background color".to_string())?;
+    let color = Color::from_hex(value).ok_or_else(|| {
+        "background must be auto or an opaque hex color (RGB or RRGGBB)".to_string()
+    })?;
     Ok(BackgroundOption::Color(color))
 }
 
@@ -259,128 +235,80 @@ pub fn parse_seed_i64(value: i64) -> Result<u64, String> {
     u64::try_from(value).map_err(|_| "seed must be a positive integer".to_string())
 }
 
-/// Reusable prepared run that can be exported in multiple formats without
-/// rerunning optimization.
-pub struct ApproximationRun {
-    model: Model,
-    rendered: Option<Buffer>,
-    svg: Option<String>,
-}
-
-impl ApproximationRun {
-    /// Final output width after replay.
-    #[must_use]
-    pub const fn width(&self) -> u32 {
-        self.model.output_width
-    }
-
-    /// Final output height after replay.
-    #[must_use]
-    pub const fn height(&self) -> u32 {
-        self.model.output_height
-    }
-
-    /// Encode the prepared run into a single output format.
-    pub fn result(&mut self, output: OutputFormat) -> Result<ApproximateResult, ApproximateError> {
-        let width = self.width();
-        let height = self.height();
-
-        match output {
-            OutputFormat::Svg => Ok(ApproximateResult::Svg {
-                data: self.svg().to_owned(),
-                width,
-                height,
-            }),
-            OutputFormat::Png => Ok(ApproximateResult::Raster {
-                format: OutputFormat::Png,
-                data: encode_png(self.rendered())
-                    .map_err(|err| ApproximateError::internal(err.to_string()))?,
-                width,
-                height,
-            }),
-        }
-    }
-
-    fn rendered(&mut self) -> &Buffer {
-        self.rendered
-            .get_or_insert_with(|| self.model.render_output())
-    }
-
-    fn svg(&mut self) -> &str {
-        self.svg.get_or_insert_with(|| self.model.svg())
-    }
-}
-
 /// Decode, optimize, and encode a single output in one call.
 pub fn approximate(
     request: ApproximateRequest,
     on_progress: Option<&dyn Fn(ProgressInfo)>,
     cancelled: &AtomicBool,
 ) -> Result<ApproximateResult, ApproximateError> {
-    let mut run = prepare(
-        RenderRequest {
-            input: request.input,
-            render: request.render,
-        },
-        on_progress,
-        cancelled,
-    )?;
-    run.result(request.output)
-}
+    let ApproximateRequest {
+        input,
+        output,
+        render,
+    } = request;
+    validate_options(&render)?;
 
-/// Decode and optimize once, then return a reusable run for later encoding.
-pub fn prepare(
-    request: RenderRequest,
-    on_progress: Option<&dyn Fn(ProgressInfo)>,
-    cancelled: &AtomicBool,
-) -> Result<ApproximationRun, ApproximateError> {
-    validate_options(&request.render)?;
-
-    let image = decode_input(&request.input)?;
-    let background = match request.render.background {
-        BackgroundOption::Auto => average_background(&image),
-        BackgroundOption::Color(color) => color,
-    };
-    let working = thumbnail(&image, request.render.resize_input);
+    let image = decode_input(&input)?;
+    drop(input);
+    let (working, background) = prepare_target(image, render.background, render.resize_input);
     let mut model = Model::new(
         Buffer::from_image(&working),
         background,
-        request.render.output_size,
+        render.output_size,
         ModelOptions {
-            seed: request.render.seed,
-            workers: request.render.workers.unwrap_or_else(default_worker_count),
+            seed: render.seed,
+            workers: default_worker_count(),
             profile_quadratic: false,
             ..ModelOptions::default()
         },
     );
-    let alpha = match request.render.alpha {
+    let alpha = match render.alpha {
         AlphaOption::Auto => 0,
         AlphaOption::Fixed(alpha) => i32::from(alpha),
     };
 
-    for step in 0..request.render.count {
+    for step in 0..render.count {
         if cancelled.load(Ordering::SeqCst) {
             return Err(ApproximateError::Aborted);
         }
 
         model
-            .step(request.render.shape, alpha, request.render.repeat)
+            .step(render.shape, alpha)
             .map_err(ApproximateError::internal)?;
 
         if let Some(callback) = on_progress {
             callback(ProgressInfo {
                 step: step + 1,
-                total: request.render.count,
+                total: render.count,
                 score: model.score_f64(),
             });
         }
     }
 
-    Ok(ApproximationRun {
-        model,
-        rendered: None,
-        svg: None,
-    })
+    encode_output(&model, output)
+}
+
+fn encode_output(
+    model: &Model,
+    output: OutputFormat,
+) -> Result<ApproximateResult, ApproximateError> {
+    let width = model.output_width;
+    let height = model.output_height;
+
+    match output {
+        OutputFormat::Svg => Ok(ApproximateResult::Svg {
+            data: model.svg(),
+            width,
+            height,
+        }),
+        OutputFormat::Png => Ok(ApproximateResult::Raster {
+            format: OutputFormat::Png,
+            data: encode_png(&model.render_output())
+                .map_err(|err| ApproximateError::internal(err.to_string()))?,
+            width,
+            height,
+        }),
+    }
 }
 
 fn validate_options(render: &RenderOptions) -> Result<(), ApproximateError> {
@@ -397,8 +325,10 @@ fn validate_options(render: &RenderOptions) -> Result<(), ApproximateError> {
             "resize_input must be at least 1",
         ));
     }
-    if render.workers == Some(0) {
-        return Err(ApproximateError::validation("workers must be at least 1"));
+    if let BackgroundOption::Color(color) = render.background
+        && color.a != 255
+    {
+        return Err(ApproximateError::validation("background must be opaque"));
     }
     if let AlphaOption::Fixed(alpha) = render.alpha
         && alpha == 0
@@ -410,25 +340,50 @@ fn validate_options(render: &RenderOptions) -> Result<(), ApproximateError> {
     Ok(())
 }
 
-fn decode_input(input: &InputSource) -> Result<DynamicImage, ApproximateError> {
-    match input {
-        InputSource::Bytes(bytes) => image::load_from_memory(bytes)
-            .map_err(|err| ApproximateError::validation(format!("invalid image data: {err}"))),
-        InputSource::Path(path) => {
-            let bytes =
-                std::fs::read(path).map_err(|_| ApproximateError::NotFound(path.clone()))?;
-            image::load_from_memory(&bytes).map_err(|err| {
-                ApproximateError::validation(format!(
-                    "invalid image data at {}: {err}",
-                    path.display()
-                ))
-            })
+fn decode_input(bytes: &[u8]) -> Result<DynamicImage, ApproximateError> {
+    image::load_from_memory(bytes)
+        .map_err(|err| ApproximateError::validation(format!("invalid image data: {err}")))
+}
+
+/// Resolve the background, flatten the image onto it, and build the
+/// working-resolution target.
+///
+/// The target is always opaque: every pixel is composited onto the opaque
+/// background, which leaves already-opaque pixels unchanged.
+fn prepare_target(
+    image: DynamicImage,
+    background: BackgroundOption,
+    resize_input: u32,
+) -> (RgbaImage, Color) {
+    let mut pixels = image.into_rgba8();
+    let background = match background {
+        BackgroundOption::Auto => average_background(&pixels),
+        BackgroundOption::Color(color) => color,
+    };
+    flatten_onto(&mut pixels, background);
+    let flattened = DynamicImage::ImageRgba8(pixels);
+    (thumbnail(&flattened, resize_input), background)
+}
+
+/// Composite every pixel onto an opaque background color.
+fn flatten_onto(image: &mut RgbaImage, background: Color) {
+    let bg = [background.r, background.g, background.b];
+    for pixel in image.pixels_mut() {
+        let alpha = u32::from(pixel[3]);
+        if alpha == 255 {
+            continue;
         }
+        for (channel, bg) in pixel.0.iter_mut().zip(bg) {
+            let blended = (u32::from(*channel) * alpha + u32::from(bg) * (255 - alpha) + 127) / 255;
+            // A weighted mean of two u8 values fits in u8.
+            *channel = blended as u8;
+        }
+        pixel[3] = 255;
     }
 }
 
-/// Choose the default worker count from available system parallelism.
-pub fn default_worker_count() -> usize {
+/// Choose the worker count from available system parallelism.
+fn default_worker_count() -> usize {
     std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(1)
@@ -438,7 +393,6 @@ pub fn default_worker_count() -> usize {
 mod tests {
     use super::*;
     use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
-    use std::fs;
     use std::io::Cursor;
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
@@ -467,16 +421,14 @@ mod tests {
             count: 3,
             shape: ShapeKind::Triangle,
             alpha: AlphaOption::Fixed(128),
-            repeat: 0,
             seed: Some(7),
             background: BackgroundOption::Auto,
             resize_input: 8,
             output_size: 16,
-            workers: Some(1),
         }
     }
 
-    fn request(input: InputSource, output: OutputFormat) -> ApproximateRequest {
+    fn request(input: Vec<u8>, output: OutputFormat) -> ApproximateRequest {
         ApproximateRequest {
             input,
             output,
@@ -518,7 +470,7 @@ mod tests {
 
         assert_eq!(
             parse_background_str("not-a-color").expect_err("invalid color should fail"),
-            "invalid background color"
+            "background must be auto or an opaque hex color (RGB or RRGGBB)"
         );
         assert_eq!(
             parse_seed_i64(-1).expect_err("negative seed should fail"),
@@ -526,57 +478,23 @@ mod tests {
         );
     }
 
-    fn temp_path(ext: &str) -> PathBuf {
-        let mut path = std::env::temp_dir();
-        path.push(format!(
-            "primeval-render-{}-{:?}.{ext}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        path
-    }
-
     #[test]
-    fn bytes_and_path_inputs_produce_identical_svg() {
-        let bytes = fixture_bytes();
-        let path = temp_path("png");
-        fs::write(&path, &bytes).expect("write fixture");
-
+    fn same_seed_renders_are_deterministic() {
         let cancelled = AtomicBool::new(false);
-        let from_bytes = approximate(
-            request(InputSource::Bytes(bytes.clone()), OutputFormat::Svg),
+        let first = approximate(
+            request(fixture_bytes(), OutputFormat::Svg),
             None,
             &cancelled,
         )
-        .expect("bytes render");
-        let from_path = approximate(
-            request(InputSource::Path(path.clone()), OutputFormat::Svg),
+        .expect("first render");
+        let second = approximate(
+            request(fixture_bytes(), OutputFormat::Svg),
             None,
             &cancelled,
         )
-        .expect("path render");
+        .expect("second render");
 
-        fs::remove_file(path).ok();
-
-        match (from_bytes, from_path) {
-            (
-                ApproximateResult::Svg {
-                    data: left,
-                    width: left_width,
-                    height: left_height,
-                },
-                ApproximateResult::Svg {
-                    data: right,
-                    width: right_width,
-                    height: right_height,
-                },
-            ) => {
-                assert_eq!(left, right);
-                assert_eq!(left_width, right_width);
-                assert_eq!(left_height, right_height);
-            }
-            other => panic!("unexpected results: {other:?}"),
-        }
+        assert_eq!(first, second);
     }
 
     #[test]
@@ -596,12 +514,8 @@ mod tests {
 
     fn assert_renders_svg(bytes: Vec<u8>) {
         let cancelled = AtomicBool::new(false);
-        let result = approximate(
-            request(InputSource::Bytes(bytes), OutputFormat::Svg),
-            None,
-            &cancelled,
-        )
-        .expect("render should succeed");
+        let result = approximate(request(bytes, OutputFormat::Svg), None, &cancelled)
+            .expect("render should succeed");
 
         match result {
             ApproximateResult::Svg { width, height, .. } => {
@@ -635,11 +549,7 @@ mod tests {
             !\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;";
         let cancelled = AtomicBool::new(false);
 
-        let result = approximate(
-            request(InputSource::Bytes(GIF.to_vec()), OutputFormat::Svg),
-            None,
-            &cancelled,
-        );
+        let result = approximate(request(GIF.to_vec(), OutputFormat::Svg), None, &cancelled);
 
         match result {
             Err(ApproximateError::Validation(message)) => {
@@ -650,25 +560,15 @@ mod tests {
     }
 
     #[test]
-    fn invalid_bytes_and_missing_path_return_stable_errors() {
+    fn invalid_bytes_return_validation_error() {
         let cancelled = AtomicBool::new(false);
 
         let invalid = approximate(
-            request(InputSource::Bytes(vec![0, 1, 2, 3]), OutputFormat::Svg),
+            request(vec![0, 1, 2, 3], OutputFormat::Svg),
             None,
             &cancelled,
         );
         assert!(matches!(invalid, Err(ApproximateError::Validation(_))));
-
-        let missing = approximate(
-            request(
-                InputSource::Path(std::path::Path::new("/definitely/not/here.png").to_path_buf()),
-                OutputFormat::Svg,
-            ),
-            None,
-            &cancelled,
-        );
-        assert!(matches!(missing, Err(ApproximateError::NotFound(_))));
     }
 
     #[test]
@@ -679,7 +579,7 @@ mod tests {
 
         let result = approximate(
             ApproximateRequest {
-                input: InputSource::Bytes(fixture_bytes()),
+                input: fixture_bytes(),
                 output: OutputFormat::Svg,
                 render: options,
             },
@@ -697,7 +597,7 @@ mod tests {
 
         let result = approximate(
             ApproximateRequest {
-                input: InputSource::Bytes(fixture_bytes()),
+                input: fixture_bytes(),
                 output: OutputFormat::Svg,
                 render: options,
             },
@@ -718,7 +618,7 @@ mod tests {
         };
 
         let result = approximate(
-            request(InputSource::Bytes(fixture_bytes()), OutputFormat::Svg),
+            request(fixture_bytes(), OutputFormat::Svg),
             Some(&callback),
             &cancelled,
         );
@@ -743,7 +643,7 @@ mod tests {
         };
 
         let result = approximate(
-            request(InputSource::Bytes(fixture_bytes()), OutputFormat::Svg),
+            request(fixture_bytes(), OutputFormat::Svg),
             Some(&callback),
             cancelled.as_ref(),
         );
@@ -757,7 +657,7 @@ mod tests {
     fn raster_outputs_report_rendered_dimensions() {
         let cancelled = AtomicBool::new(false);
         let result = approximate(
-            request(InputSource::Bytes(fixture_bytes()), OutputFormat::Png),
+            request(fixture_bytes(), OutputFormat::Png),
             None,
             &cancelled,
         )
@@ -787,13 +687,12 @@ mod tests {
             seed: Some(1),
             resize_input: 32,
             output_size: 32,
-            workers: Some(4),
             ..RenderOptions::default()
         };
 
         let result = approximate(
             ApproximateRequest {
-                input: InputSource::Bytes(fixture_bytes()),
+                input: fixture_bytes(),
                 output: OutputFormat::Svg,
                 render,
             },
@@ -808,28 +707,160 @@ mod tests {
     }
 
     #[test]
-    fn prepare_can_emit_multiple_formats_without_rerunning() {
+    fn parse_background_rejects_alpha_forms() {
+        for value in ["#1234", "1234", "#11223344", "11223344"] {
+            assert_eq!(
+                parse_background_str(value),
+                Err("background must be auto or an opaque hex color (RGB or RRGGBB)".to_string()),
+                "{value}"
+            );
+        }
+        assert_eq!(
+            parse_background_str("#abc"),
+            Ok(BackgroundOption::Color(Color::new(0xAA, 0xBB, 0xCC, 0xFF)))
+        );
+    }
+
+    #[test]
+    fn parse_background_rejects_multibyte_input_without_panicking() {
+        for value in ["a€bc", "#a€bc", "€", "aé"] {
+            assert!(parse_background_str(value).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn translucent_explicit_background_is_rejected() {
         let cancelled = AtomicBool::new(false);
-        let mut run = prepare(
-            RenderRequest {
-                input: InputSource::Bytes(fixture_bytes()),
-                render: render_options(),
+        let mut options = render_options();
+        options.background = BackgroundOption::Color(Color::new(10, 20, 30, 128));
+
+        let result = approximate(
+            ApproximateRequest {
+                input: fixture_bytes(),
+                output: OutputFormat::Svg,
+                render: options,
+            },
+            None,
+            &cancelled,
+        );
+
+        assert_eq!(
+            result,
+            Err(ApproximateError::Validation(
+                "background must be opaque".to_string()
+            ))
+        );
+    }
+
+    fn png_bytes(image: RgbaImage) -> Vec<u8> {
+        let mut out = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(image)
+            .write_to(&mut out, ImageFormat::Png)
+            .expect("encode png");
+        out.into_inner()
+    }
+
+    #[test]
+    fn opaque_input_target_and_background_are_unchanged() {
+        // Larger than resize_input so the resampling path runs too.
+        let image = DynamicImage::ImageRgb8(image::RgbImage::from_fn(40, 24, |x, y| {
+            image::Rgb([(x * 6) as u8, (y * 10) as u8, ((x * y) % 256) as u8])
+        }));
+        let expected_target = thumbnail(&image, 16);
+        let expected_background = Buffer::from_image(&image.to_rgba8()).average_color();
+
+        let (target, background) = prepare_target(image, BackgroundOption::Auto, 16);
+
+        assert_eq!(target, expected_target);
+        assert_eq!(background, expected_background);
+    }
+
+    #[test]
+    fn transparent_input_is_flattened_onto_explicit_background() {
+        let image = RgbaImage::from_fn(2, 1, |x, _| {
+            if x == 0 {
+                Rgba([200, 100, 0, 0])
+            } else {
+                Rgba([200, 100, 0, 128])
+            }
+        });
+        let background = Color::new(0, 50, 255, 255);
+
+        let (target, resolved) = prepare_target(
+            DynamicImage::ImageRgba8(image),
+            BackgroundOption::Color(background),
+            16,
+        );
+
+        assert_eq!(resolved, background);
+        assert_eq!(target.get_pixel(0, 0), &Rgba([0, 50, 255, 255]));
+        // (c*a + bg*(255-a) + 127) / 255 with a = 128.
+        assert_eq!(target.get_pixel(1, 0), &Rgba([100, 75, 127, 255]));
+    }
+
+    #[test]
+    fn auto_background_is_alpha_weighted_mean() {
+        // Half-transparent red next to fully transparent green.
+        let image = RgbaImage::from_fn(2, 2, |x, _| {
+            if x == 0 {
+                Rgba([255, 0, 0, 128])
+            } else {
+                Rgba([0, 255, 0, 0])
+            }
+        });
+
+        let (target, background) =
+            prepare_target(DynamicImage::ImageRgba8(image), BackgroundOption::Auto, 16);
+
+        assert_eq!(background, Color::new(255, 0, 0, 255));
+        assert!(
+            target
+                .pixels()
+                .all(|pixel| pixel == &Rgba([255, 0, 0, 255]))
+        );
+    }
+
+    #[test]
+    fn fully_transparent_input_uses_white_auto_background() {
+        let image = RgbaImage::from_pixel(3, 3, Rgba([10, 20, 30, 0]));
+
+        let (target, background) =
+            prepare_target(DynamicImage::ImageRgba8(image), BackgroundOption::Auto, 16);
+
+        assert_eq!(background, Color::new(255, 255, 255, 255));
+        assert!(
+            target
+                .pixels()
+                .all(|pixel| pixel == &Rgba([255, 255, 255, 255]))
+        );
+    }
+
+    #[test]
+    fn transparent_input_with_explicit_background_renders_opaque_png() {
+        let cancelled = AtomicBool::new(false);
+        let input = png_bytes(RgbaImage::from_fn(12, 8, |x, y| {
+            Rgba([(x * 20) as u8, (y * 30) as u8, 90, ((x + y) * 12) as u8])
+        }));
+        let mut options = render_options();
+        options.background = parse_background_str("#336699").expect("background");
+
+        let result = approximate(
+            ApproximateRequest {
+                input,
+                output: OutputFormat::Png,
+                render: options,
             },
             None,
             &cancelled,
         )
-        .expect("prepare should succeed");
+        .expect("png render");
 
-        let svg = run.result(OutputFormat::Svg).expect("svg result");
-        let png = run.result(OutputFormat::Png).expect("png result");
-
-        assert!(matches!(svg, ApproximateResult::Svg { .. }));
-        assert!(matches!(
-            png,
-            ApproximateResult::Raster {
-                format: OutputFormat::Png,
-                ..
-            }
-        ));
+        let ApproximateResult::Raster { data, .. } = result else {
+            panic!("expected raster output");
+        };
+        let decoded = image::load_from_memory(&data)
+            .expect("decode png")
+            .to_rgba8();
+        assert!(decoded.pixels().all(|pixel| pixel[3] == 255));
     }
 }

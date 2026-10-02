@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import fs from "node:fs";
+import { readFile, stat } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import process from "node:process";
@@ -9,7 +10,6 @@ import { parseArgs } from "node:util";
 import {
   AbortError,
   approximate,
-  NotFoundError,
   type OutputFormat,
   type Shape,
   ValidationError,
@@ -52,11 +52,10 @@ function printUsage(): void {
       "      --count <n>            Number of optimization steps",
       "      --shape <kind>         any|triangle|rectangle|ellipse|circle|rotated-rectangle|quadratic|rotated-ellipse|polygon",
       "      --alpha <n>            Alpha 0..255 where 0 means auto",
-      "      --background <value>   auto or a color value",
+      "      --background <value>   auto or an opaque hex color (RGB or RRGGBB)",
       "      --resize-input <n>     Working resolution",
       "      --output-size <n>      Final replay resolution",
       "      --seed <n>             Deterministic seed",
-      "      --repeat <n>           Extra candidates per step",
       "      --progress <mode>      auto|plain|off (default: auto)",
       "      --version              Print package version",
       "  -h, --help                 Show this help",
@@ -115,6 +114,45 @@ function parseProgress(raw: string | undefined): ProgressMode {
   fail("progress must be one of: auto, plain, off");
 }
 
+function errorCode(error: unknown): string | undefined {
+  return error instanceof Error && "code" in error ? String(error.code) : undefined;
+}
+
+function readFailureMessage(inputPath: string, error: unknown): string {
+  switch (errorCode(error)) {
+    case "ENOENT":
+      return `input file not found: ${inputPath}`;
+    case "EISDIR":
+      return `input is a directory: ${inputPath}`;
+    case "EACCES":
+    case "EPERM":
+      return `permission denied reading input: ${inputPath}`;
+    default:
+      return `cannot read input ${inputPath}: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+// Reads only regular files: a FIFO or device could block or never end.
+async function readInput(inputPath: string): Promise<Buffer> {
+  let stats: fs.Stats;
+  try {
+    stats = await stat(inputPath);
+  } catch (error) {
+    fail(readFailureMessage(inputPath, error));
+  }
+  if (stats.isDirectory()) {
+    fail(`input is a directory: ${inputPath}`);
+  }
+  if (!stats.isFile()) {
+    fail(`input is not a regular file: ${inputPath}`);
+  }
+  try {
+    return await readFile(inputPath);
+  } catch (error) {
+    fail(readFailureMessage(inputPath, error));
+  }
+}
+
 async function main(): Promise<void> {
   let values: {
     output?: string;
@@ -126,7 +164,6 @@ async function main(): Promise<void> {
     resizeInput?: string;
     outputSize?: string;
     seed?: string;
-    repeat?: string;
     progress?: string;
     help?: boolean;
     version?: boolean;
@@ -146,7 +183,6 @@ async function main(): Promise<void> {
         "resize-input": { type: "string" },
         "output-size": { type: "string" },
         seed: { type: "string" },
-        repeat: { type: "string" },
         progress: { type: "string" },
         help: { type: "boolean", short: "h" },
         version: { type: "boolean" },
@@ -162,7 +198,6 @@ async function main(): Promise<void> {
       resizeInput: parsed.values["resize-input"],
       outputSize: parsed.values["output-size"],
       seed: parsed.values.seed,
-      repeat: parsed.values.repeat,
       progress: parsed.values.progress,
       help: parsed.values.help,
       version: parsed.values.version,
@@ -228,12 +263,13 @@ async function main(): Promise<void> {
   }
 
   const progress = parseProgress(values.progress);
+  const inputBytes = await readInput(input);
   const start = Date.now();
   const showProgress =
     progress === "plain" || (progress === "auto" && Boolean(process.stderr.isTTY));
 
   const result = await approximate({
-    input: { kind: "path", path: input },
+    input: inputBytes,
     output: format,
     render: {
       ...(values.count === undefined
@@ -249,9 +285,6 @@ async function main(): Promise<void> {
         ? {}
         : { outputSize: parsePositiveInteger("output-size", values.outputSize, 1) }),
       ...(values.seed === undefined ? {} : { seed: parsePositiveInteger("seed", values.seed, 0) }),
-      ...(values.repeat === undefined
-        ? {}
-        : { repeat: parsePositiveInteger("repeat", values.repeat, 0) }),
     },
     execution: !showProgress
       ? undefined
@@ -284,7 +317,7 @@ main().catch((error: unknown) => {
   if (error instanceof AbortError) {
     process.exit(0);
   }
-  if (error instanceof ValidationError || error instanceof NotFoundError) {
+  if (error instanceof ValidationError) {
     process.stderr.write(`${error.message}\n`);
     process.exit(1);
   }

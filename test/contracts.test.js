@@ -33,7 +33,6 @@ function parseRustRenderDefaults(source) {
   const patterns = {
     count: /count:\s*(\d+),/,
     shape: /shape:\s*ShapeKind::([A-Za-z]+),/,
-    repeat: /repeat:\s*(\d+),/,
     background: /background:\s*BackgroundOption::([A-Za-z]+),/,
     resizeInput: /resize_input:\s*(\d+),/,
     outputSize: /output_size:\s*(\d+),/,
@@ -55,7 +54,6 @@ function parseRustRenderDefaults(source) {
       assert.ok(alphaMatch, "missing Rust default for alpha");
       return alphaMatch[1] === "Auto" ? 0 : Number(alphaMatch[2]);
     })(),
-    repeat: Number(values.repeat),
     background: values.background.toLowerCase(),
     resizeInput: Number(values.resizeInput),
     outputSize: Number(values.outputSize),

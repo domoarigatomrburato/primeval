@@ -92,7 +92,6 @@ These two options are independent: you can optimize at low resolution for speed 
 primeval photo.jpg --output result.png --count 300 --resize-input 128 --output-size 2048
 ```
 
-- `--repeat <N>` extra random mutations to try per step; `0` means one candidate per step (default `0`)
 - `--seed <N>` for deterministic output
 - `--format svg|png` optional output format override
 - `--progress auto|plain|off` progress reporting mode (default `auto`)
@@ -114,7 +113,7 @@ primeval --help
 - `Unsupported Linux runtime: linux-<arch>-musl`: published Linux binaries currently target GNU libc only. Alpine and other musl-based environments are not supported yet.
 - `Failed to load native binding ...`: reinstall without omitting optional dependencies, make sure you are on Node 22.12+, and verify that your OS/CPU pair is one of the published targets listed above.
 - `invalid image data ...`: `primeval` accepts JPEG, PNG, and WebP inputs only. Convert HEIC, TIFF, GIF, or other formats before rendering.
-- `... does not exist or is not readable`: the CLI and Node API accept filesystem paths, but the path must exist and be readable from the current process.
+- `input file not found`, `input is a directory`, `permission denied reading input`, `input is not a regular file`: the CLI reads the input path itself and accepts regular files only (not directories, FIFOs, or devices). The Node API takes bytes, so read the file yourself, for example with `readFile` from `node:fs/promises`.
 
 ## Node Package
 
@@ -127,7 +126,7 @@ import { readFile } from "node:fs/promises";
 const input = await readFile("docs/readme/originals/monalisa.jpg");
 
 const result = await approximate({
-  input: { kind: "bytes", data: input },
+  input,
   output: "svg",
   render: {
     count: 300,
@@ -141,7 +140,7 @@ console.log(result.data.slice(0, 32));
 
 `approximate()` accepts:
 
-- `input` (required): `{ kind: "bytes", data: Buffer | Uint8Array }` or `{ kind: "path", path: string }`
+- `input` (required): the encoded image bytes as a `Uint8Array` (a `Buffer` is one). Read files yourself, for example with `readFile` from `node:fs/promises`.
 - `output` (required): `"svg" | "png"`
 - `render` (optional): render options forwarded to Rust; omitted fields use Rust defaults
 - `execution` (optional): progress and cancellation controls
@@ -151,9 +150,8 @@ Render options:
 - `count?: number` optimization steps. Higher values improve quality. Default: `100`.
 - `shape?: "any" | "triangle" | "rectangle" | "ellipse" | "circle" | "rotated-rectangle" | "quadratic" | "rotated-ellipse" | "polygon"`. Default: `"any"`.
 - `alpha?: number` shape opacity. Accepted values: `0..255` where `0` means auto-detect. Default: `0`.
-- `repeat?: number` extra random mutations to try per step. Default: `0`.
 - `seed?: number` deterministic RNG seed (non-negative integer). Omit it to let Rust choose a non-deterministic seed.
-- `background?: "auto" | string` background color. Use `"auto"` or a hex color in `RGB`, `RGBA`, `RRGGBB`, or `RRGGBBAA` form, with optional leading `#`. Default: `"auto"`.
+- `background?: "auto" | string` opaque background color. Use `"auto"` (the alpha-weighted mean color of the input, or white for a fully transparent input) or a hex color in `RGB` or `RRGGBB` form, with optional leading `#`. Transparent inputs are flattened onto the background before rendering, so the output is always opaque. Default: `"auto"`.
 - `resizeInput?: number` resolution used during optimization. Smaller values run faster but capture less detail. Default: `256`.
 - `outputSize?: number` resolution of the final exported image. Default: `1024`.
 
@@ -161,7 +159,7 @@ These two options are independent — optimize at low resolution for speed, expo
 
 ```js
 const result = await approximate({
-  input: { kind: "path", path: "photo.jpg" },
+  input: await readFile("photo.jpg"),
   output: "png",
   render: {
     count: 300,
@@ -184,7 +182,7 @@ import { readFile } from "node:fs/promises";
 
 const input = await readFile("docs/readme/originals/monalisa.jpg");
 const result = await approximate({
-  input: { kind: "bytes", data: input },
+  input,
   output: "png",
   render: { count: 200 },
 });
@@ -196,18 +194,17 @@ console.log(uri.slice(0, 64));
 Handle errors by catching typed error classes:
 
 ```js
-import { approximate, NotFoundError, ValidationError } from "@aleburato/primeval";
+import { approximate, ValidationError } from "@aleburato/primeval";
+import { readFile } from "node:fs/promises";
 
 try {
   const result = await approximate({
-    input: { kind: "path", path: "missing.jpg" },
+    input: await readFile("photo.jpg"),
     output: "png",
   });
 } catch (error) {
-  if (error instanceof NotFoundError) {
-    console.error("image not found:", error.message);
-  } else if (error instanceof ValidationError) {
-    console.error("bad options:", error.message);
+  if (error instanceof ValidationError) {
+    console.error("bad input or options:", error.message);
   } else {
     throw error;
   }
@@ -225,7 +222,7 @@ const input = await readFile("docs/readme/originals/monalisa.jpg");
 
 try {
   const promise = approximate({
-    input: { kind: "bytes", data: input },
+    input,
     output: "svg",
     render: { count: 1000 },
     execution: {
@@ -252,10 +249,10 @@ Package notes:
 
 - Accepted input formats: **JPEG, PNG, and WebP**.
 - Missing `render` fields are forwarded to Rust and resolved there; the package does not reinvent render defaults in TypeScript.
-- Current Rust defaults are `count: 100`, `shape: "any"`, `alpha: 0` (`auto`), `repeat: 0`, omitted `seed`, `background: "auto"`, `resizeInput: 256`, and `outputSize: 1024`.
+- Current Rust defaults are `count: 100`, `shape: "any"`, `alpha: 0` (`auto`), omitted `seed`, `background: "auto"`, `resizeInput: 256`, and `outputSize: 1024`.
 - `approximate()` returns exactly one output format per call: `svg` or `png`.
 - The default shape is `any` (mixed); all nine CLI shape modes are available.
-- Errors are mapped to `ValidationError`, `NotFoundError`, and `AbortError` — use `instanceof` to distinguish them.
+- Errors are mapped to `ValidationError` and `AbortError` — use `instanceof` to distinguish them.
 - For SVG results, `data` is a `string`; for raster results, `data` is a `Buffer`.
 
 ## Alpha Comparison (Mona Lisa, 200 steps, mixed shape)
@@ -279,10 +276,9 @@ The images below use identical settings (`shape: any`, `count: 200`, `seed: 42`)
 - `--count <N>` optimization steps. Higher values improve quality. Default: `100`.
 - `--shape any|triangle|rectangle|ellipse|circle|rotated-rectangle|quadratic|rotated-ellipse|polygon`. Default: `any`.
 - `--alpha <N>` shape opacity. Accepted values: `0..255` where `0` means auto-detect. Default: `0`.
-- `--background <VALUE>` background color. Use `auto` or a hex color in `RGB`, `RGBA`, `RRGGBB`, or `RRGGBBAA` form, with optional leading `#`. Default: `auto`.
+- `--background <VALUE>` opaque background color. Use `auto` (the alpha-weighted mean color of the input, or white for a fully transparent input) or a hex color in `RGB` or `RRGGBB` form, with optional leading `#`. Transparent inputs are flattened onto the background, so the output is always opaque. Default: `auto`.
 - `--resize-input <N>` resolution used during optimization. Smaller values run faster but capture less detail; the final output is always rendered at `--output-size` resolution. Default: `256`.
 - `--output-size <N>` resolution of the final exported image. Default: `1024`.
-- `--repeat <N>` extra random mutations to try per step. Higher values improve quality but increase runtime. Default: `0`.
 - `--seed <N>` deterministic RNG seed (non-negative integer). If omitted, Rust selects a random seed.
 - `--progress auto|plain|off` write per-step progress to stderr. `auto` enables it only when stderr is a TTY. Default: `auto`.
 - `--version` print the package version and exit.

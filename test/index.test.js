@@ -7,7 +7,7 @@ test("package root import resolves", async () => {
   assert.equal(typeof mod.approximate, "function");
   assert.equal(typeof mod.toDataUri, "function");
   assert.equal(typeof mod.ValidationError, "function");
-  assert.equal(typeof mod.NotFoundError, "function");
+  assert.equal(mod.NotFoundError, undefined);
   assert.equal(typeof mod.AbortError, "function");
 });
 
@@ -54,7 +54,7 @@ test("approximate rejects non-function progress callbacks with ValidationError",
     () =>
       approximate(
         /** @type {any} */ ({
-          input: { kind: "bytes", data: Buffer.from([0]) },
+          input: Buffer.from([0]),
           output: "svg",
           render: { count: 2, resizeInput: 8, outputSize: 16, seed: 7 },
           execution: { onProgress: 123 },
@@ -70,7 +70,7 @@ test("approximate rejects invalid abort signals with ValidationError", () => {
     () =>
       approximate(
         /** @type {any} */ ({
-          input: { kind: "bytes", data: Buffer.from([0]) },
+          input: Buffer.from([0]),
           output: "svg",
           render: { count: 1, resizeInput: 8, outputSize: 16, seed: 7 },
           execution: { signal: {} },

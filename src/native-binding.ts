@@ -23,17 +23,10 @@ export interface NativeHandle {
   taskId: number;
 }
 
-export interface NativeInputSource {
-  kind: "path" | "bytes";
-  path?: string;
-  data?: Buffer;
-}
-
 export interface NativeRenderOptions {
   count?: number;
   shape?: string;
   alpha?: string;
-  repeat?: number;
   seed?: number;
   background?: string;
   resizeInput?: number;
@@ -45,7 +38,7 @@ export interface NativeExecutionOptions {
 }
 
 export interface NativeApproximateRequest {
-  input: NativeInputSource;
+  input: Buffer;
   output: string;
   render: NativeRenderOptions;
   execution?: NativeExecutionOptions;

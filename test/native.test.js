@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
 
-import { AbortError, approximate, NotFoundError, ValidationError } from "@aleburato/primeval";
+import { AbortError, approximate, ValidationError } from "@aleburato/primeval";
 
 const FIXTURE_IMAGE = fs.readFileSync(
   path.join(process.cwd(), "docs", "readme", "originals", "monalisa.jpg"),
@@ -14,7 +14,6 @@ function render(overrides = {}) {
     count: 4,
     shape: "any",
     alpha: 128,
-    repeat: 0,
     seed: 7,
     background: "auto",
     resizeInput: 8,
@@ -25,7 +24,7 @@ function render(overrides = {}) {
 
 test("native approximate renders bytes to svg", async () => {
   const result = await approximate({
-    input: { kind: "bytes", data: FIXTURE_IMAGE },
+    input: FIXTURE_IMAGE,
     output: "svg",
     render: render(),
   });
@@ -39,7 +38,7 @@ test("native approximate renders bytes to svg", async () => {
 
 test("native approximate renders bytes to png", async () => {
   const result = await approximate({
-    input: { kind: "bytes", data: FIXTURE_IMAGE },
+    input: FIXTURE_IMAGE,
     output: "png",
     render: render(),
   });
@@ -54,13 +53,12 @@ test("native approximate renders bytes to png", async () => {
 
 test("native approximate accepts omitted seed", async () => {
   const result = await approximate({
-    input: { kind: "bytes", data: FIXTURE_IMAGE },
+    input: FIXTURE_IMAGE,
     output: "svg",
     render: {
       count: 4,
       shape: "any",
       alpha: 128,
-      repeat: 0,
       background: "auto",
       resizeInput: 8,
       outputSize: 16,
@@ -73,7 +71,7 @@ test("native approximate accepts omitted seed", async () => {
 
 test("native approximate treats alpha 0 as auto", async () => {
   const result = await approximate({
-    input: { kind: "bytes", data: FIXTURE_IMAGE },
+    input: FIXTURE_IMAGE,
     output: "svg",
     render: render({ alpha: 0 }),
   });
@@ -82,24 +80,64 @@ test("native approximate treats alpha 0 as auto", async () => {
   assert.match(result.data, /^<svg\b/);
 });
 
-test("native approximate maps missing files to NotFoundError", async () => {
-  await assert.rejects(
-    approximate({
-      input: {
-        kind: "path",
-        path: path.join(process.cwd(), "does-not-exist.png"),
-      },
+test("approximate rejects non-Uint8Array input with ValidationError", async () => {
+  const inputs = [
+    undefined,
+    null,
+    "photo.jpg",
+    [0, 1, 2, 3],
+    FIXTURE_IMAGE.buffer,
+    { kind: "path", path: "photo.jpg" },
+    { kind: "bytes", data: FIXTURE_IMAGE },
+  ];
+
+  for (const input of inputs) {
+    await assert.rejects(
+      async () => approximate(/** @type {any} */ ({ input, output: "svg", render: render() })),
+      (error) => error instanceof ValidationError && error.message === "input must be a Uint8Array",
+    );
+  }
+});
+
+test("native approximate accepts a plain Uint8Array input", async () => {
+  const result = await approximate({
+    input: new Uint8Array(FIXTURE_IMAGE),
+    output: "svg",
+    render: render(),
+  });
+
+  assert.equal(result.format, "svg");
+  assert.match(result.data, /^<svg\b/);
+});
+
+test("approximate rejects non-opaque and non-ASCII backgrounds with ValidationError", async () => {
+  for (const background of ["a€bc", "#a€bc", "€", "#1234", "#11223344", "11223344"]) {
+    await assert.rejects(
+      async () =>
+        approximate({ input: FIXTURE_IMAGE, output: "svg", render: render({ background }) }),
+      (error) =>
+        error instanceof ValidationError &&
+        error.message === "background must be auto or an opaque hex color (RGB or RRGGBB)",
+      background,
+    );
+  }
+});
+
+test("native approximate accepts RGB and RRGGBB backgrounds", async () => {
+  for (const background of ["#abc", "abc", "#336699", "336699"]) {
+    const result = await approximate({
+      input: FIXTURE_IMAGE,
       output: "svg",
-      render: render(),
-    }),
-    (error) => error instanceof NotFoundError,
-  );
+      render: render({ background }),
+    });
+    assert.equal(result.format, "svg");
+  }
 });
 
 test("native approximate maps invalid bytes to ValidationError", async () => {
   await assert.rejects(
     approximate({
-      input: { kind: "bytes", data: Buffer.from([0, 1, 2, 3]) },
+      input: Buffer.from([0, 1, 2, 3]),
       output: "svg",
       render: render(),
     }),
@@ -112,7 +150,7 @@ test("approximate rejects removed output formats with ValidationError", async ()
     await assert.rejects(
       async () =>
         approximate({
-          input: { kind: "bytes", data: FIXTURE_IMAGE },
+          input: FIXTURE_IMAGE,
           output,
           render: render(),
         }),
@@ -127,7 +165,7 @@ test("native approximate maps abort signals to AbortError", async () => {
 
   await assert.rejects(
     approximate({
-      input: { kind: "bytes", data: FIXTURE_IMAGE },
+      input: FIXTURE_IMAGE,
       output: "svg",
       render: render({ count: 32 }),
       execution: {
@@ -147,7 +185,7 @@ test("native approximate emits monotonic progress exactly count times", async ()
   const progress = [];
 
   const result = await approximate({
-    input: { kind: "bytes", data: FIXTURE_IMAGE },
+    input: FIXTURE_IMAGE,
     output: "svg",
     render: render({ count: 6 }),
     execution: {

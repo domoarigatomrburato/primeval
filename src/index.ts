@@ -1,14 +1,11 @@
 import {
   getNativeBinding,
   type NativeApproximateRequest,
+  type NativeHandle,
   type NativeProgressInfo,
 } from "./native-binding.js";
 
 // --- Public types ---
-
-export type InputSource =
-  | { kind: "path"; path: string }
-  | { kind: "bytes"; data: Buffer | Uint8Array };
 
 export type OutputFormat = "svg" | "png";
 
@@ -27,7 +24,6 @@ export type RenderOptions = {
   count?: number;
   shape?: Shape;
   alpha?: number;
-  repeat?: number;
   seed?: number;
   background?: "auto" | string;
   resizeInput?: number;
@@ -46,7 +42,8 @@ export type ExecutionOptions = {
 };
 
 export type ApproximateRequest = {
-  input: InputSource;
+  /** Encoded image bytes (JPEG, PNG, or WebP). A `Buffer` is a `Uint8Array`. */
+  input: Uint8Array;
   output: OutputFormat;
   render?: RenderOptions;
   execution?: ExecutionOptions;
@@ -86,13 +83,6 @@ export class ValidationError extends PrimevalError {
   }
 }
 
-export class NotFoundError extends PrimevalError {
-  declare name: "NotFoundError";
-  constructor(message: string) {
-    super("NotFoundError", message);
-  }
-}
-
 export class AbortError extends PrimevalError {
   declare name: "AbortError";
   constructor(message: string) {
@@ -120,21 +110,14 @@ interface NormalizedRender {
   count?: number;
   shape?: Shape;
   alpha?: number;
-  repeat?: number;
   seed?: number;
   background?: string;
   resizeInput?: number;
   outputSize?: number;
 }
 
-interface NormalizedInput {
-  kind: "path" | "bytes";
-  path?: string;
-  data?: Buffer;
-}
-
 interface NormalizedRequest {
-  input: NormalizedInput;
+  input: Buffer;
   output: OutputFormat;
   render: NormalizedRender;
   execution: {
@@ -149,30 +132,15 @@ function isAbortSignal(value: unknown): value is AbortSignal {
   return value instanceof AbortSignal;
 }
 
-function normalizeInput(input: unknown): NormalizedInput {
-  if (!input || typeof input !== "object") {
-    throw new ValidationError("input is required");
+function normalizeInput(input: unknown): Buffer {
+  if (Buffer.isBuffer(input)) {
+    return input;
   }
-  const inp = input as Record<string, unknown>;
-
-  if (inp.kind === "path") {
-    if (typeof inp.path !== "string" || inp.path.length === 0) {
-      throw new ValidationError("path input requires a path");
-    }
-    return { kind: "path", path: inp.path };
+  if (input instanceof Uint8Array) {
+    // Shares memory with the caller's array; no copy.
+    return Buffer.from(input.buffer, input.byteOffset, input.byteLength);
   }
-
-  if (inp.kind === "bytes") {
-    if (Buffer.isBuffer(inp.data)) {
-      return { kind: "bytes", data: inp.data };
-    }
-    if (inp.data instanceof Uint8Array) {
-      return { kind: "bytes", data: Buffer.from(inp.data) };
-    }
-    throw new ValidationError("bytes input requires data");
-  }
-
-  throw new ValidationError(`unknown input kind: ${String(inp.kind)}`);
+  throw new ValidationError("input must be a Uint8Array");
 }
 
 function normalizeRender(render?: Record<string, unknown>): NormalizedRender {
@@ -180,7 +148,6 @@ function normalizeRender(render?: Record<string, unknown>): NormalizedRender {
   const count = r.count == null ? undefined : (r.count as number);
   const shape = r.shape == null ? undefined : (r.shape as Shape);
   const alpha = r.alpha == null ? undefined : (r.alpha as number);
-  const repeat = r.repeat == null ? undefined : (r.repeat as number);
   const background = r.background == null ? undefined : (r.background as string);
   const resizeInput = r.resizeInput == null ? undefined : (r.resizeInput as number);
   const outputSize = r.outputSize == null ? undefined : (r.outputSize as number);
@@ -195,9 +162,6 @@ function normalizeRender(render?: Record<string, unknown>): NormalizedRender {
   if (alpha !== undefined && (!Number.isInteger(alpha) || alpha < 0 || alpha > 255)) {
     throw new ValidationError("alpha must be 0..255 where 0 means auto");
   }
-  if (repeat !== undefined && (!Number.isInteger(repeat) || repeat < 0)) {
-    throw new ValidationError("repeat must be at least 0");
-  }
   if (seed !== undefined && (!Number.isInteger(seed) || seed < 0)) {
     throw new ValidationError("seed must be a positive integer");
   }
@@ -208,7 +172,7 @@ function normalizeRender(render?: Record<string, unknown>): NormalizedRender {
     throw new ValidationError("outputSize must be at least 1");
   }
 
-  return { count, shape, alpha, repeat, seed, background, resizeInput, outputSize };
+  return { count, shape, alpha, seed, background, resizeInput, outputSize };
 }
 
 function normalizeRequest(request: unknown): NormalizedRequest {
@@ -255,8 +219,6 @@ function mapNativeError(error: unknown): Error {
   switch (name) {
     case "ValidationError":
       return new ValidationError(detail);
-    case "NotFoundError":
-      return new NotFoundError(detail);
     case "AbortError":
       return new AbortError(detail);
     default:
@@ -286,7 +248,6 @@ function startApproximate(request: ApproximateRequest): {
       ...(normalized.render.count === undefined ? {} : { count: normalized.render.count }),
       ...(normalized.render.shape === undefined ? {} : { shape: normalized.render.shape }),
       ...(normalized.render.alpha === undefined ? {} : { alpha: String(normalized.render.alpha) }),
-      ...(normalized.render.repeat === undefined ? {} : { repeat: normalized.render.repeat }),
       ...(normalized.render.seed === undefined ? {} : { seed: normalized.render.seed }),
       ...(normalized.render.background === undefined
         ? {}
@@ -300,7 +261,13 @@ function startApproximate(request: ApproximateRequest): {
     },
     execution: onProgress ? { onProgress } : undefined,
   };
-  const handle = nativeBinding.startApproximate(nativeRequest);
+  let handle: NativeHandle;
+  try {
+    handle = nativeBinding.startApproximate(nativeRequest);
+  } catch (error) {
+    // Request validation in Rust (e.g. `background`) fails synchronously.
+    throw mapNativeError(error);
+  }
 
   const cancel = (): void => nativeBinding.cancelApproximate(handle.taskId);
   const signal = normalized.execution.signal;

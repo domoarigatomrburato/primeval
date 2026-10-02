@@ -149,7 +149,7 @@ test("packed package can be installed and render in a consumer project", {
       'import { approximate } from "@aleburato/primeval";',
       `const input = await readFile(${JSON.stringify(fixturePath)});`,
       "const result = await approximate({",
-      '  input: { kind: "bytes", data: input },',
+      "  input,",
       '  output: "svg",',
       "  render: { count: 4, resizeInput: 8, outputSize: 16, seed: 7 },",
       "});",

@@ -1,5 +1,4 @@
 use crate::error_grid::ErrorGrid;
-use crate::optimize::hill_climb;
 use crate::score;
 use crate::shapes::{Shape, ShapeKind};
 use crate::state::State;
@@ -111,7 +110,7 @@ impl Model {
         }
     }
 
-    pub fn step(&mut self, kind: ShapeKind, alpha: i32, repeat: usize) -> Result<u64, String> {
+    pub fn step(&mut self, kind: ShapeKind, alpha: i32) -> Result<u64, String> {
         let evaluations_before: u64 = self.workers.iter().map(|worker| worker.evaluations).sum();
         self.error_grid.compute(&self.target, &self.current);
 
@@ -152,24 +151,7 @@ impl Model {
             })
             .ok_or_else(|| "worker search produced no state".to_string())?;
 
-        self.add(best.shape.clone(), best.alpha);
-
-        let mut repeat_state = best;
-        for _ in 0..repeat {
-            let round = SearchRound {
-                target: &self.target,
-                current: &self.current,
-                error_grid: &self.error_grid,
-                score: self.score,
-            };
-            let before = repeat_state.energy(&mut self.workers[0], &round);
-            repeat_state = hill_climb(&repeat_state, &mut self.workers[0], &round, hill_climb_age);
-            let after = repeat_state.energy(&mut self.workers[0], &round);
-            if before == after {
-                break;
-            }
-            self.add(repeat_state.shape.clone(), repeat_state.alpha);
-        }
+        self.add(best.shape, best.alpha);
 
         let evaluations_after: u64 = self.workers.iter().map(|worker| worker.evaluations).sum();
         Ok(evaluations_after - evaluations_before)
@@ -473,12 +455,12 @@ mod tests {
         );
 
         let _ = model
-            .step(ShapeKind::Triangle, 128, 0)
+            .step(ShapeKind::Triangle, 128)
             .expect("first step should succeed");
         let first_total: u64 = model.workers.iter().map(|worker| worker.evaluations).sum();
 
         let second_reported = model
-            .step(ShapeKind::Triangle, 128, 0)
+            .step(ShapeKind::Triangle, 128)
             .expect("second step should succeed");
         let second_total: u64 = model.workers.iter().map(|worker| worker.evaluations).sum();
 
@@ -501,7 +483,7 @@ mod tests {
         );
 
         let evaluations = model
-            .step(ShapeKind::Triangle, 128, 0)
+            .step(ShapeKind::Triangle, 128)
             .expect("step should succeed");
 
         assert!(evaluations > 0);

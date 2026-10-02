@@ -191,18 +191,83 @@ test("cli exits non-zero with missing args", () => {
   assert.equal(result.status, 1);
 });
 
-test("cli exits non-zero with missing input file", () => {
+function assertCleanFailure(result, pattern) {
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, pattern);
+  assert.doesNotMatch(result.stderr, /\n\s+at /, "stderr should not contain a stack trace");
+}
+
+test("cli reports a missing input file", () => {
+  const tmpDir = makeTmpDir();
+  const input = path.join(tmpDir, "does-not-exist.jpg");
+  const output = path.join(tmpDir, "out.svg");
+
+  const result = runCli([input, "--output", output, ...RENDER_ARGS]);
+
+  assertCleanFailure(result, /^input file not found: .*does-not-exist\.jpg\n$/);
+  assert.equal(fs.existsSync(output), false);
+});
+
+test("cli reports a directory input", () => {
   const tmpDir = makeTmpDir();
   const output = path.join(tmpDir, "out.svg");
-  const result = runCli([
-    path.join(tmpDir, "does-not-exist.jpg"),
-    "--output",
-    output,
-    "--progress",
-    "off",
-  ]);
 
-  assert.equal(result.status, 1);
+  const result = runCli([tmpDir, "--output", output, ...RENDER_ARGS]);
+
+  assertCleanFailure(result, /^input is a directory: /);
+  assert.equal(fs.existsSync(output), false);
+});
+
+test("cli rejects a FIFO input without blocking", (t) => {
+  if (process.platform === "win32") {
+    t.skip("mkfifo is not available on Windows");
+    return;
+  }
+  const tmpDir = makeTmpDir();
+  const fifo = path.join(tmpDir, "input.fifo");
+  const made = spawnSync("mkfifo", [fifo]);
+  if (made.error || made.status !== 0) {
+    t.skip("mkfifo is unavailable");
+    return;
+  }
+  const output = path.join(tmpDir, "out.svg");
+
+  const result = spawnSync(process.execPath, [cliPath, fifo, "--output", output, ...RENDER_ARGS], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+
+  assert.equal(result.error, undefined, "cli should not block on a FIFO");
+  assertCleanFailure(result, /^input is not a regular file: .*input\.fifo\n$/);
+});
+
+test("cli reports an unreadable input file", (t) => {
+  if (process.platform === "win32" || process.getuid?.() === 0) {
+    t.skip("file permissions are not enforced here");
+    return;
+  }
+  const tmpDir = makeTmpDir();
+  const input = path.join(tmpDir, "locked.jpg");
+  fs.copyFileSync(fixturePath, input);
+  fs.chmodSync(input, 0o000);
+  const output = path.join(tmpDir, "out.svg");
+
+  const result = runCli([input, "--output", output, ...RENDER_ARGS]);
+
+  assertCleanFailure(result, /^permission denied reading input: .*locked\.jpg\n$/);
+});
+
+test("cli reports an invalid background without a stack trace", () => {
+  const tmpDir = makeTmpDir();
+  const output = path.join(tmpDir, "out.svg");
+
+  const result = runCli([fixturePath, "--output", output, "--background", "a€bc", ...RENDER_ARGS]);
+
+  assertCleanFailure(
+    result,
+    /^background must be auto or an opaque hex color \(RGB or RRGGBB\)\n$/,
+  );
 });
 
 test("cli auto-derives output filename when --output is omitted", () => {

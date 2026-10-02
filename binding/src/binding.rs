@@ -4,9 +4,8 @@ use napi::{Env, Status};
 use napi_derive::napi;
 use primeval_core::shapes::ShapeKind;
 use primeval_render::{
-    ApproximateError, ApproximateRequest, ApproximateResult, InputSource, OutputFormat,
-    ProgressInfo, RenderOptions, approximate, parse_alpha_str, parse_background_str,
-    parse_seed_i64,
+    ApproximateError, ApproximateRequest, ApproximateResult, OutputFormat, ProgressInfo,
+    RenderOptions, approximate, parse_alpha_str, parse_background_str, parse_seed_i64,
 };
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU32;
@@ -73,18 +72,10 @@ fn with_registered_task<T, E>(
 }
 
 #[napi(object, object_to_js = false)]
-pub struct NativeInputSource {
-    pub kind: String,
-    pub path: Option<String>,
-    pub data: Option<Buffer>,
-}
-
-#[napi(object, object_to_js = false)]
 pub struct NativeRenderOptions {
     pub count: Option<u32>,
     pub shape: Option<String>,
     pub alpha: Option<String>,
-    pub repeat: Option<u32>,
     pub seed: Option<i64>,
     pub background: Option<String>,
     #[napi(js_name = "resizeInput")]
@@ -101,7 +92,7 @@ pub struct NativeExecutionOptions {
 
 #[napi(object, object_to_js = false)]
 pub struct NativeApproximateRequest {
-    pub input: NativeInputSource,
+    pub input: Buffer,
     pub output: String,
     pub render: NativeRenderOptions,
     pub execution: Option<NativeExecutionOptions>,
@@ -180,31 +171,10 @@ pub fn cancel_approximate(task_id: u32) {
 }
 
 fn normalize_request(
-    input: NativeInputSource,
+    input: Buffer,
     output: String,
     render: NativeRenderOptions,
 ) -> Result<ApproximateRequest> {
-    let input = match input.kind.as_str() {
-        "path" => {
-            let path = input
-                .path
-                .ok_or_else(|| napi_error("ValidationError", "path input requires `path`"))?;
-            InputSource::Path(path.into())
-        }
-        "bytes" => {
-            let data = input
-                .data
-                .ok_or_else(|| napi_error("ValidationError", "bytes input requires `data`"))?;
-            InputSource::Bytes(data.into())
-        }
-        other => {
-            return Err(napi_error(
-                "ValidationError",
-                format!("unknown input kind: {other}"),
-            ));
-        }
-    };
-
     let format = output
         .parse::<OutputFormat>()
         .map_err(|message| napi_error("ValidationError", message))?;
@@ -241,20 +211,16 @@ fn normalize_request(
         .transpose()?;
 
     Ok(ApproximateRequest {
-        input,
+        input: input.into(),
         output: format,
         render: RenderOptions {
             count: render.count.unwrap_or(defaults.count),
             shape,
             alpha,
-            repeat: render
-                .repeat
-                .map_or(defaults.repeat, |repeat| repeat as usize),
             seed,
             background,
             resize_input: render.resize_input.unwrap_or(defaults.resize_input),
             output_size: render.output_size.unwrap_or(defaults.output_size),
-            workers: defaults.workers,
         },
     })
 }
@@ -262,10 +228,6 @@ fn normalize_request(
 fn map_error(error: ApproximateError) -> Error {
     match error {
         ApproximateError::Validation(message) => napi_error("ValidationError", message),
-        ApproximateError::NotFound(path) => napi_error(
-            "NotFoundError",
-            format!("{} does not exist or is not readable", path.display()),
-        ),
         ApproximateError::Aborted => napi_error("AbortError", "operation aborted"),
         ApproximateError::Internal(message) => napi_error("Error", message),
     }
@@ -309,7 +271,6 @@ mod tests {
             count: Some(1),
             shape: Some(shape.to_string()),
             alpha: Some("128".to_string()),
-            repeat: Some(0),
             seed: Some(7),
             background: Some("auto".to_string()),
             resize_input: Some(32),
@@ -320,11 +281,7 @@ mod tests {
     #[test]
     fn normalize_request_uses_shared_shape_and_output_parsers() {
         let request = normalize_request(
-            NativeInputSource {
-                kind: "bytes".to_string(),
-                path: None,
-                data: Some(Buffer::from(vec![0_u8; 4])),
-            },
+            Buffer::from(vec![0_u8; 4]),
             "png".to_string(),
             render_options("rotated-rectangle"),
         )
@@ -338,11 +295,7 @@ mod tests {
     fn normalize_request_rejects_removed_output_formats() {
         for output in ["jpeg", "jpg", "gif"] {
             let error = normalize_request(
-                NativeInputSource {
-                    kind: "bytes".to_string(),
-                    path: None,
-                    data: Some(Buffer::from(vec![0_u8; 4])),
-                },
+                Buffer::from(vec![0_u8; 4]),
                 output.to_string(),
                 render_options("triangle"),
             )
@@ -358,11 +311,7 @@ mod tests {
     #[test]
     fn normalize_request_rejects_unknown_shape() {
         let error = normalize_request(
-            NativeInputSource {
-                kind: "bytes".to_string(),
-                path: None,
-                data: Some(Buffer::from(vec![0_u8; 4])),
-            },
+            Buffer::from(vec![0_u8; 4]),
             "svg".to_string(),
             render_options("hexagon"),
         )
@@ -374,17 +323,12 @@ mod tests {
     #[test]
     fn normalize_request_uses_rust_defaults_for_omitted_render_fields() {
         let request = normalize_request(
-            NativeInputSource {
-                kind: "bytes".to_string(),
-                path: None,
-                data: Some(Buffer::from(vec![0_u8; 4])),
-            },
+            Buffer::from(vec![0_u8; 4]),
             "svg".to_string(),
             NativeRenderOptions {
                 count: None,
                 shape: None,
                 alpha: None,
-                repeat: None,
                 seed: None,
                 background: None,
                 resize_input: None,
@@ -399,11 +343,7 @@ mod tests {
     #[test]
     fn normalize_request_accepts_auto_alpha_string() {
         let request = normalize_request(
-            NativeInputSource {
-                kind: "bytes".to_string(),
-                path: None,
-                data: Some(Buffer::from(vec![0_u8; 4])),
-            },
+            Buffer::from(vec![0_u8; 4]),
             "svg".to_string(),
             NativeRenderOptions {
                 alpha: Some("auto".to_string()),
