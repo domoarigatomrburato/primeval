@@ -1,8 +1,9 @@
 //! High-level render facade for `primeval`.
 //!
 //! This crate handles the full decode -> optimize -> encode path on top of
-//! `primeval-core`. It accepts either image bytes or filesystem paths, runs the
-//! approximation search, and returns SVG or raster output.
+//! `primeval-core`. It takes encoded image bytes (JPEG, PNG, or WebP), runs the
+//! approximation search, and returns SVG or PNG output. Reading files is up to
+//! the caller.
 //!
 //! The Node package and napi binding in this repository build on the same API.
 //! If you want the canonical Rust-side defaults and validation behavior, this is
@@ -12,93 +13,135 @@
 //!
 //! ```no_run
 //! use primeval_render::{
-//!     approximate, ApproximateRequest, ApproximateResult, InputSource, OutputFormat,
-//!     RenderOptions,
+//!     approximate, ApproximateRequest, ApproximateResult, Execution, OutputFormat,
+//!     ProgressInfo, RenderOptions,
 //! };
-//! use std::sync::atomic::AtomicBool;
 //!
-//! let cancelled = AtomicBool::new(false);
+//! let mut render = RenderOptions::default();
+//! render.count = 100;
+//! render.resize_input = 128;
+//! render.output_size = 512;
+//!
+//! let mut steps = Vec::new();
+//! let mut on_progress = |info: ProgressInfo| steps.push(info.step);
 //! let result = approximate(
 //!     ApproximateRequest {
-//!         input: InputSource::Path("photo.jpg".into()),
+//!         input: std::fs::read("photo.jpg")?,
 //!         output: OutputFormat::Svg,
-//!         render: RenderOptions {
-//!             count: 100,
-//!             resize_input: 128,
-//!             output_size: 512,
-//!             ..RenderOptions::default()
-//!         },
+//!         render,
 //!     },
-//!     None,
-//!     &cancelled,
+//!     Execution::new().progress(&mut on_progress),
 //! )?;
 //!
 //! match result {
 //!     ApproximateResult::Svg { data, .. } => std::fs::write("out.svg", data)?,
-//!     ApproximateResult::Raster { .. } => unreachable!("requested svg output"),
+//!     _ => unreachable!("requested svg output"),
 //! }
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-use image::DynamicImage;
-use primeval_core::export::{average_background, encode_gif, encode_jpg, encode_png, thumbnail};
-use primeval_core::shapes::ShapeKind;
-use primeval_core::{Buffer, Color, Model, ModelOptions};
-use std::path::PathBuf;
+#![warn(missing_docs)]
+
+#[cfg(feature = "bench")]
+mod benches;
+mod error;
+mod input;
+mod output;
+mod raster;
+mod svg;
+
+use image::{DynamicImage, ImageReader, Limits, RgbImage, RgbaImage};
+use input::{average_background, thumbnail};
+use output::output_dimensions;
+use primeval_core::{Buffer, Drawing, Model, ModelOptions};
+use std::io::Cursor;
+use std::num::NonZeroU8;
+use std::ops::RangeInclusive;
+use std::str::FromStr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-pub use primeval_core::OutputFormat;
+pub use error::{ApproximateError, BoxedSource, RenderOption};
+pub use output::OutputFormat;
+pub use primeval_core::{Alpha, Color, ParseError, ShapeKind};
 
-/// Source image input for a render request.
-#[derive(Clone, Debug, PartialEq)]
-pub enum InputSource {
-    /// Raw encoded image bytes, typically PNG or JPEG.
-    Bytes(Vec<u8>),
-    /// A filesystem path to an encoded image file.
-    Path(PathBuf),
-}
+/// Accepted values of [`RenderOptions::count`]. The cap bounds the work one
+/// call can queue.
+pub const COUNT_RANGE: RangeInclusive<u32> = 1..=100_000;
 
-/// Alpha strategy for new shapes during optimization.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AlphaOption {
-    /// Let the optimizer choose alpha automatically.
-    Auto,
-    /// Use a fixed alpha value for every committed shape.
-    Fixed(u8),
-}
+/// Accepted values of [`RenderOptions::resize_input`]. The engine needs at
+/// least 2 pixels per side; the cap bounds the working buffers (a 2048 x
+/// 2048 canvas is 12 MiB per RGB buffer plus 128 MiB of per-row prefix
+/// sums) and the per-step cost.
+pub const RESIZE_INPUT_RANGE: RangeInclusive<u32> = 2..=2048;
+
+/// Accepted values of [`RenderOptions::output_size`]. The cap bounds the PNG
+/// raster: an 8192 x 8192 output needs 256 MiB of RGBA plus 192 MiB of RGB.
+pub const OUTPUT_SIZE_RANGE: RangeInclusive<u32> = 2..=8192;
+
+/// Largest width or height a decoded input may have.
+pub const MAX_INPUT_SIDE: u32 = 16_384;
+
+/// Most memory the decoder may allocate for one input, in bytes (512 MiB).
+pub const MAX_DECODE_ALLOC: u64 = 512 * 1024 * 1024;
+
+/// The largest integer an `f64` represents exactly together with all smaller
+/// ones (JavaScript's `Number.MAX_SAFE_INTEGER`).
+const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
 /// Background color strategy for the initial canvas.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum BackgroundOption {
     /// Derive the background color from the input image.
+    #[default]
     Auto,
-    /// Use an explicit RGBA color.
+    /// Use an explicit opaque color (alpha 255).
     Color(Color),
 }
 
+impl FromStr for BackgroundOption {
+    type Err = ParseError;
+
+    /// Parses `auto` or an opaque hex color (`RGB` or `RRGGBB`, optional
+    /// leading `#`).
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value == "auto" {
+            return Ok(Self::Auto);
+        }
+
+        Color::from_hex(value).map(Self::Color).ok_or_else(|| {
+            ParseError::new(format!(
+                "background {}",
+                RenderOption::Background.requirement()
+            ))
+        })
+    }
+}
+
 /// Render-time knobs that control optimization and final export.
+///
+/// Start from [`RenderOptions::default`] and set the fields you need, or
+/// apply a [`PartialRenderOptions`] with [`RenderOptions::merge`].
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RenderOptions {
-    /// Number of optimization steps.
+    /// Number of optimization steps, within [`COUNT_RANGE`].
     pub count: u32,
     /// Shape family to search during each step.
     pub shape: ShapeKind,
     /// Alpha handling for new shapes.
-    pub alpha: AlphaOption,
-    /// Extra hill-climb repetitions after each accepted step.
-    pub repeat: usize,
+    pub alpha: Alpha,
     /// Deterministic RNG seed. `None` chooses a non-deterministic seed.
     pub seed: Option<u64>,
-    /// Background fill strategy.
+    /// Background fill strategy. An explicit color must be opaque.
     pub background: BackgroundOption,
-    /// Working resolution used during optimization.
+    /// Working resolution used during optimization, within
+    /// [`RESIZE_INPUT_RANGE`].
     pub resize_input: u32,
-    /// Maximum dimension of the final output replay.
+    /// Length of the output's longer side, within [`OUTPUT_SIZE_RANGE`]; the
+    /// other side keeps the working canvas's aspect ratio.
     pub output_size: u32,
-    /// Worker override. `None` uses available parallelism.
-    pub workers: Option<usize>,
-    /// Keep every `gif_frame_step`th replay frame when exporting GIFs.
-    pub gif_frame_step: usize,
 }
 
 impl Default for RenderOptions {
@@ -106,385 +149,448 @@ impl Default for RenderOptions {
         Self {
             count: 100,
             shape: ShapeKind::Any,
-            alpha: AlphaOption::Auto,
-            repeat: 0,
+            alpha: Alpha::Auto,
             seed: None,
             background: BackgroundOption::Auto,
             resize_input: 256,
             output_size: 1024,
-            workers: None,
-            gif_frame_step: 1,
         }
+    }
+}
+
+impl RenderOptions {
+    /// Applies every field `partial` sets; fields it leaves `None` keep
+    /// their value in `self`.
+    #[must_use]
+    pub fn merge(self, partial: PartialRenderOptions) -> Self {
+        let PartialRenderOptions {
+            count,
+            shape,
+            alpha,
+            seed,
+            background,
+            resize_input,
+            output_size,
+        } = partial;
+        Self {
+            count: count.unwrap_or(self.count),
+            shape: shape.unwrap_or(self.shape),
+            alpha: alpha.unwrap_or(self.alpha),
+            seed: seed.or(self.seed),
+            background: background.unwrap_or(self.background),
+            resize_input: resize_input.unwrap_or(self.resize_input),
+            output_size: output_size.unwrap_or(self.output_size),
+        }
+    }
+}
+
+/// [`RenderOptions`] where every field is optional, for callers that pass
+/// user input through and leave omitted fields to the Rust defaults.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PartialRenderOptions {
+    /// [`RenderOptions::count`], if set.
+    pub count: Option<u32>,
+    /// [`RenderOptions::shape`], if set.
+    pub shape: Option<ShapeKind>,
+    /// [`RenderOptions::alpha`], if set.
+    pub alpha: Option<Alpha>,
+    /// [`RenderOptions::seed`], if set. `None` keeps the base value, so a
+    /// partial cannot clear a seed.
+    pub seed: Option<u64>,
+    /// [`RenderOptions::background`], if set.
+    pub background: Option<BackgroundOption>,
+    /// [`RenderOptions::resize_input`], if set.
+    pub resize_input: Option<u32>,
+    /// [`RenderOptions::output_size`], if set.
+    pub output_size: Option<u32>,
+}
+
+impl PartialRenderOptions {
+    /// Sets a numeric option from a host-language number, such as a
+    /// JavaScript `number`, without wrapping or truncating it.
+    ///
+    /// `value` must be an integer the option accepts: [`COUNT_RANGE`],
+    /// [`RESIZE_INPUT_RANGE`], [`OUTPUT_SIZE_RANGE`], `1..=255` for `alpha`,
+    /// or `0..=2^53 - 1` for `seed` (larger seeds lose precision as an `f64`;
+    /// set [`seed`](Self::seed) directly instead).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApproximateError::InvalidOption`] for a fraction, `NaN`, an
+    /// infinity, a value out of range, or an option that is not numeric.
+    pub fn set_number(&mut self, option: RenderOption, value: f64) -> Result<(), ApproximateError> {
+        let invalid = || ApproximateError::invalid_option(option);
+        let integer_in = |min: f64, max: f64| {
+            (value.fract() == 0.0 && value >= min && value <= max)
+                .then_some(value)
+                .ok_or_else(invalid)
+        };
+        let range = |range: &RangeInclusive<u32>| {
+            // The value is an integer within a u32 range, so the cast is exact.
+            integer_in(f64::from(*range.start()), f64::from(*range.end())).map(|value| value as u32)
+        };
+        match option {
+            RenderOption::Count => self.count = Some(range(&COUNT_RANGE)?),
+            RenderOption::ResizeInput => self.resize_input = Some(range(&RESIZE_INPUT_RANGE)?),
+            RenderOption::OutputSize => self.output_size = Some(range(&OUTPUT_SIZE_RANGE)?),
+            RenderOption::Alpha => {
+                // 1..=255 fits in u8 and is never zero.
+                let alpha = integer_in(1.0, 255.0)? as u8;
+                self.alpha = Some(Alpha::Fixed(NonZeroU8::new(alpha).ok_or_else(invalid)?));
+            }
+            // Integers up to 2^53 - 1 convert to u64 exactly.
+            RenderOption::Seed => self.seed = Some(integer_in(0.0, MAX_SAFE_INTEGER)? as u64),
+            RenderOption::Output | RenderOption::Shape | RenderOption::Background => {
+                return Err(invalid());
+            }
+        }
+        Ok(())
     }
 }
 
 /// Full request for a single rendered output.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ApproximateRequest {
-    pub input: InputSource,
+    /// Encoded image bytes in JPEG, PNG, or WebP format.
+    pub input: Vec<u8>,
+    /// The format to encode the result in.
     pub output: OutputFormat,
-    pub render: RenderOptions,
-}
-
-/// Request used when preparing a reusable approximation run.
-#[derive(Clone, Debug, PartialEq)]
-pub struct RenderRequest {
-    pub input: InputSource,
+    /// The search and output settings.
     pub render: RenderOptions,
 }
 
 /// Per-step progress information emitted during optimization.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ProgressInfo {
+    /// The step just completed, from `1` to `total`.
     pub step: u32,
+    /// The number of steps the render runs, [`RenderOptions::count`].
     pub total: u32,
+    /// The difference between the canvas and the working-resolution target
+    /// after this step: the RMSE over the RGB channels divided by 255, from
+    /// `0.0` (identical) to `1.0`.
     pub score: f64,
 }
 
+/// A cheap-to-clone handle that cancels a running [`approximate`] call.
+///
+/// Clones share the same flag. The render checks it before and after
+/// decoding, before every step, and before encoding.
+#[derive(Clone, Debug, Default)]
+pub struct CancellationToken(Arc<AtomicBool>);
+
+impl CancellationToken {
+    /// A token that is not cancelled.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Requests cancellation of every render that holds a clone of this token.
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether [`cancel`](Self::cancel) was called on this token or a clone.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// How [`approximate`] reports progress and learns about cancellation.
+///
+/// `Execution::new()` reports nothing and cannot be cancelled.
+#[derive(Default)]
+pub struct Execution<'a> {
+    progress: Option<&'a mut dyn FnMut(ProgressInfo)>,
+    cancel: Option<&'a CancellationToken>,
+}
+
+impl<'a> Execution<'a> {
+    /// No progress reporting and no cancellation.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Calls `progress` after every step.
+    #[must_use]
+    pub fn progress(mut self, progress: &'a mut dyn FnMut(ProgressInfo)) -> Self {
+        self.progress = Some(progress);
+        self
+    }
+
+    /// Stops the render with [`ApproximateError::Aborted`] once `token` is
+    /// cancelled.
+    #[must_use]
+    pub fn cancellation(mut self, token: &'a CancellationToken) -> Self {
+        self.cancel = Some(token);
+        self
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancel.is_some_and(CancellationToken::is_cancelled)
+    }
+
+    /// [`ApproximateError::Aborted`] once the token is cancelled.
+    fn check_cancelled(&self) -> Result<(), ApproximateError> {
+        if self.is_cancelled() {
+            Err(ApproximateError::Aborted)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// Final encoded render result.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq)]
 pub enum ApproximateResult {
     /// SVG output as UTF-8 text.
     Svg {
+        /// The SVG document.
         data: String,
+        /// The document's width in pixels.
         width: u32,
+        /// The document's height in pixels.
         height: u32,
     },
-    /// Encoded raster output such as PNG, JPG, or GIF.
-    Raster {
-        format: OutputFormat,
+    /// Encoded PNG output.
+    Png {
+        /// The PNG file.
         data: Vec<u8>,
+        /// The image's width in pixels.
         width: u32,
+        /// The image's height in pixels.
         height: u32,
     },
 }
 
 impl ApproximateResult {
+    /// The format of the encoded output.
     #[must_use]
     pub const fn format(&self) -> OutputFormat {
         match self {
             Self::Svg { .. } => OutputFormat::Svg,
-            Self::Raster { format, .. } => *format,
+            Self::Png { .. } => OutputFormat::Png,
         }
     }
 
+    /// The output's MIME type; see [`OutputFormat::mime_type`].
     #[must_use]
     pub const fn mime_type(&self) -> &'static str {
         self.format().mime_type()
     }
 
+    /// The output's width in pixels.
     #[must_use]
     pub const fn width(&self) -> u32 {
         match self {
-            Self::Svg { width, .. } | Self::Raster { width, .. } => *width,
+            Self::Svg { width, .. } | Self::Png { width, .. } => *width,
         }
     }
 
+    /// The output's height in pixels.
     #[must_use]
     pub const fn height(&self) -> u32 {
         match self {
-            Self::Svg { height, .. } | Self::Raster { height, .. } => *height,
+            Self::Svg { height, .. } | Self::Png { height, .. } => *height,
         }
     }
-}
 
-/// Render-time failures from validation, decoding, cancellation, or encoding.
-#[derive(Clone, Debug, PartialEq)]
-pub enum ApproximateError {
-    Validation(String),
-    NotFound(PathBuf),
-    Aborted,
-    Internal(String),
-}
-
-impl ApproximateError {
-    fn validation(message: impl Into<String>) -> Self {
-        Self::Validation(message.into())
-    }
-
-    fn internal(message: impl Into<String>) -> Self {
-        Self::Internal(message.into())
-    }
-}
-
-impl std::fmt::Display for ApproximateError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    /// The encoded output bytes (UTF-8 text for SVG).
+    #[must_use]
+    pub fn into_bytes(self) -> Vec<u8> {
         match self {
-            Self::Validation(message) => write!(f, "validation error: {message}"),
-            Self::NotFound(path) => {
-                write!(f, "input path not found or unreadable: {}", path.display())
-            }
-            Self::Aborted => f.write_str("render aborted"),
-            Self::Internal(message) => write!(f, "internal render error: {message}"),
+            Self::Svg { data, .. } => data.into_bytes(),
+            Self::Png { data, .. } => data,
         }
-    }
-}
-
-impl std::error::Error for ApproximateError {}
-
-/// Parse alpha input shared across Rust and binding layers.
-pub fn parse_alpha_str(value: &str) -> Result<AlphaOption, String> {
-    if value.eq_ignore_ascii_case("auto") || value == "0" {
-        return Ok(AlphaOption::Auto);
-    }
-
-    let parsed: i32 = value
-        .parse()
-        .map_err(|err| format!("invalid alpha: {err}"))?;
-    if !(1..=255).contains(&parsed) {
-        return Err("alpha must be 0..255 where 0 means auto".to_string());
-    }
-    Ok(AlphaOption::Fixed(parsed as u8))
-}
-
-/// Parse numeric alpha input where `None` and `0` both mean auto.
-pub fn parse_alpha_u32(value: Option<u32>) -> Result<AlphaOption, String> {
-    match value {
-        None => Ok(AlphaOption::Auto),
-        Some(0) => Ok(AlphaOption::Auto),
-        Some(value) if (1..=255).contains(&value) => Ok(AlphaOption::Fixed(value as u8)),
-        Some(_) => Err("alpha must be 0..255 where 0 means auto".to_string()),
-    }
-}
-
-/// Parse a background color string or the special `auto` value.
-pub fn parse_background_str(value: &str) -> Result<BackgroundOption, String> {
-    if value.eq_ignore_ascii_case("auto") {
-        return Ok(BackgroundOption::Auto);
-    }
-
-    let color = Color::from_hex(value).ok_or_else(|| "invalid background color".to_string())?;
-    Ok(BackgroundOption::Color(color))
-}
-
-/// Parse a signed binding-layer seed into the Rust-side unsigned form.
-pub fn parse_seed_i64(value: i64) -> Result<u64, String> {
-    u64::try_from(value).map_err(|_| "seed must be a positive integer".to_string())
-}
-
-/// Reusable prepared run that can be exported in multiple formats without
-/// rerunning optimization.
-pub struct ApproximationRun {
-    model: Model,
-    gif_frame_step: usize,
-    rendered: Option<Buffer>,
-    svg: Option<String>,
-    frames: Option<Vec<Buffer>>,
-}
-
-impl ApproximationRun {
-    /// Final output width after replay.
-    #[must_use]
-    pub const fn width(&self) -> u32 {
-        self.model.output_width
-    }
-
-    /// Final output height after replay.
-    #[must_use]
-    pub const fn height(&self) -> u32 {
-        self.model.output_height
-    }
-
-    /// Encode the prepared run into a single output format.
-    pub fn result(&mut self, output: OutputFormat) -> Result<ApproximateResult, ApproximateError> {
-        let width = self.width();
-        let height = self.height();
-
-        match output {
-            OutputFormat::Svg => Ok(ApproximateResult::Svg {
-                data: self.svg().to_owned(),
-                width,
-                height,
-            }),
-            OutputFormat::Png => Ok(ApproximateResult::Raster {
-                format: OutputFormat::Png,
-                data: encode_png(self.rendered())
-                    .map_err(|err| ApproximateError::internal(err.to_string()))?,
-                width,
-                height,
-            }),
-            OutputFormat::Jpg => Ok(ApproximateResult::Raster {
-                format: OutputFormat::Jpg,
-                data: encode_jpg(self.rendered(), 95)
-                    .map_err(|err| ApproximateError::internal(err.to_string()))?,
-                width,
-                height,
-            }),
-            OutputFormat::Gif => Ok(ApproximateResult::Raster {
-                format: OutputFormat::Gif,
-                data: encode_gif(self.frames(), 50, 250)
-                    .map_err(|err| ApproximateError::internal(err.to_string()))?,
-                width,
-                height,
-            }),
-        }
-    }
-
-    fn rendered(&mut self) -> &Buffer {
-        self.rendered
-            .get_or_insert_with(|| self.model.render_output())
-    }
-
-    fn svg(&mut self) -> &str {
-        self.svg.get_or_insert_with(|| self.model.svg())
-    }
-
-    fn frames(&mut self) -> &[Buffer] {
-        self.frames
-            .get_or_insert_with(|| gif_frames(&self.model, self.gif_frame_step))
     }
 }
 
 /// Decode, optimize, and encode a single output in one call.
+///
+/// # Errors
+///
+/// Returns [`ApproximateError::InvalidOption`] for an option outside its
+/// documented range, [`ApproximateError::InvalidImage`] for bytes that do not
+/// decode within the limits ([`MAX_INPUT_SIDE`], [`MAX_DECODE_ALLOC`]) or
+/// decode to fewer than 2 x 2 pixels, [`ApproximateError::Aborted`] when
+/// `execution`'s token is cancelled, and [`ApproximateError::Internal`] for
+/// allocation and encoding failures.
 pub fn approximate(
     request: ApproximateRequest,
-    on_progress: Option<&dyn Fn(ProgressInfo)>,
-    cancelled: &AtomicBool,
+    mut execution: Execution<'_>,
 ) -> Result<ApproximateResult, ApproximateError> {
-    let mut run = prepare(
-        RenderRequest {
-            input: request.input,
-            render: request.render,
-        },
-        on_progress,
-        cancelled,
-    )?;
-    run.result(request.output)
-}
+    let ApproximateRequest {
+        input,
+        output,
+        render,
+    } = request;
+    validate_options(&render)?;
 
-/// Decode and optimize once, then return a reusable run for later encoding.
-pub fn prepare(
-    request: RenderRequest,
-    on_progress: Option<&dyn Fn(ProgressInfo)>,
-    cancelled: &AtomicBool,
-) -> Result<ApproximationRun, ApproximateError> {
-    validate_options(&request.render)?;
+    execution.check_cancelled()?;
+    let image = decode_input(&input)?;
+    drop(input);
+    execution.check_cancelled()?;
+    let (working, background) = prepare_target(image, render.background, render.resize_input);
+    let (width, height) = working.dimensions();
+    let target = Buffer::from_rgb(width, height, working.into_raw())
+        .ok_or_else(|| ApproximateError::internal("working image has an invalid pixel length"))?;
+    let mut options = ModelOptions::default();
+    options.seed = render.seed;
+    let mut model = Model::new(target, background, options);
 
-    let image = decode_input(&request.input)?;
-    let background = match request.render.background {
-        BackgroundOption::Auto => average_background(&image),
-        BackgroundOption::Color(color) => color,
-    };
-    let working = thumbnail(&image, request.render.resize_input);
-    let mut model = Model::new(
-        Buffer::from_image(&working),
-        background,
-        request.render.output_size,
-        ModelOptions {
-            seed: request.render.seed,
-            workers: request.render.workers.unwrap_or_else(default_worker_count),
-            profile_quadratic: false,
-            ..ModelOptions::default()
-        },
-    );
-    let alpha = match request.render.alpha {
-        AlphaOption::Auto => 0,
-        AlphaOption::Fixed(alpha) => i32::from(alpha),
-    };
+    for step in 0..render.count {
+        execution.check_cancelled()?;
 
-    for step in 0..request.render.count {
-        if cancelled.load(Ordering::SeqCst) {
-            return Err(ApproximateError::Aborted);
-        }
+        model.step(render.shape, render.alpha);
 
-        model
-            .step(request.render.shape, alpha, request.render.repeat)
-            .map_err(ApproximateError::internal)?;
-
-        if let Some(callback) = on_progress {
-            callback(ProgressInfo {
+        if let Some(progress) = execution.progress.as_mut() {
+            progress(ProgressInfo {
                 step: step + 1,
-                total: request.render.count,
+                total: render.count,
                 score: model.score_f64(),
             });
         }
     }
 
-    Ok(ApproximationRun {
-        model,
-        gif_frame_step: request.render.gif_frame_step,
-        rendered: None,
-        svg: None,
-        frames: None,
-    })
+    execution.check_cancelled()?;
+    encode_output(&model.drawing(), render.output_size, output)
 }
 
-fn validate_options(render: &RenderOptions) -> Result<(), ApproximateError> {
-    if render.count == 0 {
-        return Err(ApproximateError::validation("count must be at least 1"));
-    }
-    if render.output_size == 0 {
-        return Err(ApproximateError::validation(
-            "output_size must be at least 1",
-        ));
-    }
-    if render.resize_input == 0 {
-        return Err(ApproximateError::validation(
-            "resize_input must be at least 1",
-        ));
-    }
-    if render.workers == Some(0) {
-        return Err(ApproximateError::validation("workers must be at least 1"));
-    }
-    if render.gif_frame_step == 0 {
-        return Err(ApproximateError::validation(
-            "gif_frame_step must be at least 1",
-        ));
-    }
-    if let AlphaOption::Fixed(alpha) = render.alpha {
-        if alpha == 0 {
-            return Err(ApproximateError::validation(
-                "alpha must be 0..255 where 0 means auto",
-            ));
-        }
-    }
-    Ok(())
-}
+fn encode_output(
+    drawing: &Drawing,
+    output_size: u32,
+    output: OutputFormat,
+) -> Result<ApproximateResult, ApproximateError> {
+    let (width, height) = output_dimensions(drawing.width, drawing.height, output_size);
 
-fn decode_input(input: &InputSource) -> Result<DynamicImage, ApproximateError> {
-    match input {
-        InputSource::Bytes(bytes) => image::load_from_memory(bytes)
-            .map_err(|err| ApproximateError::validation(format!("invalid image data: {err}"))),
-        InputSource::Path(path) => {
-            let bytes =
-                std::fs::read(path).map_err(|_| ApproximateError::NotFound(path.clone()))?;
-            image::load_from_memory(&bytes).map_err(|err| {
-                ApproximateError::validation(format!(
-                    "invalid image data at {}: {err}",
-                    path.display()
-                ))
+    match output {
+        OutputFormat::Svg => Ok(ApproximateResult::Svg {
+            data: svg::write_svg(drawing, width, height),
+            width,
+            height,
+        }),
+        OutputFormat::Png => {
+            let rgb = raster::render_rgb(drawing, width, height).ok_or_else(|| {
+                ApproximateError::internal("could not allocate the output raster")
+            })?;
+            Ok(ApproximateResult::Png {
+                data: raster::encode_png(width, height, &rgb).map_err(|err| {
+                    ApproximateError::Internal {
+                        reason: "PNG encoding failed".into(),
+                        source: Some(Box::new(err)),
+                    }
+                })?,
+                width,
+                height,
             })
         }
     }
 }
 
-/// Choose the default worker count from available system parallelism.
-pub fn default_worker_count() -> usize {
-    std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(1)
+fn validate_options(render: &RenderOptions) -> Result<(), ApproximateError> {
+    let checks = [
+        (COUNT_RANGE.contains(&render.count), RenderOption::Count),
+        (
+            RESIZE_INPUT_RANGE.contains(&render.resize_input),
+            RenderOption::ResizeInput,
+        ),
+        (
+            OUTPUT_SIZE_RANGE.contains(&render.output_size),
+            RenderOption::OutputSize,
+        ),
+        (
+            !matches!(render.background, BackgroundOption::Color(color) if color.a != 255),
+            RenderOption::Background,
+        ),
+    ];
+    match checks.into_iter().find(|(valid, _)| !valid) {
+        Some((_, option)) => Err(ApproximateError::invalid_option(option)),
+        None => Ok(()),
+    }
 }
 
-fn gif_frames(model: &Model, gif_frame_step: usize) -> Vec<Buffer> {
-    let mut frames = model.frames(0.001);
-    if gif_frame_step > 1 {
-        frames = frames
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, frame)| (index % gif_frame_step == 0).then_some(frame))
-            .collect();
+/// Decode `bytes` within [`MAX_INPUT_SIDE`] and [`MAX_DECODE_ALLOC`], and
+/// require at least 2 x 2 pixels.
+fn decode_input(bytes: &[u8]) -> Result<DynamicImage, ApproximateError> {
+    let undecodable = |err: image::ImageError| ApproximateError::InvalidImage {
+        reason: "not a decodable JPEG, PNG or WebP image".into(),
+        source: Some(Box::new(err)),
+    };
+    let mut reader = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|err| undecodable(err.into()))?;
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(MAX_INPUT_SIDE);
+    limits.max_image_height = Some(MAX_INPUT_SIDE);
+    limits.max_alloc = Some(MAX_DECODE_ALLOC);
+    reader.limits(limits);
+    let image = reader.decode().map_err(undecodable)?;
+
+    let (width, height) = (image.width(), image.height());
+    if width < 2 || height < 2 {
+        return Err(ApproximateError::InvalidImage {
+            reason: format!("the image is {width}x{height} pixels; both sides must be at least 2"),
+            source: None,
+        });
     }
-    frames
+    Ok(image)
+}
+
+/// Resolve the background, flatten the image onto it, and build the
+/// working-resolution target.
+///
+/// The target is always opaque RGB: every pixel is composited onto the
+/// opaque background, which leaves already-opaque pixels unchanged. Opaque
+/// inputs are read in place; only inputs with alpha that are not 8-bit RGBA
+/// are converted at full resolution. The full-resolution image is dropped
+/// once the thumbnail exists.
+fn prepare_target(
+    image: DynamicImage,
+    background: BackgroundOption,
+    resize_input: u32,
+) -> (RgbImage, Color) {
+    let background = match background {
+        BackgroundOption::Auto => average_background(&image),
+        BackgroundOption::Color(color) => color,
+    };
+    let image = if image.color().has_alpha() {
+        let mut pixels = image.into_rgba8();
+        flatten_onto(&mut pixels, background);
+        DynamicImage::ImageRgba8(pixels)
+    } else {
+        image
+    };
+    (thumbnail(image, resize_input), background)
+}
+
+/// Composite every pixel onto an opaque background color.
+fn flatten_onto(image: &mut RgbaImage, background: Color) {
+    let bg = [background.r, background.g, background.b];
+    for pixel in image.pixels_mut() {
+        let alpha = u32::from(pixel[3]);
+        if alpha == 255 {
+            continue;
+        }
+        for (channel, bg) in pixel.0.iter_mut().zip(bg) {
+            let blended = (u32::from(*channel) * alpha + u32::from(bg) * (255 - alpha) + 127) / 255;
+            // A weighted mean of two u8 values fits in u8.
+            *channel = blended as u8;
+        }
+        pixel[3] = 255;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
-    use std::fs;
-    use std::io::Cursor;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::{Arc, Mutex};
+    use image::{DynamicImage, ImageFormat, Rgb, Rgba, RgbaImage};
+    use std::error::Error as _;
 
     fn fixture_image() -> DynamicImage {
         let image = RgbaImage::from_fn(12, 8, |x, y| {
@@ -505,22 +611,23 @@ mod tests {
         out.into_inner()
     }
 
+    fn fixed_alpha(alpha: u8) -> Alpha {
+        Alpha::Fixed(NonZeroU8::new(alpha).expect("non-zero alpha"))
+    }
+
     fn render_options() -> RenderOptions {
         RenderOptions {
             count: 3,
             shape: ShapeKind::Triangle,
-            alpha: AlphaOption::Fixed(128),
-            repeat: 0,
+            alpha: fixed_alpha(128),
             seed: Some(7),
             background: BackgroundOption::Auto,
             resize_input: 8,
             output_size: 16,
-            workers: Some(1),
-            gif_frame_step: 1,
         }
     }
 
-    fn request(input: InputSource, output: OutputFormat) -> ApproximateRequest {
+    fn request(input: Vec<u8>, output: OutputFormat) -> ApproximateRequest {
         ApproximateRequest {
             input,
             output,
@@ -529,246 +636,343 @@ mod tests {
     }
 
     #[test]
-    fn parse_alpha_helpers_cover_string_and_numeric_inputs() {
-        assert_eq!(parse_alpha_str("auto"), Ok(AlphaOption::Auto));
-        assert_eq!(parse_alpha_str("0"), Ok(AlphaOption::Auto));
-        assert_eq!(parse_alpha_str("128"), Ok(AlphaOption::Fixed(128)));
-        assert_eq!(parse_alpha_u32(None), Ok(AlphaOption::Auto));
-        assert_eq!(parse_alpha_u32(Some(0)), Ok(AlphaOption::Auto));
-        assert_eq!(parse_alpha_u32(Some(128)), Ok(AlphaOption::Fixed(128)));
-
+    fn background_parses_auto_and_hex_colors() {
+        assert_eq!("auto".parse(), Ok(BackgroundOption::Auto));
         assert_eq!(
-            parse_alpha_str("256").expect_err("alpha >255 should fail"),
-            "alpha must be 0..255 where 0 means auto"
-        );
-        assert_eq!(
-            parse_alpha_u32(Some(256)).expect_err("alpha >255 should fail"),
-            "alpha must be 0..255 where 0 means auto"
-        );
-        assert_eq!(
-            parse_alpha_str("-1").expect_err("negative alpha should fail"),
-            "alpha must be 0..255 where 0 means auto"
-        );
-    }
-
-    #[test]
-    fn parse_background_and_seed_helpers_validate_shared_inputs() {
-        assert_eq!(parse_background_str("auto"), Ok(BackgroundOption::Auto));
-        assert_eq!(
-            parse_background_str("#112233"),
+            "#112233".parse(),
             Ok(BackgroundOption::Color(Color::new(0x11, 0x22, 0x33, 0xFF)))
         );
-        assert_eq!(parse_seed_i64(7), Ok(7));
-
-        assert_eq!(
-            parse_background_str("not-a-color").expect_err("invalid color should fail"),
-            "invalid background color"
-        );
-        assert_eq!(
-            parse_seed_i64(-1).expect_err("negative seed should fail"),
-            "seed must be a positive integer"
-        );
-    }
-
-    fn temp_path(ext: &str) -> PathBuf {
-        let mut path = std::env::temp_dir();
-        path.push(format!(
-            "primeval-render-{}-{:?}.{ext}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        path
-    }
-
-    #[test]
-    fn bytes_and_path_inputs_produce_identical_svg() {
-        let bytes = fixture_bytes();
-        let path = temp_path("png");
-        fs::write(&path, &bytes).expect("write fixture");
-
-        let cancelled = AtomicBool::new(false);
-        let from_bytes = approximate(
-            request(InputSource::Bytes(bytes.clone()), OutputFormat::Svg),
-            None,
-            &cancelled,
-        )
-        .expect("bytes render");
-        let from_path = approximate(
-            request(InputSource::Path(path.clone()), OutputFormat::Svg),
-            None,
-            &cancelled,
-        )
-        .expect("path render");
-
-        fs::remove_file(path).ok();
-
-        match (from_bytes, from_path) {
-            (
-                ApproximateResult::Svg {
-                    data: left,
-                    width: left_width,
-                    height: left_height,
-                },
-                ApproximateResult::Svg {
-                    data: right,
-                    width: right_width,
-                    height: right_height,
-                },
-            ) => {
-                assert_eq!(left, right);
-                assert_eq!(left_width, right_width);
-                assert_eq!(left_height, right_height);
-            }
-            other => panic!("unexpected results: {other:?}"),
+        for value in ["AUTO", "Auto", "not-a-color"] {
+            assert_eq!(
+                value.parse::<BackgroundOption>(),
+                Err(ParseError::new(
+                    "background must be auto or an opaque hex color (RGB or RRGGBB)"
+                )),
+                "{value:?}"
+            );
         }
     }
 
     #[test]
-    fn encoders_emit_expected_headers() {
-        let image = Buffer::new_from_color(4, 4, Color::new(10, 20, 30, 255));
-        let png = encode_png(&image).expect("png");
-        let jpg = encode_jpg(&image, 90).expect("jpg");
-        let gif = encode_gif(
-            &[
-                image.clone(),
-                Buffer::new_from_color(4, 4, Color::new(30, 20, 10, 255)),
-            ],
-            50,
-            250,
-        )
-        .expect("gif");
-
-        assert!(png.starts_with(&[0x89, b'P', b'N', b'G']));
-        assert!(jpg.starts_with(&[0xFF, 0xD8]));
-        assert!(gif.starts_with(b"GIF89a"));
-        assert!(!png.is_empty());
-        assert!(!jpg.is_empty());
-        assert!(!gif.is_empty());
+    fn merge_keeps_defaults_for_omitted_fields() {
+        assert_eq!(
+            RenderOptions::default().merge(PartialRenderOptions::default()),
+            RenderOptions::default()
+        );
     }
 
     #[test]
-    fn invalid_bytes_and_missing_path_return_stable_errors() {
-        let cancelled = AtomicBool::new(false);
+    fn merge_applies_every_set_field() {
+        let partial = PartialRenderOptions {
+            count: Some(3),
+            shape: Some(ShapeKind::Triangle),
+            alpha: Some(fixed_alpha(128)),
+            seed: Some(7),
+            background: Some(BackgroundOption::Auto),
+            resize_input: Some(8),
+            output_size: Some(16),
+        };
 
+        assert_eq!(RenderOptions::default().merge(partial), render_options());
+    }
+
+    #[test]
+    fn merge_overrides_only_the_set_fields() {
+        let partial = PartialRenderOptions {
+            count: Some(5),
+            alpha: Some(Alpha::Auto),
+            ..PartialRenderOptions::default()
+        };
+
+        let merged = render_options().merge(partial);
+
+        let mut expected = render_options();
+        expected.count = 5;
+        expected.alpha = Alpha::Auto;
+        assert_eq!(merged, expected);
+    }
+
+    #[test]
+    fn cancellation_token_clones_share_the_flag() {
+        let token = CancellationToken::new();
+        let clone = token.clone();
+        assert!(!token.is_cancelled());
+
+        clone.cancel();
+
+        assert!(token.is_cancelled());
+        assert!(clone.is_cancelled());
+    }
+
+    #[test]
+    fn same_seed_renders_are_deterministic() {
+        let first = approximate(
+            request(fixture_bytes(), OutputFormat::Svg),
+            Execution::new(),
+        )
+        .expect("first render");
+        let second = approximate(
+            request(fixture_bytes(), OutputFormat::Svg),
+            Execution::new(),
+        )
+        .expect("second render");
+
+        assert_eq!(first, second);
+    }
+
+    /// Renders the fixture as SVG with `seed` inside a dedicated pool of
+    /// `threads` threads.
+    fn svg_on_threads(seed: u64, threads: usize) -> Vec<u8> {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("test thread pool");
+        let mut request = request(fixture_bytes(), OutputFormat::Svg);
+        request.render.shape = ShapeKind::Any;
+        request.render.alpha = Alpha::Auto;
+        request.render.count = 4;
+        request.render.seed = Some(seed);
+        pool.install(|| approximate(request, Execution::new()))
+            .expect("render")
+            .into_bytes()
+    }
+
+    #[test]
+    fn same_seed_svg_is_identical_across_thread_counts() {
+        let reference = svg_on_threads(42, 1);
+        for threads in [2, 3, 8] {
+            assert!(
+                svg_on_threads(42, threads) == reference,
+                "{threads} threads changed the SVG"
+            );
+        }
+    }
+
+    #[test]
+    fn different_seeds_render_different_svgs() {
+        assert_ne!(svg_on_threads(1, 2), svg_on_threads(2, 2));
+    }
+
+    #[test]
+    fn the_largest_seed_renders() {
+        assert!(!svg_on_threads(u64::MAX, 3).is_empty());
+    }
+
+    fn encoded_fixture(format: ImageFormat) -> Vec<u8> {
+        let image = DynamicImage::ImageRgb8(fixture_image().to_rgb8());
+        let mut out = Cursor::new(Vec::new());
+        image.write_to(&mut out, format).expect("encode fixture");
+        out.into_inner()
+    }
+
+    fn assert_renders_svg(bytes: Vec<u8>) {
+        let result = approximate(request(bytes, OutputFormat::Svg), Execution::new())
+            .expect("render should succeed");
+
+        match result {
+            ApproximateResult::Svg { width, height, .. } => {
+                assert_eq!((width, height), (16, 10));
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn webp_input_renders() {
+        let bytes = encoded_fixture(ImageFormat::WebP);
+        assert!(bytes.starts_with(b"RIFF"));
+        assert_eq!(&bytes[8..12], b"WEBP");
+
+        assert_renders_svg(bytes);
+    }
+
+    #[test]
+    fn jpeg_input_renders() {
+        let bytes = encoded_fixture(ImageFormat::Jpeg);
+        assert!(bytes.starts_with(&[0xFF, 0xD8]));
+
+        assert_renders_svg(bytes);
+    }
+
+    #[test]
+    fn gif_input_is_rejected_as_invalid_image_data() {
+        // Minimal valid 1x1 GIF89a.
+        const GIF: &[u8] = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff\
+            !\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;";
+
+        let result = approximate(request(GIF.to_vec(), OutputFormat::Svg), Execution::new());
+
+        match result {
+            Err(error @ ApproximateError::InvalidImage { .. }) => {
+                assert!(error.source().is_some(), "{error:?}");
+            }
+            other => panic!("expected invalid image error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_bytes_return_validation_error() {
         let invalid = approximate(
-            request(InputSource::Bytes(vec![0, 1, 2, 3]), OutputFormat::Svg),
-            None,
-            &cancelled,
+            request(vec![0, 1, 2, 3], OutputFormat::Svg),
+            Execution::new(),
         );
-        assert!(matches!(invalid, Err(ApproximateError::Validation(_))));
-
-        let missing = approximate(
-            request(
-                InputSource::Path(std::path::Path::new("/definitely/not/here.png").to_path_buf()),
-                OutputFormat::Svg,
-            ),
-            None,
-            &cancelled,
-        );
-        assert!(matches!(missing, Err(ApproximateError::NotFound(_))));
+        assert!(matches!(
+            invalid,
+            Err(ApproximateError::InvalidImage {
+                source: Some(_),
+                ..
+            })
+        ));
     }
 
     #[test]
     fn invalid_options_are_rejected() {
-        let cancelled = AtomicBool::new(false);
         let mut options = render_options();
         options.count = 0;
 
         let result = approximate(
             ApproximateRequest {
-                input: InputSource::Bytes(fixture_bytes()),
+                input: fixture_bytes(),
                 output: OutputFormat::Svg,
                 render: options,
             },
-            None,
-            &cancelled,
+            Execution::new(),
         );
-        assert!(matches!(result, Err(ApproximateError::Validation(_))));
+        assert!(matches!(
+            result,
+            Err(ApproximateError::InvalidOption {
+                option: RenderOption::Count
+            })
+        ));
     }
 
     #[test]
     fn resize_input_zero_is_rejected() {
-        let cancelled = AtomicBool::new(false);
         let mut options = render_options();
         options.resize_input = 0;
 
         let result = approximate(
             ApproximateRequest {
-                input: InputSource::Bytes(fixture_bytes()),
+                input: fixture_bytes(),
                 output: OutputFormat::Svg,
                 render: options,
             },
-            None,
-            &cancelled,
+            Execution::new(),
         );
 
-        assert!(matches!(result, Err(ApproximateError::Validation(_))));
+        assert!(matches!(
+            result,
+            Err(ApproximateError::InvalidOption {
+                option: RenderOption::ResizeInput
+            })
+        ));
     }
 
     #[test]
     fn progress_fires_once_per_step_and_steps_increase() {
-        let cancelled = AtomicBool::new(false);
-        let steps = Arc::new(Mutex::new(Vec::new()));
-        let captured = Arc::clone(&steps);
-        let callback = move |info: ProgressInfo| {
-            captured.lock().expect("lock").push((info.step, info.total));
-        };
+        let mut steps = Vec::new();
+        let mut on_progress = |info: ProgressInfo| steps.push((info.step, info.total));
 
         let result = approximate(
-            request(InputSource::Bytes(fixture_bytes()), OutputFormat::Svg),
-            Some(&callback),
-            &cancelled,
+            request(fixture_bytes(), OutputFormat::Svg),
+            Execution::new().progress(&mut on_progress),
         );
 
         assert!(result.is_ok());
-        let steps = steps.lock().expect("lock");
-        assert_eq!(steps.len(), 3);
-        assert_eq!(steps.as_slice(), &[(1, 3), (2, 3), (3, 3)]);
+        assert_eq!(steps, [(1, 3), (2, 3), (3, 3)]);
     }
 
     #[test]
     fn cancellation_between_steps_returns_abort_error() {
-        let cancelled = std::sync::Arc::new(AtomicBool::new(false));
-        let fired = Arc::new(Mutex::new(Vec::new()));
-        let captured = Arc::clone(&fired);
-        let cancelled_for_callback = Arc::clone(&cancelled);
-        let callback = move |info: ProgressInfo| {
-            captured.lock().expect("lock").push(info.step);
+        let token = CancellationToken::new();
+        let canceller = token.clone();
+        let mut fired = Vec::new();
+        let mut on_progress = |info: ProgressInfo| {
+            fired.push(info.step);
             if info.step == 1 {
-                cancelled_for_callback.store(true, Ordering::SeqCst);
+                canceller.cancel();
             }
         };
 
         let result = approximate(
-            request(InputSource::Bytes(fixture_bytes()), OutputFormat::Svg),
-            Some(&callback),
-            cancelled.as_ref(),
+            request(fixture_bytes(), OutputFormat::Svg),
+            Execution::new()
+                .progress(&mut on_progress)
+                .cancellation(&token),
         );
 
         assert!(matches!(result, Err(ApproximateError::Aborted)));
-        let fired = fired.lock().expect("lock");
-        assert_eq!(fired.as_slice(), &[1]);
+        assert_eq!(fired, [1]);
+    }
+
+    #[test]
+    fn cancelled_token_aborts_before_the_first_step() {
+        let token = CancellationToken::new();
+        token.cancel();
+        let mut fired = Vec::new();
+        let mut on_progress = |info: ProgressInfo| fired.push(info.step);
+
+        let result = approximate(
+            request(fixture_bytes(), OutputFormat::Svg),
+            Execution::new()
+                .progress(&mut on_progress)
+                .cancellation(&token),
+        );
+
+        assert!(matches!(result, Err(ApproximateError::Aborted)));
+        assert!(fired.is_empty());
+    }
+
+    #[test]
+    fn cancelled_token_aborts_before_decoding() {
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let result = approximate(
+            request(vec![0, 1, 2, 3], OutputFormat::Svg),
+            Execution::new().cancellation(&token),
+        );
+
+        assert!(matches!(result, Err(ApproximateError::Aborted)));
+    }
+
+    #[test]
+    fn cancellation_after_the_last_step_aborts_before_encoding() {
+        let token = CancellationToken::new();
+        let canceller = token.clone();
+        let mut on_progress = |info: ProgressInfo| {
+            if info.step == info.total {
+                canceller.cancel();
+            }
+        };
+
+        let result = approximate(
+            request(fixture_bytes(), OutputFormat::Png),
+            Execution::new()
+                .progress(&mut on_progress)
+                .cancellation(&token),
+        );
+
+        assert!(matches!(result, Err(ApproximateError::Aborted)));
     }
 
     #[test]
     fn raster_outputs_report_rendered_dimensions() {
-        let cancelled = AtomicBool::new(false);
         let result = approximate(
-            request(InputSource::Bytes(fixture_bytes()), OutputFormat::Png),
-            None,
-            &cancelled,
+            request(fixture_bytes(), OutputFormat::Png),
+            Execution::new(),
         )
         .expect("png render");
 
         match result {
-            ApproximateResult::Raster {
-                format,
-                data,
+            ApproximateResult::Png {
+                ref data,
                 width,
                 height,
             } => {
-                assert_eq!(format, OutputFormat::Png);
-                assert!(!data.is_empty());
+                assert_eq!(result.format(), OutputFormat::Png);
+                assert_eq!(result.mime_type(), "image/png");
+                assert!(data.starts_with(b"\x89PNG"));
                 assert!(width > 0);
                 assert!(height > 0);
             }
@@ -777,25 +981,53 @@ mod tests {
     }
 
     #[test]
+    fn svg_and_png_map_the_same_canvas_onto_the_same_size() {
+        let svg = approximate(
+            request(fixture_bytes(), OutputFormat::Svg),
+            Execution::new(),
+        )
+        .expect("svg render");
+        let png = approximate(
+            request(fixture_bytes(), OutputFormat::Png),
+            Execution::new(),
+        )
+        .expect("png render");
+
+        // The 12 x 8 fixture works at 8 x 5 and exports at 16 x 10.
+        let ApproximateResult::Svg { data, .. } = &svg else {
+            panic!("expected svg output");
+        };
+        assert!(data.starts_with(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"10\" \
+             viewBox=\"0 0 8 5\">"
+        ));
+        let ApproximateResult::Png { data, .. } = &png else {
+            panic!("expected png output");
+        };
+        let decoded = image::load_from_memory(data).expect("decode png");
+        assert_eq!(decoded.color(), image::ColorType::Rgb8);
+        assert_eq!((decoded.width(), decoded.height()), (16, 10));
+        assert_eq!((svg.width(), svg.height()), (16, 10));
+        assert_eq!((png.width(), png.height()), (16, 10));
+    }
+
+    #[test]
     fn any_shape_render_does_not_panic_in_debug() {
-        let cancelled = AtomicBool::new(false);
         let render = RenderOptions {
             count: 1,
             seed: Some(1),
             resize_input: 32,
             output_size: 32,
-            workers: Some(4),
             ..RenderOptions::default()
         };
 
         let result = approximate(
             ApproximateRequest {
-                input: InputSource::Bytes(fixture_bytes()),
+                input: fixture_bytes(),
                 output: OutputFormat::Svg,
                 render,
             },
-            None,
-            &cancelled,
+            Execution::new(),
         );
 
         assert!(
@@ -805,36 +1037,394 @@ mod tests {
     }
 
     #[test]
-    fn prepare_can_emit_multiple_formats_without_rerunning() {
-        let cancelled = AtomicBool::new(false);
-        let mut run = prepare(
-            RenderRequest {
-                input: InputSource::Bytes(fixture_bytes()),
-                render: render_options(),
+    fn parse_background_rejects_alpha_forms() {
+        for value in ["#1234", "1234", "#11223344", "11223344"] {
+            assert_eq!(
+                value.parse::<BackgroundOption>(),
+                Err(ParseError::new(
+                    "background must be auto or an opaque hex color (RGB or RRGGBB)"
+                )),
+                "{value}"
+            );
+        }
+        assert_eq!(
+            "#abc".parse(),
+            Ok(BackgroundOption::Color(Color::new(0xAA, 0xBB, 0xCC, 0xFF)))
+        );
+    }
+
+    #[test]
+    fn parse_background_rejects_multibyte_input_without_panicking() {
+        for value in ["a€bc", "#a€bc", "€", "aé"] {
+            assert!(value.parse::<BackgroundOption>().is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn translucent_explicit_background_is_rejected() {
+        let mut options = render_options();
+        options.background = BackgroundOption::Color(Color::new(10, 20, 30, 128));
+
+        let result = approximate(
+            ApproximateRequest {
+                input: fixture_bytes(),
+                output: OutputFormat::Svg,
+                render: options,
             },
-            None,
-            &cancelled,
+            Execution::new(),
+        );
+
+        assert!(matches!(
+            result,
+            Err(ApproximateError::InvalidOption {
+                option: RenderOption::Background
+            })
+        ));
+    }
+
+    fn png_bytes(image: RgbaImage) -> Vec<u8> {
+        let mut out = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(image)
+            .write_to(&mut out, ImageFormat::Png)
+            .expect("encode png");
+        out.into_inner()
+    }
+
+    #[test]
+    fn opaque_input_target_and_background_are_unchanged() {
+        // Larger than resize_input so the resampling path runs too.
+        let image = DynamicImage::ImageRgb8(image::RgbImage::from_fn(40, 24, |x, y| {
+            image::Rgb([(x * 6) as u8, (y * 10) as u8, ((x * y) % 256) as u8])
+        }));
+        let expected_target = thumbnail(image.clone(), 16);
+        let pixels = image.to_rgba8();
+        let pixel_count = u64::from(pixels.width()) * u64::from(pixels.height());
+        let (mut r_sum, mut g_sum, mut b_sum) = (0u64, 0u64, 0u64);
+        for pixel in pixels.pixels() {
+            r_sum += u64::from(pixel[0]);
+            g_sum += u64::from(pixel[1]);
+            b_sum += u64::from(pixel[2]);
+        }
+        let expected_background = Color::new(
+            (r_sum / pixel_count) as u8,
+            (g_sum / pixel_count) as u8,
+            (b_sum / pixel_count) as u8,
+            255,
+        );
+
+        let (target, background) = prepare_target(image, BackgroundOption::Auto, 16);
+
+        assert_eq!(target, expected_target);
+        assert_eq!(background, expected_background);
+    }
+
+    #[test]
+    fn transparent_input_is_flattened_onto_explicit_background() {
+        let image = RgbaImage::from_fn(2, 1, |x, _| {
+            if x == 0 {
+                Rgba([200, 100, 0, 0])
+            } else {
+                Rgba([200, 100, 0, 128])
+            }
+        });
+        let background = Color::new(0, 50, 255, 255);
+
+        let (target, resolved) = prepare_target(
+            DynamicImage::ImageRgba8(image),
+            BackgroundOption::Color(background),
+            16,
+        );
+
+        assert_eq!(resolved, background);
+        assert_eq!(target.get_pixel(0, 0), &Rgb([0, 50, 255]));
+        // (c*a + bg*(255-a) + 127) / 255 with a = 128.
+        assert_eq!(target.get_pixel(1, 0), &Rgb([100, 75, 127]));
+    }
+
+    #[test]
+    fn auto_background_is_alpha_weighted_mean() {
+        // Half-transparent red next to fully transparent green.
+        let image = RgbaImage::from_fn(2, 2, |x, _| {
+            if x == 0 {
+                Rgba([255, 0, 0, 128])
+            } else {
+                Rgba([0, 255, 0, 0])
+            }
+        });
+
+        let (target, background) =
+            prepare_target(DynamicImage::ImageRgba8(image), BackgroundOption::Auto, 16);
+
+        assert_eq!(background, Color::new(255, 0, 0, 255));
+        assert!(target.pixels().all(|pixel| pixel == &Rgb([255, 0, 0])));
+    }
+
+    #[test]
+    fn fully_transparent_input_uses_white_auto_background() {
+        let image = RgbaImage::from_pixel(3, 3, Rgba([10, 20, 30, 0]));
+
+        let (target, background) =
+            prepare_target(DynamicImage::ImageRgba8(image), BackgroundOption::Auto, 16);
+
+        assert_eq!(background, Color::new(255, 255, 255, 255));
+        assert!(target.pixels().all(|pixel| pixel == &Rgb([255, 255, 255])));
+    }
+
+    #[test]
+    fn transparent_input_with_explicit_background_renders_opaque_png() {
+        let input = png_bytes(RgbaImage::from_fn(12, 8, |x, y| {
+            Rgba([(x * 20) as u8, (y * 30) as u8, 90, ((x + y) * 12) as u8])
+        }));
+        let mut options = render_options();
+        options.background = "#336699".parse().expect("background");
+
+        let result = approximate(
+            ApproximateRequest {
+                input,
+                output: OutputFormat::Png,
+                render: options,
+            },
+            Execution::new(),
         )
-        .expect("prepare should succeed");
+        .expect("png render");
 
-        let svg = run.result(OutputFormat::Svg).expect("svg result");
-        let png = run.result(OutputFormat::Png).expect("png result");
-        let gif = run.result(OutputFormat::Gif).expect("gif result");
+        let ApproximateResult::Png { data, .. } = result else {
+            panic!("expected png output");
+        };
+        let decoded = image::load_from_memory(&data)
+            .expect("decode png")
+            .to_rgba8();
+        assert!(decoded.pixels().all(|pixel| pixel[3] == 255));
+    }
 
-        assert!(matches!(svg, ApproximateResult::Svg { .. }));
-        assert!(matches!(
-            png,
-            ApproximateResult::Raster {
-                format: OutputFormat::Png,
-                ..
+    fn solid_png(width: u32, height: u32) -> Vec<u8> {
+        png_bytes(RgbaImage::from_pixel(
+            width,
+            height,
+            Rgba([40, 90, 200, 255]),
+        ))
+    }
+
+    fn render_bytes(input: Vec<u8>) -> Result<ApproximateResult, ApproximateError> {
+        approximate(request(input, OutputFormat::Svg), Execution::new())
+    }
+
+    #[test]
+    fn inputs_below_two_by_two_are_rejected_as_invalid_images() {
+        for (width, height) in [(1, 1), (1000, 1), (1, 1000)] {
+            match render_bytes(solid_png(width, height)) {
+                Err(error @ ApproximateError::InvalidImage { source: None, .. }) => {
+                    assert_eq!(
+                        error.to_string(),
+                        format!(
+                            "invalid image data: the image is {width}x{height} pixels; \
+                             both sides must be at least 2"
+                        )
+                    );
+                }
+                other => panic!("{width}x{height}: expected invalid image, got {other:?}"),
             }
-        ));
-        assert!(matches!(
-            gif,
-            ApproximateResult::Raster {
-                format: OutputFormat::Gif,
-                ..
+        }
+    }
+
+    #[test]
+    fn tiny_and_extreme_aspect_inputs_render() {
+        let mut render = render_options();
+        render.shape = ShapeKind::Any;
+        render.resize_input = 256;
+        for (width, height, view_box) in [
+            (2, 2, "0 0 2 2"),
+            (2000, 5, "0 0 256 2"),
+            (5, 2000, "0 0 2 256"),
+        ] {
+            let result = approximate(
+                ApproximateRequest {
+                    input: solid_png(width, height),
+                    output: OutputFormat::Svg,
+                    render,
+                },
+                Execution::new(),
+            )
+            .unwrap_or_else(|error| panic!("{width}x{height}: {error}"));
+
+            let ApproximateResult::Svg { data, .. } = result else {
+                panic!("expected svg output");
+            };
+            assert!(
+                data.contains(&format!("viewBox=\"{view_box}\"")),
+                "{width}x{height}: {data}"
+            );
+        }
+    }
+
+    #[test]
+    fn inputs_wider_than_the_decode_limit_are_rejected() {
+        let input = solid_png(MAX_INPUT_SIDE + 1, 2);
+
+        let result = render_bytes(input);
+
+        match result {
+            Err(error @ ApproximateError::InvalidImage { .. }) => {
+                assert!(error.source().is_some(), "{error:?}");
             }
-        ));
+            other => panic!("expected invalid image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn option_bounds_are_enforced() {
+        type Setter = fn(&mut RenderOptions, u32);
+        let cases: [(Setter, RenderOption, RangeInclusive<u32>); 3] = [
+            (|r, v| r.count = v, RenderOption::Count, COUNT_RANGE),
+            (
+                |r, v| r.resize_input = v,
+                RenderOption::ResizeInput,
+                RESIZE_INPUT_RANGE,
+            ),
+            (
+                |r, v| r.output_size = v,
+                RenderOption::OutputSize,
+                OUTPUT_SIZE_RANGE,
+            ),
+        ];
+        for (set, option, range) in cases {
+            for value in [*range.start(), *range.end()] {
+                let mut render = render_options();
+                set(&mut render, value);
+                assert!(validate_options(&render).is_ok(), "{option} = {value}");
+            }
+            for value in [range.start() - 1, range.end() + 1, u32::MAX] {
+                let mut render = render_options();
+                set(&mut render, value);
+                assert!(
+                    matches!(
+                        validate_options(&render),
+                        Err(ApproximateError::InvalidOption { option: rejected }) if rejected == option
+                    ),
+                    "{option} = {value}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn requirements_name_the_accepted_values() {
+        // Every listed name parses back to the value that prints it.
+        let listed = |option: RenderOption| {
+            option
+                .requirement()
+                .strip_prefix("must be one of: ")
+                .expect("a list requirement")
+                .split(", ")
+                .collect::<Vec<_>>()
+        };
+        for name in listed(RenderOption::Shape) {
+            assert_eq!(name.parse::<ShapeKind>().expect(name).as_str(), name);
+        }
+        assert_eq!(listed(RenderOption::Shape).len(), 9);
+        for name in listed(RenderOption::Output) {
+            assert_eq!(name.parse::<OutputFormat>().expect(name).as_str(), name);
+        }
+        assert_eq!(listed(RenderOption::Output).len(), 2);
+        for (option, range) in [
+            (RenderOption::Count, COUNT_RANGE),
+            (RenderOption::ResizeInput, RESIZE_INPUT_RANGE),
+            (RenderOption::OutputSize, OUTPUT_SIZE_RANGE),
+        ] {
+            assert_eq!(
+                option.requirement(),
+                format!(
+                    "must be an integer from {} to {}",
+                    range.start(),
+                    range.end()
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn parse_errors_match_the_invalid_option_messages() {
+        let cases = [
+            (
+                "hexagon".parse::<ShapeKind>().unwrap_err(),
+                RenderOption::Shape,
+            ),
+            ("half".parse::<Alpha>().unwrap_err(), RenderOption::Alpha),
+            (
+                "#1234".parse::<BackgroundOption>().unwrap_err(),
+                RenderOption::Background,
+            ),
+            (
+                "gif".parse::<OutputFormat>().unwrap_err(),
+                RenderOption::Output,
+            ),
+        ];
+        for (parse_error, option) in cases {
+            assert_eq!(
+                parse_error.to_string(),
+                ApproximateError::invalid_option(option).to_string()
+            );
+        }
+    }
+
+    #[test]
+    fn set_number_accepts_exact_integers_in_range() {
+        let mut partial = PartialRenderOptions::default();
+        partial.set_number(RenderOption::Count, 100_000.0).unwrap();
+        partial.set_number(RenderOption::ResizeInput, 2.0).unwrap();
+        partial
+            .set_number(RenderOption::OutputSize, 8192.0)
+            .unwrap();
+        partial.set_number(RenderOption::Alpha, 255.0).unwrap();
+        partial
+            .set_number(RenderOption::Seed, MAX_SAFE_INTEGER)
+            .unwrap();
+
+        assert_eq!(partial.count, Some(100_000));
+        assert_eq!(partial.resize_input, Some(2));
+        assert_eq!(partial.output_size, Some(8192));
+        assert_eq!(partial.alpha, Some(fixed_alpha(255)));
+        assert_eq!(partial.seed, Some(9_007_199_254_740_991));
+    }
+
+    #[test]
+    fn set_number_rejects_values_that_would_wrap_or_truncate() {
+        let wrapping = 2_f64.powi(32) + 1.0;
+        let cases = [
+            (RenderOption::Count, wrapping),
+            (RenderOption::Count, 1e20),
+            (RenderOption::Count, -1.0),
+            (RenderOption::Count, 1.5),
+            (RenderOption::Count, f64::NAN),
+            (RenderOption::Count, f64::INFINITY),
+            (RenderOption::Count, 0.0),
+            (RenderOption::ResizeInput, 1.0),
+            (RenderOption::ResizeInput, wrapping + 15.0),
+            (RenderOption::OutputSize, 2_f64.powi(32) + 16.0),
+            (RenderOption::Alpha, 0.0),
+            (RenderOption::Alpha, 256.0),
+            (RenderOption::Alpha, wrapping + 127.0),
+            (RenderOption::Seed, -1.0),
+            (RenderOption::Seed, 0.5),
+            (RenderOption::Seed, MAX_SAFE_INTEGER + 1.0),
+            (RenderOption::Seed, 1e20),
+            (RenderOption::Shape, 1.0),
+        ];
+        for (option, value) in cases {
+            let mut partial = PartialRenderOptions::default();
+            let result = partial.set_number(option, value);
+            assert!(
+                matches!(
+                    result,
+                    Err(ApproximateError::InvalidOption { option: rejected }) if rejected == option
+                ),
+                "{option} = {value}: {result:?}"
+            );
+            assert_eq!(
+                partial,
+                PartialRenderOptions::default(),
+                "{option} = {value}"
+            );
+        }
     }
 }

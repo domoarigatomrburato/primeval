@@ -20,26 +20,27 @@ function parseRustToolchainVersion(source) {
   return match[1];
 }
 
-function parseWorkflowToolchainVersions(source, fileLabel) {
-  const matches = [...source.matchAll(/toolchain:\s*([0-9]+\.[0-9]+\.[0-9]+)/g)].map(
-    ([, version]) => version,
-  );
-  assert.ok(matches.length > 0, `missing toolchain entries in ${fileLabel}`);
-  return matches;
+function readWorkflows() {
+  const dir = path.join(process.cwd(), ".github", "workflows");
+  return fs
+    .readdirSync(dir)
+    .filter((name) => name.endsWith(".yml"))
+    .sort()
+    .map((name) => ({
+      label: `.github/workflows/${name}`,
+      source: fs.readFileSync(path.join(dir, name), "utf8"),
+    }));
 }
 
 test("optional dependencies are derived from napi targets", () => {
   assert.deepEqual(
-    optionalDependencyNamesForTargets(
-      "@aleburato/primeval",
-      [
-        "aarch64-apple-darwin",
-        "x86_64-apple-darwin",
-        "aarch64-unknown-linux-gnu",
-        "x86_64-unknown-linux-gnu",
-        "x86_64-pc-windows-msvc",
-      ],
-    ),
+    optionalDependencyNamesForTargets("@aleburato/primeval", [
+      "aarch64-apple-darwin",
+      "x86_64-apple-darwin",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-unknown-linux-gnu",
+      "x86_64-pc-windows-msvc",
+    ]),
     [
       "@aleburato/primeval-darwin-arm64",
       "@aleburato/primeval-darwin-x64",
@@ -56,9 +57,76 @@ test("release matrix runners are derived from napi targets", () => {
       {
         runner: "ubuntu-latest",
         target: "x86_64-unknown-linux-gnu",
+        "napi-cross": true,
       },
     ],
   });
+});
+
+test("every release target builds and smoke tests on a runner of its own platform", () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8"));
+  const { include } = releaseMatrixForTargets(pkg.napi.targets);
+  assert.deepEqual(Object.fromEntries(include.map(({ target, runner }) => [target, runner])), {
+    "aarch64-apple-darwin": "macos-15",
+    // Intel runner, so the x64 addon runs natively rather than under Rosetta.
+    "x86_64-apple-darwin": "macos-15-intel",
+    "aarch64-unknown-linux-gnu": "ubuntu-24.04-arm",
+    "x86_64-unknown-linux-gnu": "ubuntu-latest",
+    "x86_64-pc-windows-msvc": "windows-latest",
+  });
+  // Linux GNU builds link against the glibc 2.17 sysroot of the napi-rs cross toolchain.
+  assert.deepEqual(
+    include.filter((entry) => entry["napi-cross"]).map(({ target }) => target),
+    ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"],
+  );
+});
+
+test("release workflow gates, smoke tests, and publishes re-runnably", () => {
+  const workflow = fs.readFileSync(
+    path.join(process.cwd(), ".github", "workflows", "napi-prebuilds.yml"),
+    "utf8",
+  );
+  const step = (name) => {
+    const index = workflow.indexOf(`- name: ${name}\n`);
+    assert.notEqual(index, -1, `missing step: ${name}`);
+    return index;
+  };
+
+  assert.match(workflow, /--use-napi-cross/);
+  assert.match(workflow, /rustup component add llvm-tools/);
+  assert.ok(step("Build native addon") < step("Check artifact ISA and glibc"));
+  assert.ok(step("Check artifact ISA and glibc") < step("Smoke test the addon"));
+  assert.ok(step("Smoke test the addon") < step("Upload artifacts"));
+  assert.match(workflow, /node scripts\/check-artifact\.mjs "\$TARGET"/);
+  assert.match(workflow, /node scripts\/smoke-test-addon\.mjs "\$TARGET"/);
+
+  assert.ok(step("Verify native package completeness") < step("Publish packages"));
+  assert.ok(step("Publish packages") < step("Verify published packages"));
+  assert.match(workflow, /node scripts\/release-packages\.mjs publish npm "\$TAG"/);
+  assert.match(workflow, /node scripts\/release-packages\.mjs verify "\$TAG"/);
+  assert.doesNotMatch(workflow, /napi pre-publish/);
+  assert.doesNotMatch(workflow, /^\s*run: npm publish/m);
+
+  assert.match(workflow, /gh release view "\$TAG"/);
+  assert.match(workflow, /gh release create "\$TAG"[^\n]*--verify-tag[^\n]*--generate-notes/);
+  assert.doesNotMatch(workflow, /cache: npm|rust-cache|actions\/cache/);
+});
+
+test("rust checks also run on arm64 macOS so the NEON paths are tested", () => {
+  const qualityWorkflow = fs.readFileSync(
+    path.join(process.cwd(), ".github", "workflows", "quality.yml"),
+    "utf8",
+  );
+  const rustChecks = qualityWorkflow.match(/^ {2}rust-checks:\n((?:(?: {4,}.*)?\n)+)/m);
+  assert.ok(rustChecks, "missing rust-checks job");
+  const runners = rustChecks[1].match(/^ {8}runner: \[([^\]]*)\]\s*$/m);
+  assert.ok(runners, "missing runner matrix in rust-checks job");
+  assert.deepEqual(
+    runners[1].split(",").map((runner) => runner.trim()),
+    ["ubuntu-latest", "macos-15"],
+  );
+  assert.match(rustChecks[1], /runs-on: \$\{\{ matrix\.runner \}\}/);
+  assert.match(rustChecks[1], /run: npm run verify:rust/);
 });
 
 test("package metadata validation rejects drift between targets and optional dependencies", () => {
@@ -182,28 +250,39 @@ test("package scripts regenerate the binding loader before packing", () => {
   assert.match(pkg.scripts["build:node"], /generate:binding/);
 });
 
-test("rust toolchain pin matches workflows and contributing docs", () => {
+test("rust-toolchain.toml is the only rust toolchain pin", () => {
   const rustToolchain = fs.readFileSync(path.join(process.cwd(), "rust-toolchain.toml"), "utf8");
-  const qualityWorkflow = fs.readFileSync(
-    path.join(process.cwd(), ".github", "workflows", "quality.yml"),
-    "utf8",
-  );
-  const releaseWorkflow = fs.readFileSync(
-    path.join(process.cwd(), ".github", "workflows", "napi-prebuilds.yml"),
-    "utf8",
-  );
   const contributing = fs.readFileSync(path.join(process.cwd(), "CONTRIBUTING.md"), "utf8");
+  const workflows = readWorkflows();
+  assert.ok(workflows.length > 0, "missing workflows");
+
+  for (const { label, source } of workflows) {
+    assert.doesNotMatch(source, /dtolnay\/rust-toolchain/, `${label} uses dtolnay/rust-toolchain`);
+    assert.doesNotMatch(source, /^\s*toolchain:/m, `${label} pins a toolchain`);
+  }
 
   const version = parseRustToolchainVersion(rustToolchain);
-  assert.deepEqual(
-    [...new Set(parseWorkflowToolchainVersions(qualityWorkflow, ".github/workflows/quality.yml"))],
-    [version],
-  );
-  assert.deepEqual(
-    [...new Set(parseWorkflowToolchainVersions(releaseWorkflow, ".github/workflows/napi-prebuilds.yml"))],
-    [version],
-  );
-  assert.match(contributing, new RegExp("Rust stable `" + version.replace(/\./g, "\\.") + "`"));
+  assert.match(contributing, new RegExp(`Rust stable \`${version.replace(/\./g, "\\.")}\``));
+});
+
+test("workflow actions are pinned by full sha or digest with a version comment", () => {
+  const workflows = readWorkflows();
+  assert.ok(workflows.length > 0, "missing workflows");
+
+  const pinned = [
+    /^\.\/\S+(?: # zizmor: ignore\[self-repository\])?$/,
+    /^[\w.-]+\/[\w./-]+@[0-9a-f]{40} # v\d+\.\d+\.\d+$/,
+    /^docker:\/\/\S+@sha256:[0-9a-f]{64} # \S+$/,
+  ];
+  for (const { label, source } of workflows) {
+    const uses = [...source.matchAll(/^\s*(?:-\s+)?uses:\s*(.+?)\s*$/gm)].map(([, ref]) => ref);
+    for (const ref of uses) {
+      assert.ok(
+        pinned.some((pattern) => pattern.test(ref)),
+        `${label}: unpinned uses: ${ref}`,
+      );
+    }
+  }
 });
 
 test("package exposes canonical verify scripts and CI uses the split workflow", () => {
@@ -222,8 +301,14 @@ test("package exposes canonical verify scripts and CI uses the split workflow", 
 
   assert.match(pkg.scripts["verify:rust"], /cargo fmt --check/);
   assert.match(pkg.scripts["verify:rust"], /cargo clippy --all-targets -- -D warnings/);
+  assert.match(
+    pkg.scripts["verify:rust"],
+    /cargo clippy --all-targets --all-features -- -D warnings/,
+  );
   assert.match(pkg.scripts["verify:rust"], /cargo test/);
 
+  assert.equal(pkg.scripts.lint, "biome check --error-on-warnings");
+  assert.match(pkg.scripts["verify:node"], /^npm run lint && /);
   assert.match(pkg.scripts["verify:node"], /npm run check:napi-targets/);
   assert.match(pkg.scripts["verify:node"], /npm run typecheck/);
   assert.match(pkg.scripts["verify:node"], /npm run build/);
@@ -243,6 +328,41 @@ test("package exposes canonical verify scripts and CI uses the split workflow", 
   assert.match(qualityWorkflow, /npm run verify:pack/);
   assert.match(contributing, /npm run verify/);
   assert.match(releasing, /npm run verify/);
+});
+
+test("quality workflow runs once per pull request push", () => {
+  const qualityWorkflow = fs.readFileSync(
+    path.join(process.cwd(), ".github", "workflows", "quality.yml"),
+    "utf8",
+  );
+  const triggers = qualityWorkflow.match(/^on:\n((?:[ \t]+.*\n)+)/m);
+  assert.ok(triggers, "missing on: block in .github/workflows/quality.yml");
+
+  assert.match(triggers[1], /^ {2}pull_request:\s*$/m);
+  assert.match(triggers[1], /^ {2}workflow_call:\s*$/m);
+  assert.match(
+    triggers[1],
+    /^ {2}push:\n {4}branches: \[main\]\n/m,
+    "push must be limited to main, or PR branches and release tags run the workflow twice",
+  );
+});
+
+test("node support window matches engines and the CI matrix", () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8"));
+  assert.equal(pkg.engines?.node, ">=22.12", "require(esm) in the loader needs Node 22.12+");
+
+  const qualityWorkflow = fs.readFileSync(
+    path.join(process.cwd(), ".github", "workflows", "quality.yml"),
+    "utf8",
+  );
+  const packageChecks = qualityWorkflow.match(/^ {2}package-checks:\n((?:(?: {4,}.*)?\n)+)/m);
+  assert.ok(packageChecks, "missing package-checks job in .github/workflows/quality.yml");
+  const matrix = packageChecks[1].match(/^ {8}node-version: \[([^\]]*)\]\s*$/m);
+  assert.ok(matrix, "missing node-version matrix in package-checks job");
+  assert.deepEqual(
+    matrix[1].split(",").map((version) => version.trim()),
+    ["22", "24", "26"],
+  );
 });
 
 test("typescript build succeeds without generated binding files", () => {
@@ -284,10 +404,7 @@ test("artifact verification accepts matching native payloads", () => {
   const artifactsDir = fs.mkdtempSync(path.join(os.tmpdir(), "primeval-artifacts-"));
   try {
     fs.writeFileSync(
-      path.join(
-        artifactsDir,
-        "aleburato-primeval-linux-x64-gnu.primeval-node.linux-x64-gnu.node",
-      ),
+      path.join(artifactsDir, "aleburato-primeval-linux-x64-gnu.primeval-node.linux-x64-gnu.node"),
       Buffer.alloc(0),
     );
 
@@ -346,10 +463,7 @@ test("artifact verification accepts napi package directories", () => {
         version: "0.1.0",
       }),
     );
-    fs.writeFileSync(
-      path.join(packageDir, "primeval-node.linux-x64-gnu.node"),
-      Buffer.alloc(0),
-    );
+    fs.writeFileSync(path.join(packageDir, "primeval-node.linux-x64-gnu.node"), Buffer.alloc(0));
 
     verifyArtifacts(artifactsDir, {
       name: "@aleburato/primeval",
@@ -379,10 +493,7 @@ test("artifact verification rejects wrong target payloads", () => {
         version: "0.1.0",
       }),
     );
-    fs.writeFileSync(
-      path.join(packageDir, "primeval-node.win32-x64-msvc.node"),
-      Buffer.alloc(0),
-    );
+    fs.writeFileSync(path.join(packageDir, "primeval-node.win32-x64-msvc.node"), Buffer.alloc(0));
 
     assert.throws(
       () =>

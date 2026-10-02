@@ -3,7 +3,27 @@
   "version": "0.1.1",
   "private": false,
   "type": "module",
-  "description": "TypeScript-first Node package for primeval image approximation.",
+  "description": "Approximate images with geometric shapes (triangles, ellipses, curves, polygons) and export SVG or PNG. Native Rust engine with a Node API and CLI.",
+  "keywords": [
+    "image",
+    "svg",
+    "png",
+    "primitive",
+    "geometric",
+    "shapes",
+    "approximation",
+    "placeholder",
+    "lqip",
+    "generative-art",
+    "rust",
+    "napi",
+    "cli"
+  ],
+  "homepage": "https://github.com/domoarigatomrburato/primeval#readme",
+  "bugs": {
+    "url": "https://github.com/domoarigatomrburato/primeval/issues"
+  },
+  "author": "Alessandro Burato",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -24,10 +44,12 @@
     "primeval": "dist/cli.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.12"
   },
   "files": [
-    "dist",
+    "dist/*.js",
+    "dist/index.d.ts",
+    "dist/errors.d.ts",
     "binding.js",
     "README.md",
     "LICENSE"
@@ -39,14 +61,16 @@
     "build:node": "napi build -p primeval-node --release --platform --no-js --dts binding.d.ts --output-dir . && npm run generate:binding",
     "check:napi-targets": "node scripts/napi-targets.mjs check-package",
     "bump:version": "node scripts/napi-targets.mjs bump-version",
-    "verify:rust": "cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test",
-    "verify:node": "npm run check:napi-targets && npm run typecheck && npm run build && npm run build:node && npm test && npm run test:tooling",
+    "verify:rust": "cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo clippy --all-targets --all-features -- -D warnings && cargo doc --no-deps --workspace && cargo test",
+    "verify:node": "npm run lint && npm run check:napi-targets && npm run typecheck && npm run build && npm run build:node && npm test && npm run test:tooling",
     "verify:pack": "npm run prepare:package && npm pack --dry-run --ignore-scripts",
     "verify": "npm run verify:rust && npm run verify:node && npm run verify:pack",
     "typecheck": "tsc --noEmit",
-    "test": "node --test test/index.test.js test/contracts.test.js test/native.test.js test/cli.test.js",
+    "test": "node --test test/index.test.js test/contracts.test.js test/native.test.js test/cli.test.js test/readme.test.js test/types.test.js",
     "test:tooling": "node --test test/tooling/*.test.js",
-    "prepack": "npm run prepare:package"
+    "prepack": "npm run prepare:package",
+    "lint": "biome check --error-on-warnings",
+    "format": "biome check --write"
   },
   "optionalDependencies": {
     "@aleburato/primeval-darwin-arm64": "0.1.1",
@@ -66,8 +90,9 @@
     ]
   },
   "devDependencies": {
-    "@napi-rs/cli": "^3.5.1",
-    "@types/node": "^22.0.0",
-    "typescript": "^5.5.4"
+    "@biomejs/biome": "2.5.15",
+    "@napi-rs/cli": "^3.10.6",
+    "@types/node": "^22.20.4",
+    "typescript": "^7.0.2"
   }
 }

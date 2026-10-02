@@ -1,7 +1,18 @@
-/// A contiguous RGBA pixel buffer with no row padding.
+/// The smallest width and height of a [`Buffer`] built through the public
+/// API: the engine's search needs a canvas of at least 2 x 2 pixels, so a
+/// [`Model`](crate::Model) cannot be created for anything smaller.
+const MIN_PUBLIC_SIDE: u32 = 2;
+
+/// Bytes per pixel: the engine works in opaque RGB, with no alpha channel.
+pub(crate) const BYTES_PER_PIXEL: usize = 3;
+
+/// A contiguous, opaque RGB pixel buffer with no row padding.
 ///
-/// Pixels are stored in row-major order as `[R, G, B, A]` quads.
-/// The total byte length is always exactly `width * height * 4`.
+/// Pixels are stored in row-major order as `[R, G, B]` triples.
+/// The total byte length is always exactly `width * height * 3`; every
+/// constructor checks this with a hard assertion or rejects the input, and the
+/// unsafe NEON scoring kernels rely on it. Buffers built through the public API
+/// ([`Buffer::from_rgb`]) are also at least 2 x 2 pixels.
 #[derive(Clone, Debug)]
 pub struct Buffer {
     width: u32,
@@ -14,30 +25,35 @@ impl Buffer {
     ///
     /// # Panics
     ///
-    /// Panics if `width * height * 4` overflows `usize`.
+    /// Panics if `width * height * 3` overflows `usize`.
+    #[cfg(test)]
     #[must_use]
-    pub fn new(width: u32, height: u32) -> Self {
+    pub(crate) fn new(width: u32, height: u32) -> Self {
         let len = pixel_byte_len(width, height);
-        Self {
-            width,
-            height,
-            pixels: vec![0u8; len],
-        }
+        Self::from_parts(width, height, vec![0u8; len])
     }
 
-    /// Creates a buffer filled with a single color.
+    /// Creates a buffer filled with the RGB channels of a single color; its
+    /// alpha is ignored.
     ///
     /// # Panics
     ///
-    /// Panics if `width * height * 4` overflows `usize`.
+    /// Panics if `width * height * 3` overflows `usize`.
     #[must_use]
-    pub fn new_from_color(width: u32, height: u32, color: crate::Color) -> Self {
+    pub(crate) fn new_from_color(width: u32, height: u32, color: crate::Color) -> Self {
         let len = pixel_byte_len(width, height);
-        let mut pixels = Vec::with_capacity(len);
-        let pixel = [color.r, color.g, color.b, color.a];
-        for _ in 0..(width as usize * height as usize) {
-            pixels.extend_from_slice(&pixel);
-        }
+        let pixels = [color.r, color.g, color.b].repeat(len / BYTES_PER_PIXEL);
+        Self::from_parts(width, height, pixels)
+    }
+
+    /// Assembles a buffer, asserting the length invariant
+    /// `pixels.len() == width * height * 3` that the NEON kernels rely on.
+    fn from_parts(width: u32, height: u32, pixels: Vec<u8>) -> Self {
+        assert_eq!(
+            pixels.len(),
+            pixel_byte_len(width, height),
+            "buffer pixel length must be width * height * 3"
+        );
         Self {
             width,
             height,
@@ -62,13 +78,13 @@ impl Buffer {
     /// Returns a shared reference to the raw pixel bytes.
     #[must_use]
     #[inline]
-    pub fn pixels(&self) -> &[u8] {
+    pub(crate) fn pixels(&self) -> &[u8] {
         &self.pixels
     }
 
     /// Returns a mutable reference to the raw pixel bytes.
     #[inline]
-    pub fn pixels_mut(&mut self) -> &mut [u8] {
+    pub(crate) fn pixels_mut(&mut self) -> &mut [u8] {
         &mut self.pixels
     }
 
@@ -78,77 +94,27 @@ impl Buffer {
     /// ensuring `x` and `y` are within the buffer dimensions.
     #[must_use]
     #[inline]
-    pub fn pix_offset(&self, x: i32, y: i32) -> usize {
-        (y as usize * self.width as usize + x as usize) * 4
+    pub(crate) fn pix_offset(&self, x: i32, y: i32) -> usize {
+        (y as usize * self.width as usize + x as usize) * BYTES_PER_PIXEL
     }
 
-    /// Copies all pixels from `other` into `self`.
+    /// Creates a buffer from raw row-major RGB bytes, three per pixel.
     ///
-    /// # Panics
+    /// The engine works in opaque RGB: composite any transparent image onto
+    /// an opaque background before building its buffer.
     ///
-    /// Panics if the dimensions of `self` and `other` differ.
-    pub fn copy_from(&mut self, other: &Buffer) {
-        assert_eq!(
-            self.width, other.width,
-            "copy_from: width mismatch ({} vs {})",
-            self.width, other.width
-        );
-        assert_eq!(
-            self.height, other.height,
-            "copy_from: height mismatch ({} vs {})",
-            self.height, other.height
-        );
-        self.pixels.copy_from_slice(&other.pixels);
-    }
-
-    /// Creates a buffer from an `image::RgbaImage`.
-    ///
-    /// The resulting buffer has identical dimensions and pixel data.
+    /// Returns `None` unless both sides are at least 2 pixels (the smallest
+    /// canvas the engine supports) and `pixels.len()` is exactly
+    /// `width * height * 3`.
     #[must_use]
-    pub fn from_image(img: &image::RgbaImage) -> Self {
-        let width = img.width();
-        let height = img.height();
-        let pixels = img.as_raw().clone();
-        debug_assert_eq!(pixels.len(), pixel_byte_len(width, height));
-        Self {
-            width,
-            height,
-            pixels,
+    pub fn from_rgb(width: u32, height: u32, pixels: Vec<u8>) -> Option<Self> {
+        if width < MIN_PUBLIC_SIDE || height < MIN_PUBLIC_SIDE {
+            return None;
         }
-    }
-
-    /// Converts this buffer to an `image::RgbaImage`.
-    #[must_use]
-    pub fn to_image(&self) -> image::RgbaImage {
-        image::RgbaImage::from_raw(self.width, self.height, self.pixels.clone())
-            .expect("pixel data length matches width * height * 4")
-    }
-
-    /// Computes the average color of all pixels in the buffer.
-    ///
-    /// Alpha is always set to 255 in the result, matching the Go
-    /// `AverageImageColor` behavior.
-    #[must_use]
-    pub fn average_color(&self) -> crate::Color {
-        let pixel_count = self.width as usize * self.height as usize;
-        if pixel_count == 0 {
-            return crate::Color::default();
-        }
-
-        let (mut r_sum, mut g_sum, mut b_sum) = (0u64, 0u64, 0u64);
-        for chunk in self.pixels.chunks_exact(4) {
-            r_sum += u64::from(chunk[0]);
-            g_sum += u64::from(chunk[1]);
-            b_sum += u64::from(chunk[2]);
-        }
-
-        let n = pixel_count as u64;
-        crate::Color {
-            r: (r_sum / n) as u8,
-            g: (g_sum / n) as u8,
-            b: (b_sum / n) as u8,
-            a: 255,
-        }
+        let len = (width as usize)
+            .checked_mul(height as usize)?
+            .checked_mul(BYTES_PER_PIXEL)?;
+        (pixels.len() == len).then(|| Self::from_parts(width, height, pixels))
     }
 }
 
@@ -156,7 +122,7 @@ impl Buffer {
 fn pixel_byte_len(width: u32, height: u32) -> usize {
     (width as usize)
         .checked_mul(height as usize)
-        .and_then(|n| n.checked_mul(4))
+        .and_then(|n| n.checked_mul(BYTES_PER_PIXEL))
         .expect("buffer pixel byte length must not overflow usize")
 }
 
@@ -170,7 +136,7 @@ mod tests {
         let buf = Buffer::new(10, 20);
         assert_eq!(buf.width(), 10);
         assert_eq!(buf.height(), 20);
-        assert_eq!(buf.pixels().len(), 10 * 20 * 4);
+        assert_eq!(buf.pixels().len(), 10 * 20 * 3);
     }
 
     #[test]
@@ -180,12 +146,12 @@ mod tests {
     }
 
     #[test]
-    fn new_from_color_fills_correctly() {
-        let c = Color::new(10, 20, 30, 255);
+    fn new_from_color_fills_the_rgb_channels() {
+        let c = Color::new(10, 20, 30, 128);
         let buf = Buffer::new_from_color(2, 2, c);
-        assert_eq!(buf.pixels().len(), 2 * 2 * 4);
-        for chunk in buf.pixels().chunks_exact(4) {
-            assert_eq!(chunk, [10, 20, 30, 255]);
+        assert_eq!(buf.pixels().len(), 2 * 2 * 3);
+        for chunk in buf.pixels().as_chunks::<3>().0 {
+            assert_eq!(*chunk, [10, 20, 30]);
         }
     }
 
@@ -194,73 +160,44 @@ mod tests {
         let buf = Buffer::new(10, 10);
         // Pixel (0, 0) -> offset 0
         assert_eq!(buf.pix_offset(0, 0), 0);
-        // Pixel (1, 0) -> offset 4
-        assert_eq!(buf.pix_offset(1, 0), 4);
-        // Pixel (0, 1) -> offset 10*4 = 40
-        assert_eq!(buf.pix_offset(0, 1), 40);
-        // Pixel (3, 2) -> (2*10 + 3)*4 = 92
-        assert_eq!(buf.pix_offset(3, 2), 92);
+        // Pixel (1, 0) -> offset 3
+        assert_eq!(buf.pix_offset(1, 0), 3);
+        // Pixel (0, 1) -> offset 10*3 = 30
+        assert_eq!(buf.pix_offset(0, 1), 30);
+        // Pixel (3, 2) -> (2*10 + 3)*3 = 69
+        assert_eq!(buf.pix_offset(3, 2), 69);
     }
 
     #[test]
-    fn average_color_uniform_buffer() {
-        let c = Color::new(100, 150, 200, 255);
-        let buf = Buffer::new_from_color(4, 4, c);
-        let avg = buf.average_color();
-        assert_eq!(avg, Color::new(100, 150, 200, 255));
+    fn from_rgb_keeps_dimensions_and_pixels() {
+        let pixels: Vec<u8> = (0..18).collect();
+        let buf = Buffer::from_rgb(3, 2, pixels.clone()).expect("valid length");
+        assert_eq!((buf.width(), buf.height()), (3, 2));
+        assert_eq!(buf.pixels(), pixels.as_slice());
     }
 
     #[test]
-    fn average_color_mixed() {
-        let mut buf = Buffer::new(2, 1);
-        // Pixel (0,0) = (10, 20, 30, 255)
-        let pix = buf.pixels_mut();
-        pix[0] = 10;
-        pix[1] = 20;
-        pix[2] = 30;
-        pix[3] = 255;
-        // Pixel (1,0) = (30, 40, 50, 255)
-        pix[4] = 30;
-        pix[5] = 40;
-        pix[6] = 50;
-        pix[7] = 255;
-
-        let avg = buf.average_color();
-        assert_eq!(avg, Color::new(20, 30, 40, 255));
+    fn from_rgb_rejects_wrong_length() {
+        assert!(Buffer::from_rgb(3, 2, vec![0; 17]).is_none());
+        assert!(Buffer::from_rgb(3, 2, vec![0; 19]).is_none());
+        // The RGBA length of the same image is rejected too.
+        assert!(Buffer::from_rgb(3, 2, vec![0; 24]).is_none());
+        assert!(Buffer::from_rgb(u32::MAX, u32::MAX, Vec::new()).is_none());
     }
 
     #[test]
-    fn copy_from_copies_pixels() {
-        let c = Color::new(42, 84, 126, 255);
-        let src = Buffer::new_from_color(3, 3, c);
-        let mut dst = Buffer::new(3, 3);
-        dst.copy_from(&src);
-        assert_eq!(dst.pixels(), src.pixels());
-    }
-
-    #[test]
-    #[should_panic(expected = "width mismatch")]
-    fn copy_from_panics_on_dimension_mismatch() {
-        let src = Buffer::new(3, 3);
-        let mut dst = Buffer::new(4, 3);
-        dst.copy_from(&src);
-    }
-
-    #[test]
-    fn roundtrip_through_image() {
-        let c = Color::new(10, 20, 30, 255);
-        let buf = Buffer::new_from_color(5, 5, c);
-        let img = buf.to_image();
-        let buf2 = Buffer::from_image(&img);
-        assert_eq!(buf.width(), buf2.width());
-        assert_eq!(buf.height(), buf2.height());
-        assert_eq!(buf.pixels(), buf2.pixels());
+    fn from_rgb_rejects_sides_below_two() {
+        assert!(Buffer::from_rgb(0, 0, Vec::new()).is_none());
+        assert!(Buffer::from_rgb(0, 5, Vec::new()).is_none());
+        assert!(Buffer::from_rgb(1, 1, vec![0; 3]).is_none());
+        assert!(Buffer::from_rgb(1, 5, vec![0; 15]).is_none());
+        assert!(Buffer::from_rgb(5, 1, vec![0; 15]).is_none());
+        assert!(Buffer::from_rgb(2, 2, vec![0; 12]).is_some());
     }
 
     #[test]
     fn zero_dimension_buffer() {
         let buf = Buffer::new(0, 0);
         assert_eq!(buf.pixels().len(), 0);
-        assert_eq!(buf.average_color(), Color::default());
     }
 }

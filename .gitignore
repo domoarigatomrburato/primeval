@@ -1,13 +1,8 @@
 /*.png
 /*.svg
-/*.gif
-/.venv/
-/bin/
 /dist/
 /output/
 /target/
-__pycache__/
-*.py[cod]
 
 # Node
 node_modules/
@@ -17,10 +12,11 @@ node_modules/
 /binding.js
 /binding.d.ts
 
-# profiling artifacts – use /tmp/primeval-profile-artifacts/ instead
-/collapsed.txt
-/trace_table.xml
-/cargo-flamegraph.trace
-/profile.json.gz
-/*.perf
+# Release workflow staging (napi artifacts / napi create-npm-dirs)
+/artifacts/
+/npm/
+
 .DS_Store
+
+# Agent worktrees created by Claude Code
+/.claude/worktrees/

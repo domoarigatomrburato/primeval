@@ -15,7 +15,9 @@ permissions:
 
 jobs:
   quality:
-    uses: ./.github/workflows/quality.yml
+    # zizmor 1.30 prefers the newer `$/...` self-repository syntax, but actionlint
+    # (1.7.12, the latest release) rejects it. Switch once actionlint accepts it.
+    uses: ./.github/workflows/quality.yml # zizmor: ignore[self-repository]
 
   target-matrix:
     runs-on: ubuntu-latest
@@ -24,13 +26,15 @@ jobs:
       matrix: ${{ steps.targets.outputs.matrix }}
 
     steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: package-lock.json
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          # No caches in the release workflow: they could be poisoned (zizmor cache-poisoning).
+          package-manager-cache: false
 
       - run: npm ci
 
@@ -45,32 +49,62 @@ jobs:
 
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    defaults:
+      run:
+        # The env-var references below must expand the same way on Windows.
+        shell: bash
 
     steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: package-lock.json
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          # No caches in the release workflow: they could be poisoned (zizmor cache-poisoning).
+          package-manager-cache: false
 
       - run: npm ci
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.93.0
-          targets: ${{ matrix.target }}
+      - run: rustup toolchain install
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
+      - run: rustup target add "$TARGET"
+        env:
+          TARGET: ${{ matrix.target }}
+
+      # llvm-objdump for the artifact gate, from the pinned toolchain.
+      - run: rustup component add llvm-tools
 
       - name: Build native addon
-        run: npx napi build -p primeval-node --release --target ${{ matrix.target }} --platform --no-js --output-dir .
+        run: |
+          args=(build -p primeval-node --release --target "$TARGET" --platform --no-js --output-dir .)
+          if [ "$NAPI_CROSS" = "true" ]; then
+            # Link against the glibc 2.17 sysroot of @napi-rs/cross-toolchain (pinned by the lockfile).
+            args+=(--use-napi-cross)
+          fi
+          npx napi "${args[@]}"
+        env:
+          TARGET: ${{ matrix.target }}
+          NAPI_CROSS: ${{ matrix.napi-cross }}
+
+      - name: Check artifact ISA and glibc
+        run: node scripts/check-artifact.mjs "$TARGET"
+        env:
+          TARGET: ${{ matrix.target }}
+
+      # Each target builds on a runner of its own platform, so this executes the artifact.
+      - name: Smoke test the addon
+        run: |
+          # Not `npm run build`: its chmod does not run under cmd.exe on Windows.
+          npx tsc
+          npm run generate:binding
+          node scripts/smoke-test-addon.mjs "$TARGET"
+        env:
+          TARGET: ${{ matrix.target }}
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.target }}
           path: primeval-node.*.node
@@ -88,9 +122,11 @@ jobs:
       NPM_CONFIG_PROVENANCE: "true"
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           package-manager-cache: false
@@ -99,7 +135,7 @@ jobs:
       - run: npm ci
 
       - name: Download artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts
 
@@ -112,8 +148,40 @@ jobs:
       - name: Verify native package completeness
         run: node scripts/napi-targets.mjs verify-artifacts npm
 
-      - name: Publish platform packages
-        run: npx napi pre-publish -t npm --npm-dir npm
+      # Skips every package already on the registry and publishes the root
+      # package last, so a failed run can be re-run as is.
+      - name: Publish packages
+        run: node scripts/release-packages.mjs publish npm "$TAG"
+        env:
+          TAG: ${{ github.ref_name }}
+          # Trusted publishing (OIDC) cannot create a package, so the first
+          # release publishes with a short-lived token; once every package has
+          # a trusted publisher, the secret is deleted and this is empty
+          # (RELEASING.md, "First Release").
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Publish npm package
-        run: npm publish --access public
+      - name: Verify published packages
+        run: node scripts/release-packages.mjs verify "$TAG"
+        env:
+          TAG: ${{ github.ref_name }}
+
+  github-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Create GitHub release
+        run: |
+          if gh release view "$TAG" --repo "$REPO" > /dev/null 2>&1; then
+            echo "GitHub release $TAG already exists"
+          else
+            gh release create "$TAG" --repo "$REPO" --verify-tag --generate-notes
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}

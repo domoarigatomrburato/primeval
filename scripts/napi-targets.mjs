@@ -11,9 +11,13 @@ const TARGET_SUFFIXES = {
   "x86_64-pc-windows-msvc": "win32-x64-msvc",
 };
 
+// Each target builds on a runner of its own platform, so the release workflow
+// can execute (smoke test) the addon it just built. Labels from
+// https://github.com/actions/runner-images (checked 2026-10): `macos-15-intel`
+// is the standard x64 macOS runner, `ubuntu-24.04-arm` the arm64 Linux one.
 const TARGET_RUNNERS = {
-  "aarch64-apple-darwin": "macos-14",
-  "x86_64-apple-darwin": "macos-14",
+  "aarch64-apple-darwin": "macos-15",
+  "x86_64-apple-darwin": "macos-15-intel",
   "aarch64-unknown-linux-gnu": "ubuntu-24.04-arm",
   "x86_64-unknown-linux-gnu": "ubuntu-latest",
   "x86_64-pc-windows-msvc": "windows-latest",
@@ -60,6 +64,8 @@ export function releaseMatrixForTargets(targets) {
     include: targets.map((target) => ({
       runner: runnerForTarget(target),
       target,
+      // Link Linux GNU builds against the glibc 2.17 sysroot of @napi-rs/cross-toolchain.
+      "napi-cross": runtimeTargetForTarget(target).abi === "gnu",
     })),
   };
 }
@@ -110,7 +116,7 @@ export function validatePackageLock(pkg, packageLock) {
   const { packageName, version, expectedOptionalDependencies } = validatePackageMetadata(pkg);
   const lockName = requiredString(packageLock.name, "package-lock.json name");
   const lockVersion = requiredString(packageLock.version, "package-lock.json version");
-  const rootPackage = requiredObject(packageLock.packages?.[""], "package-lock.json packages[\"\"]");
+  const rootPackage = requiredObject(packageLock.packages?.[""], 'package-lock.json packages[""]');
 
   if (lockName !== packageName) {
     throw new Error(
@@ -158,9 +164,7 @@ export function validatePackageLock(pkg, packageLock) {
     );
 
     if (dependencyPackage.version !== version) {
-      throw new Error(
-        `package-lock.json entry ${dependencyName} must use version ${version}`,
-      );
+      throw new Error(`package-lock.json entry ${dependencyName} must use version ${version}`);
     }
   }
 
@@ -184,34 +188,147 @@ export function updatePackageVersion(pkg, nextVersion) {
   };
 }
 
+function cargoSection(source, header) {
+  const lines = source.split("\n");
+  const start = lines.findIndex((line) => line.trim() === `[${header}]`);
+  if (start === -1) {
+    return null;
+  }
+  let end = lines.findIndex((line, index) => index > start && /^\s*\[/.test(line));
+  if (end === -1) {
+    end = lines.length;
+  }
+  return { lines, start, end };
+}
+
+const CARGO_VERSION_LINE = /^version\s*=\s*"([^"]+)"\s*$/;
+
+/** Reads `version` from the `[workspace.package]` table of the root Cargo.toml. */
+export function readCargoWorkspaceVersion(cargoToml) {
+  const section = cargoSection(cargoToml, "workspace.package");
+  const line = section?.lines
+    .slice(section.start + 1, section.end)
+    .find((candidate) => CARGO_VERSION_LINE.test(candidate));
+  if (!line) {
+    throw new Error("Cargo.toml must set version in [workspace.package]");
+  }
+  return line.match(CARGO_VERSION_LINE)[1];
+}
+
+/** Rewrites only the `[workspace.package]` version of the root Cargo.toml. */
+export function updateCargoWorkspaceVersion(cargoToml, version) {
+  readCargoWorkspaceVersion(cargoToml);
+  const { lines, start, end } = cargoSection(cargoToml, "workspace.package");
+  const index = lines.findIndex(
+    (line, candidate) => candidate > start && candidate < end && CARGO_VERSION_LINE.test(line),
+  );
+  lines[index] = `version = "${requiredString(version, "next version")}"`;
+  return lines.join("\n");
+}
+
+/** Reads the root Cargo.toml, every workspace member manifest, and Cargo.lock. */
+export function readCargoWorkspace(rootDir) {
+  const cargoToml = fs.readFileSync(path.join(rootDir, "Cargo.toml"), "utf8");
+  const membersBlock = cargoToml.match(/^members\s*=\s*\[([^\]]*)\]/m);
+  if (!membersBlock) {
+    throw new Error("Cargo.toml must list [workspace] members");
+  }
+  const members = Object.fromEntries(
+    [...membersBlock[1].matchAll(/"([^"]+)"/g)].map(([, member]) => [
+      member,
+      fs.readFileSync(path.join(rootDir, member, "Cargo.toml"), "utf8"),
+    ]),
+  );
+  const cargoLock = fs.readFileSync(path.join(rootDir, "Cargo.lock"), "utf8");
+  return { cargoToml, members, cargoLock };
+}
+
+/**
+ * Checks that the Cargo crates carry the npm package version: the workspace
+ * version equals `version`, every member inherits it, and Cargo.lock agrees.
+ */
+export function validateCargoVersions(version, { cargoToml, members, cargoLock }) {
+  const workspaceVersion = readCargoWorkspaceVersion(cargoToml);
+  if (workspaceVersion !== version) {
+    throw new Error(
+      `Cargo.toml workspace version ${workspaceVersion} must match package.json version ${version}; run npm run bump:version`,
+    );
+  }
+
+  for (const [member, manifest] of Object.entries(members)) {
+    const section = cargoSection(manifest, "package");
+    const packageLines = section?.lines.slice(section.start + 1, section.end) ?? [];
+    const name = packageLines.join("\n").match(/^name\s*=\s*"([^"]+)"/m)?.[1];
+    if (!name) {
+      throw new Error(`${member}/Cargo.toml must set [package] name`);
+    }
+    if (!packageLines.some((line) => /^version\.workspace\s*=\s*true\s*$/.test(line))) {
+      throw new Error(`${member}/Cargo.toml must set version.workspace = true`);
+    }
+
+    const escapedName = name.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&");
+    const lockVersion = cargoLock.match(
+      new RegExp(`^name = "${escapedName}"\\nversion = "([^"]+)"`, "m"),
+    )?.[1];
+    if (lockVersion !== version) {
+      throw new Error(
+        `Cargo.lock entry ${name} is ${lockVersion ?? "missing"}, expected ${version}; run cargo update --workspace`,
+      );
+    }
+  }
+}
+
+const DEFAULT_TOOLS = {
+  run(command, args, options) {
+    execFileSync(command, args, { ...options, stdio: "inherit" });
+  },
+};
+
 export function bumpPackageVersion(
   nextVersion,
   packageJsonPath = DEFAULT_PACKAGE_JSON,
   packageLockPath = DEFAULT_PACKAGE_LOCK,
+  tools = DEFAULT_TOOLS,
 ) {
   const resolvedPackageJsonPath = path.resolve(packageJsonPath);
   const resolvedPackageLockPath = path.resolve(packageLockPath);
   const packageDir = path.dirname(resolvedPackageJsonPath);
-  const existingPackageJson = fs.readFileSync(resolvedPackageJsonPath, "utf8");
-  const existingPackageLock = fs.existsSync(resolvedPackageLockPath)
-    ? fs.readFileSync(resolvedPackageLockPath, "utf8")
-    : null;
+  // Cargo crates share the npm version; the workspace sits next to package.json.
+  const cargoTomlPath = path.join(packageDir, "Cargo.toml");
+  const cargoLockPath = path.join(packageDir, "Cargo.lock");
+  const snapshot = new Map(
+    [resolvedPackageJsonPath, resolvedPackageLockPath, cargoTomlPath, cargoLockPath].map((file) => [
+      file,
+      fs.existsSync(file) ? fs.readFileSync(file, "utf8") : null,
+    ]),
+  );
 
   try {
-    const updatedPackage = updatePackageVersion(readPackageMetadata(resolvedPackageJsonPath), nextVersion);
+    const updatedPackage = updatePackageVersion(
+      readPackageMetadata(resolvedPackageJsonPath),
+      nextVersion,
+    );
     writeJsonFile(resolvedPackageJsonPath, updatedPackage);
-    execFileSync(npmCommand(), ["install", "--package-lock-only", "--ignore-scripts"], {
+    tools.run(npmCommand(), ["install", "--package-lock-only", "--ignore-scripts"], {
       cwd: packageDir,
-      stdio: "inherit",
     });
     validatePackageLock(updatedPackage, readPackageLock(resolvedPackageLockPath));
+
+    fs.writeFileSync(
+      cargoTomlPath,
+      updateCargoWorkspaceVersion(fs.readFileSync(cargoTomlPath, "utf8"), updatedPackage.version),
+    );
+    // Only the workspace members change, so the lockfile refresh needs no network.
+    tools.run("cargo", ["update", "--workspace", "--offline"], { cwd: packageDir });
+    validateCargoVersions(updatedPackage.version, readCargoWorkspace(packageDir));
     return updatedPackage;
   } catch (error) {
-    fs.writeFileSync(resolvedPackageJsonPath, existingPackageJson);
-    if (existingPackageLock === null) {
-      fs.rmSync(resolvedPackageLockPath, { force: true });
-    } else {
-      fs.writeFileSync(resolvedPackageLockPath, existingPackageLock);
+    for (const [file, contents] of snapshot) {
+      if (contents === null) {
+        fs.rmSync(file, { force: true });
+      } else {
+        fs.writeFileSync(file, contents);
+      }
     }
     throw error;
   }
@@ -285,7 +402,9 @@ function normalizeDependencyMap(dependencies) {
 }
 
 function optionalDependencyVersionMap(optionalDependencies, version) {
-  return Object.fromEntries(optionalDependencies.map((dependencyName) => [dependencyName, version]));
+  return Object.fromEntries(
+    optionalDependencies.map((dependencyName) => [dependencyName, version]),
+  );
 }
 
 function writeJsonFile(filePath, value) {
@@ -425,6 +544,7 @@ function main(argv) {
           throw new Error(`package-lock.json is required next to ${packageJsonPath}`);
         }
         validatePackageLock(pkg, readPackageLock(packageLockPath));
+        validateCargoVersions(result.version, readCargoWorkspace(path.dirname(packageJsonPath)));
         console.log(JSON.stringify(result));
         break;
       }

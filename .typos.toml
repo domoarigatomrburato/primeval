@@ -11,10 +11,11 @@ extend-exclude = [
   "output",
   "package-lock.json",
   "target",
-  "docs/readme/progression",
-  "docs/readme/thumbs",
+  "docs/images",
 ]
 
 [default.extend-identifiers]
 ba = "ba"
+# The `flate2` crate (deny.toml).
+flate2 = "flate2"
 iy = "iy"

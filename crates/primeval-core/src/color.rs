@@ -3,9 +3,13 @@
 /// Fields are non-premultiplied (straight alpha), matching Go's `color.NRGBA`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Color {
+    /// Red.
     pub r: u8,
+    /// Green.
     pub g: u8,
+    /// Blue.
     pub b: u8,
+    /// Alpha: `0` is transparent, `255` opaque.
     pub a: u8,
 }
 
@@ -16,54 +20,31 @@ impl Color {
         Self { r, g, b, a }
     }
 
-    /// Parses a hex color string.
+    /// Parses an opaque hex color string.
     ///
     /// Accepted formats (the leading `#` is optional):
-    /// - `RGB` — 3 hex digits, expanded to `RRGGBB` with alpha 255
-    /// - `RGBA` — 4 hex digits, expanded to `RRGGBBAA`
-    /// - `RRGGBB` — 6 hex digits with alpha 255
-    /// - `RRGGBBAA` — 8 hex digits
+    /// - `RGB` — 3 hex digits, expanded to `RRGGBB`
+    /// - `RRGGBB` — 6 hex digits
     ///
-    /// Returns `None` if the input length is wrong or contains invalid hex digits.
+    /// The result always has alpha 255. Returns `None` for any other length,
+    /// for non-ASCII input, and for invalid hex digits.
     #[must_use]
     pub fn from_hex(s: &str) -> Option<Self> {
-        let s = s.strip_prefix('#').unwrap_or(s);
-        let mut r;
-        let mut g;
-        let mut b;
-        let mut a = 255u8;
-
-        match s.len() {
-            3 => {
-                r = parse_hex_byte_doubled(s.as_bytes()[0])?;
-                g = parse_hex_byte_doubled(s.as_bytes()[1])?;
-                b = parse_hex_byte_doubled(s.as_bytes()[2])?;
-            }
-            4 => {
-                r = parse_hex_byte_doubled(s.as_bytes()[0])?;
-                g = parse_hex_byte_doubled(s.as_bytes()[1])?;
-                b = parse_hex_byte_doubled(s.as_bytes()[2])?;
-                a = parse_hex_byte_doubled(s.as_bytes()[3])?;
-            }
-            6 => {
-                r = parse_hex_pair(&s[0..2])?;
-                g = parse_hex_pair(&s[2..4])?;
-                b = parse_hex_pair(&s[4..6])?;
-            }
-            8 => {
-                r = parse_hex_pair(&s[0..2])?;
-                g = parse_hex_pair(&s[2..4])?;
-                b = parse_hex_pair(&s[4..6])?;
-                a = parse_hex_pair(&s[6..8])?;
-            }
+        let digits = s.strip_prefix('#').unwrap_or(s).as_bytes();
+        let (r, g, b) = match *digits {
+            [r, g, b] => (
+                parse_hex_byte_doubled(r)?,
+                parse_hex_byte_doubled(g)?,
+                parse_hex_byte_doubled(b)?,
+            ),
+            [r1, r2, g1, g2, b1, b2] => (
+                parse_hex_pair(r1, r2)?,
+                parse_hex_pair(g1, g2)?,
+                parse_hex_pair(b1, b2)?,
+            ),
             _ => return None,
-        }
-
-        // Suppress "value never read" warnings — the variables are assigned
-        // inside each match arm and used uniformly below.
-        let _ = (&mut r, &mut g, &mut b);
-
-        Some(Self { r, g, b, a })
+        };
+        Some(Self { r, g, b, a: 255 })
     }
 
     /// Converts to premultiplied RGBA in the 0..=0xFFFF range.
@@ -76,7 +57,7 @@ impl Color {
     /// ```
     #[must_use]
     #[inline]
-    pub fn to_premultiplied_rgba(self) -> [u32; 4] {
+    pub(crate) fn to_premultiplied_rgba(self) -> [u32; 4] {
         let expand = |ch: u8, alpha: u8| -> u32 {
             let v = u32::from(ch);
             let v = v | (v << 8);
@@ -103,14 +84,9 @@ fn parse_hex_byte_doubled(ch: u8) -> Option<u8> {
     Some(nibble << 4 | nibble)
 }
 
-/// Parses a two-character hex string into a byte.
-fn parse_hex_pair(s: &str) -> Option<u8> {
-    if s.len() != 2 {
-        return None;
-    }
-    let hi = hex_nibble(s.as_bytes()[0])?;
-    let lo = hex_nibble(s.as_bytes()[1])?;
-    Some(hi << 4 | lo)
+/// Parses two hex digits into a byte.
+fn parse_hex_pair(hi: u8, lo: u8) -> Option<u8> {
+    Some(hex_nibble(hi)? << 4 | hex_nibble(lo)?)
 }
 
 /// Converts a single ASCII hex digit to its numeric value.
@@ -156,17 +132,9 @@ mod tests {
     }
 
     #[test]
-    fn from_hex_4_digits() {
-        let c = Color::from_hex("#F80A").unwrap();
-        assert_eq!(
-            c,
-            Color {
-                r: 0xFF,
-                g: 0x88,
-                b: 0x00,
-                a: 0xAA
-            }
-        );
+    fn from_hex_rejects_alpha_forms() {
+        assert!(Color::from_hex("#F80A").is_none());
+        assert!(Color::from_hex("F80A").is_none());
     }
 
     #[test]
@@ -184,17 +152,9 @@ mod tests {
     }
 
     #[test]
-    fn from_hex_8_digits() {
-        let c = Color::from_hex("#FF880040").unwrap();
-        assert_eq!(
-            c,
-            Color {
-                r: 0xFF,
-                g: 0x88,
-                b: 0x00,
-                a: 0x40
-            }
-        );
+    fn from_hex_rejects_8_digit_alpha_form() {
+        assert!(Color::from_hex("#FF880040").is_none());
+        assert!(Color::from_hex("FF880040").is_none());
     }
 
     #[test]
@@ -233,6 +193,17 @@ mod tests {
     #[test]
     fn from_hex_invalid_chars() {
         assert!(Color::from_hex("#GGHHII").is_none());
+    }
+
+    #[test]
+    fn from_hex_rejects_multibyte_input_without_panicking() {
+        // "a€bc" is 6 bytes long but not 6 ASCII hex digits.
+        assert!(Color::from_hex("a€bc").is_none());
+        assert!(Color::from_hex("#a€bc").is_none());
+        assert!(Color::from_hex("€").is_none());
+        assert!(Color::from_hex("ab€").is_none());
+        assert!(Color::from_hex("").is_none());
+        assert!(Color::from_hex("#").is_none());
     }
 
     #[test]

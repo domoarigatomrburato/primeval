@@ -3,10 +3,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
-    readPackageMetadata,
-    requiredString,
-    runtimeTargetForTarget,
-    validatePackageMetadata,
+  readPackageMetadata,
+  requiredString,
+  runtimeTargetForTarget,
+  validatePackageMetadata,
 } from "./napi-targets.mjs";
 
 const SCRIPTS_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -73,9 +73,19 @@ function detectLinuxLibc() {
     return null
   }
 
-  const report = typeof process.report?.getReport === 'function'
-    ? process.report.getReport()
-    : null
+  let report = null
+  if (typeof process.report?.getReport === 'function') {
+    // Skip collecting network data, which can be slow; only the header and
+    // shared objects are needed here. The setting is process-wide, so put
+    // it back for the application's own reports.
+    const excludeNetwork = process.report.excludeNetwork
+    process.report.excludeNetwork = true
+    try {
+      report = process.report.getReport()
+    } finally {
+      process.report.excludeNetwork = excludeNetwork
+    }
+  }
   const header = report?.header
   if (
     header &&
@@ -243,7 +253,7 @@ function loadNativeBinding() {
       [
         \`Failed to load native binding for \${target.localFile}.\`,
         \`Tried local file \${target.localFile} and package \${target.packageName}.\`,
-        'Make sure optional dependencies were installed (do not use --omit=optional or equivalent settings) and that you are running Node 20+ on a supported platform.',
+        'Make sure optional dependencies were installed (do not use --omit=optional or equivalent settings) and that you are running Node 22.12+ on a supported platform.',
         \`Local file error: \${describeLoadError(localError)}\`,
         \`Package error: \${describeLoadError(packageError)}\`,
       ].join(' '),
@@ -253,7 +263,7 @@ function loadNativeBinding() {
   }
 }
 
-export const { cancelApproximate, startApproximate } = loadNativeBinding()
+export const { NativeTask, startApproximate } = loadNativeBinding()
 `;
 }
 
@@ -268,9 +278,7 @@ export function writeBindingLoader(
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const packageJsonPath = process.argv[2]
-    ? path.resolve(process.argv[2])
-    : DEFAULT_PACKAGE_JSON;
+  const packageJsonPath = process.argv[2] ? path.resolve(process.argv[2]) : DEFAULT_PACKAGE_JSON;
   const outputPath = process.argv[3] ? path.resolve(process.argv[3]) : DEFAULT_OUTPUT;
   writeBindingLoader(packageJsonPath, outputPath);
   console.log(path.relative(process.cwd(), outputPath));
