@@ -151,7 +151,22 @@ test("cli rejects invalid numeric options as usage errors", () => {
 test("cli rejects an unknown shape as a usage error", () => {
   const result = runCli([fixturePath, "-o", "-", "--shape", "hexagon"]);
 
-  assertUsageError(result, /^unknown shape: hexagon\n/);
+  assertUsageError(result, /^shape must be one of: any, triangle, .*, polygon\n/);
+});
+
+test("cli passes out-of-range numbers to Rust instead of wrapping them", () => {
+  const count = runCli([fixturePath, "-o", "-", ...RENDER_ARGS, "--count", "4294967297"]);
+  assertRuntimeError(count, /^count must be an integer from 1 to 100000\n$/);
+
+  const seed = runCli([fixturePath, "-o", "-", ...RENDER_ARGS, "--seed", "99999999999999999999"]);
+  assertRuntimeError(seed, /^seed must be an integer from 0 to 2\^64 - 1/);
+});
+
+test("cli passes a full-range u64 seed exactly", () => {
+  const result = runCli([fixturePath, "-o", "-", ...RENDER_ARGS, "--seed", "18446744073709551615"]);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^<svg\b/);
 });
 
 test("cli reports a missing input without writing to stdout", () => {

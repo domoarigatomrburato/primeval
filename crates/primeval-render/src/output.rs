@@ -44,7 +44,10 @@ impl FromStr for OutputFormat {
         match value {
             "svg" => Ok(Self::Svg),
             "png" => Ok(Self::Png),
-            other => Err(ParseError::new(format!("unknown output format: {other}"))),
+            _ => Err(ParseError::new(format!(
+                "output must be one of: {}",
+                Self::variants().join(", ")
+            ))),
         }
     }
 }
@@ -87,7 +90,7 @@ mod tests {
         for value in ["bmp", "jpg", "jpeg", "gif"] {
             assert_eq!(
                 value.parse::<OutputFormat>(),
-                Err(ParseError::new(format!("unknown output format: {value}")))
+                Err(ParseError::new("output must be one of: svg, png"))
             );
         }
     }

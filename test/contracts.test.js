@@ -122,7 +122,11 @@ test("binding uses shared Rust option parsers and render defaults", () => {
   assert.match(bindingSource, /parse::<OutputFormat>/);
   assert.match(bindingSource, /parse::<ShapeKind>/);
   assert.match(bindingSource, /parse::<Alpha>/);
-  assert.match(bindingSource, /Alpha::try_from/);
+  assert.match(bindingSource, /set_number\(RenderOption::Alpha,/);
+  assert.match(bindingSource, /set_number\(RenderOption::Count,/);
+  assert.match(bindingSource, /set_number\(RenderOption::Seed,/);
+  assert.match(bindingSource, /set_number\(RenderOption::ResizeInput,/);
+  assert.match(bindingSource, /set_number\(RenderOption::OutputSize,/);
   assert.match(bindingSource, /parse::<BackgroundOption>/);
   assert.match(bindingSource, /RenderOptions::default\(\)\.merge\(/);
   assert.doesNotMatch(bindingSource, /unwrap_or\(defaults/);

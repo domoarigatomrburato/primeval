@@ -253,7 +253,7 @@ function loadNativeBinding() {
   }
 }
 
-export const { cancelApproximate, startApproximate } = loadNativeBinding()
+export const { NativeTask, startApproximate } = loadNativeBinding()
 `;
 }
 

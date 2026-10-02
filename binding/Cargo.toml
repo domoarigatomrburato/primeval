@@ -14,7 +14,7 @@ crate-type = ["cdylib"]
 workspace = true
 
 [dependencies]
-napi = { version = "3", features = ["tokio_rt"] }
+napi = { version = "3", features = ["napi6", "tokio_rt"] }
 napi-derive = "3"
 primeval-render = { path = "../crates/primeval-render" }
 

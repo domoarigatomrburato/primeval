@@ -32,7 +32,9 @@ unused_footnote_definition = "deny"
 [profile.release]
 codegen-units = 1
 lto = "fat"
-panic = "abort"
+# Unwind so the Node binding can turn a panic into a rejected promise instead
+# of ending the host process.
+panic = "unwind"
 
 # Same as release but with line-level debug info for samply / flamegraph.
 # Never use this in production — binary will be ~2x larger.

@@ -218,7 +218,7 @@ impl ShapeKind {
         }
     }
 
-    const fn all_kinds() -> &'static [ShapeKind] {
+    pub(crate) const fn all_kinds() -> &'static [ShapeKind] {
         &[
             ShapeKind::Triangle,
             ShapeKind::Rectangle,
@@ -246,7 +246,10 @@ impl FromStr for ShapeKind {
             "quadratic" => Ok(Self::Quadratic),
             "rotated-ellipse" => Ok(Self::RotatedEllipse),
             "polygon" => Ok(Self::Polygon),
-            other => Err(ParseError::new(format!("unknown shape: {other}"))),
+            _ => Err(ParseError::new(format!(
+                "shape must be one of: {}",
+                Self::variants().join(", ")
+            ))),
         }
     }
 }
@@ -1169,7 +1172,10 @@ mod tests {
     fn shape_kind_rejects_unknown_name() {
         assert_eq!(
             "hexagon".parse::<ShapeKind>(),
-            Err(ParseError::new("unknown shape: hexagon"))
+            Err(ParseError::new(
+                "shape must be one of: any, triangle, rectangle, ellipse, circle, \
+                 rotated-rectangle, quadratic, rotated-ellipse, polygon"
+            ))
         );
     }
 

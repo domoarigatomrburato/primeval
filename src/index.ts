@@ -1,9 +1,18 @@
+import { mapNativeError, ValidationError } from "./errors.js";
 import {
   getNativeBinding,
   type NativeApproximateRequest,
   type NativeHandle,
   type NativeProgressInfo,
 } from "./native-binding.js";
+
+export {
+  AbortError,
+  type ErrorCode,
+  InternalError,
+  PrimevalError,
+  ValidationError,
+} from "./errors.js";
 
 // --- Public types ---
 
@@ -21,13 +30,20 @@ export type Shape =
   | "polygon";
 
 export type RenderOptions = {
+  /** Optimization steps, an integer `1..100000`. */
   count?: number;
   shape?: Shape;
   /** `"auto"`, or a fixed shape opacity as an integer `1..255`. */
   alpha?: "auto" | number;
-  seed?: number;
+  /**
+   * Deterministic seed, `0..2^64 - 1`. Pass seeds above
+   * `Number.MAX_SAFE_INTEGER` as a `bigint`.
+   */
+  seed?: number | bigint;
   background?: "auto" | string;
+  /** Working resolution, an integer `2..2048`. */
   resizeInput?: number;
+  /** Longest side of the output, an integer `2..8192`. */
   outputSize?: number;
 };
 
@@ -68,29 +84,6 @@ export type RasterResult = {
 
 export type ApproximateResult = SvgResult | RasterResult;
 
-// --- Error classes ---
-
-class PrimevalError extends Error {
-  constructor(name: string, message: string) {
-    super(message);
-    this.name = name;
-  }
-}
-
-export class ValidationError extends PrimevalError {
-  declare name: "ValidationError";
-  constructor(message: string) {
-    super("ValidationError", message);
-  }
-}
-
-export class AbortError extends PrimevalError {
-  declare name: "AbortError";
-  constructor(message: string) {
-    super("AbortError", message);
-  }
-}
-
 // --- Internal types ---
 
 const VALID_SHAPES: readonly Shape[] = [
@@ -111,7 +104,7 @@ interface NormalizedRender {
   count?: number;
   shape?: Shape;
   alpha?: "auto" | number;
-  seed?: number;
+  seed?: number | bigint;
   background?: string;
   resizeInput?: number;
   outputSize?: number;
@@ -133,14 +126,6 @@ function isAbortSignal(value: unknown): value is AbortSignal {
   return value instanceof AbortSignal;
 }
 
-// Strings pass through: Rust owns the vocabulary and rejects anything but "auto".
-function isAlpha(value: unknown): boolean {
-  return (
-    typeof value === "string" ||
-    (typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 255)
-  );
-}
-
 function normalizeInput(input: unknown): Buffer {
   if (Buffer.isBuffer(input)) {
     return input;
@@ -152,40 +137,44 @@ function normalizeInput(input: unknown): Buffer {
   throw new ValidationError("input must be a Uint8Array");
 }
 
+// Type checks only: Rust owns the integer ranges and the alpha and
+// background vocabularies.
+function optionalNumber(r: Record<string, unknown>, name: string): number | undefined {
+  const value = r[name];
+  if (value == null) {
+    return undefined;
+  }
+  if (typeof value !== "number") {
+    throw new ValidationError(`${name} must be a number`);
+  }
+  return value;
+}
+
 function normalizeRender(render?: Record<string, unknown>): NormalizedRender {
   const r = render ?? {};
-  const count = r.count == null ? undefined : (r.count as number);
+  const count = optionalNumber(r, "count");
+  const resizeInput = optionalNumber(r, "resizeInput");
+  const outputSize = optionalNumber(r, "outputSize");
   const shape = r.shape == null ? undefined : (r.shape as Shape);
   const alpha = r.alpha == null ? undefined : r.alpha;
   const background = r.background == null ? undefined : (r.background as string);
-  const resizeInput = r.resizeInput == null ? undefined : (r.resizeInput as number);
-  const outputSize = r.outputSize == null ? undefined : (r.outputSize as number);
-  const seed = r.seed == null ? undefined : (r.seed as number);
+  const seed = r.seed == null ? undefined : r.seed;
 
-  if (count !== undefined && (!Number.isInteger(count) || count < 1)) {
-    throw new ValidationError("count must be at least 1");
-  }
   if (shape !== undefined && !(VALID_SHAPES as readonly string[]).includes(shape)) {
-    throw new ValidationError(`unknown shape: ${shape}`);
+    throw new ValidationError(`shape must be one of: ${VALID_SHAPES.join(", ")}`);
   }
-  if (alpha !== undefined && !isAlpha(alpha)) {
+  if (alpha !== undefined && typeof alpha !== "string" && typeof alpha !== "number") {
     throw new ValidationError("alpha must be auto or an integer 1..255");
   }
-  if (seed !== undefined && (!Number.isInteger(seed) || seed < 0)) {
-    throw new ValidationError("seed must be a positive integer");
-  }
-  if (resizeInput !== undefined && (!Number.isInteger(resizeInput) || resizeInput < 1)) {
-    throw new ValidationError("resizeInput must be at least 1");
-  }
-  if (outputSize !== undefined && (!Number.isInteger(outputSize) || outputSize < 1)) {
-    throw new ValidationError("outputSize must be at least 1");
+  if (seed !== undefined && typeof seed !== "number" && typeof seed !== "bigint") {
+    throw new ValidationError("seed must be a number or a bigint");
   }
 
   return {
     count,
     shape,
     alpha: alpha as NormalizedRender["alpha"],
-    seed,
+    seed: seed as NormalizedRender["seed"],
     background,
     resizeInput,
     outputSize,
@@ -201,7 +190,7 @@ function normalizeRequest(request: unknown): NormalizedRequest {
   const input = normalizeInput(req.input);
   const output = req.output as string;
   if (!(VALID_OUTPUTS as readonly string[]).includes(output)) {
-    throw new ValidationError(`unknown output format: ${String(output)}`);
+    throw new ValidationError(`output must be one of: ${VALID_OUTPUTS.join(", ")}`);
   }
 
   const execution = (req.execution ?? {}) as Record<string, unknown>;
@@ -221,26 +210,6 @@ function normalizeRequest(request: unknown): NormalizedRequest {
       signal: execution.signal as AbortSignal | undefined,
     },
   };
-}
-
-// --- Error mapping ---
-
-function mapNativeError(error: unknown): Error {
-  const message = error instanceof Error ? error.message : String(error);
-  const nameMatch = message.match(/^\[([^\]]+)\]\s*(.*)$/);
-  if (!nameMatch) {
-    return new Error(message);
-  }
-
-  const [, name, detail] = nameMatch;
-  switch (name) {
-    case "ValidationError":
-      return new ValidationError(detail);
-    case "AbortError":
-      return new AbortError(detail);
-    default:
-      return new Error(detail);
-  }
 }
 
 // --- Core API ---
@@ -286,7 +255,7 @@ function startApproximate(request: ApproximateRequest): {
     throw mapNativeError(error);
   }
 
-  const cancel = (): void => nativeBinding.cancelApproximate(handle.taskId);
+  const cancel = (): void => handle.task.cancel();
   const signal = normalized.execution.signal;
   let onAbort: (() => void) | undefined;
   if (signal) {

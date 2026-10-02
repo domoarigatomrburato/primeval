@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { approximate, toDataUri, ValidationError } from "@aleburato/primeval";
+import {
+  AbortError,
+  approximate,
+  InternalError,
+  PrimevalError,
+  toDataUri,
+  ValidationError,
+} from "@aleburato/primeval";
+
+import { mapNativeError } from "../dist/errors.js";
 
 test("package root import resolves", async () => {
   const mod = await import("@aleburato/primeval");
@@ -9,6 +18,48 @@ test("package root import resolves", async () => {
   assert.equal(typeof mod.ValidationError, "function");
   assert.equal(mod.NotFoundError, undefined);
   assert.equal(typeof mod.AbortError, "function");
+  assert.equal(typeof mod.InternalError, "function");
+  assert.equal(typeof mod.PrimevalError, "function");
+});
+
+function nativeError(code, message) {
+  return Object.assign(new Error(message), { code });
+}
+
+test("native errors map on code to PrimevalError subclasses with the native cause", () => {
+  const cases = [
+    ["INVALID_OPTION", ValidationError, "ValidationError"],
+    ["INVALID_IMAGE", ValidationError, "ValidationError"],
+    ["ABORTED", AbortError, "AbortError"],
+    ["INTERNAL", InternalError, "InternalError"],
+  ];
+  for (const [code, ErrorClass, name] of cases) {
+    const cause = nativeError(code, "first line\nsecond line");
+
+    const mapped = mapNativeError(cause);
+
+    assert.ok(mapped instanceof ErrorClass, code);
+    assert.ok(mapped instanceof PrimevalError, code);
+    assert.equal(mapped.name, name);
+    assert.equal(mapped.code, code);
+    assert.equal(mapped.message, "first line\nsecond line");
+    assert.equal(mapped.cause, cause);
+  }
+});
+
+test("native errors map on code, never on message text", () => {
+  const unknown = nativeError("InvalidArg", "[ValidationError] looks like the old prefix");
+  assert.equal(mapNativeError(unknown), unknown);
+
+  const plain = new Error("INVALID_OPTION");
+  assert.equal(mapNativeError(plain), plain);
+});
+
+test("wrapper validation errors carry the INVALID_OPTION code", () => {
+  assert.throws(
+    () => toDataUri(/** @type {any} */ (null)),
+    (err) => err instanceof ValidationError && err.code === "INVALID_OPTION",
+  );
 });
 
 test("toDataUri encodes svg results", () => {
@@ -82,7 +133,7 @@ test("approximate rejects invalid abort signals with ValidationError", () => {
 });
 
 test("approximate rejects alpha outside auto and 1..255 with ValidationError", () => {
-  for (const alpha of [0, 256, -1, 1.5, true]) {
+  for (const alpha of [0, 256, -1, 1.5, 2 ** 32 + 128, Number.NaN, true]) {
     assert.throws(
       () =>
         approximate(

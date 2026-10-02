@@ -1,87 +1,30 @@
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
-use napi::{Env, Status};
+use napi::{Env, JsError};
 use napi_derive::napi;
 use primeval_render::{
     Alpha, ApproximateError, ApproximateRequest, ApproximateResult, BackgroundOption,
-    CancellationToken, Execution, OutputFormat, PartialRenderOptions, ProgressInfo, RenderOptions,
-    ShapeKind, approximate,
+    CancellationToken, Execution, OutputFormat, PartialRenderOptions, ProgressInfo, RenderOption,
+    RenderOptions, ShapeKind, approximate,
 };
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Mutex, OnceLock};
-
-static NEXT_TASK_ID: AtomicU32 = AtomicU32::new(1);
-static TASKS: OnceLock<Mutex<HashMap<u32, CancellationToken>>> = OnceLock::new();
-
-fn tasks() -> &'static Mutex<HashMap<u32, CancellationToken>> {
-    TASKS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn with_task_registry<R>(
-    registry: &Mutex<HashMap<u32, CancellationToken>>,
-    f: impl FnOnce(&HashMap<u32, CancellationToken>) -> R,
-) -> R {
-    match registry.lock() {
-        Ok(guard) => f(&guard),
-        Err(poisoned) => f(&poisoned.into_inner()),
-    }
-}
-
-fn with_task_registry_mut<R>(
-    registry: &Mutex<HashMap<u32, CancellationToken>>,
-    f: impl FnOnce(&mut HashMap<u32, CancellationToken>) -> R,
-) -> R {
-    match registry.lock() {
-        Ok(mut guard) => f(&mut guard),
-        Err(poisoned) => {
-            let mut guard = poisoned.into_inner();
-            f(&mut guard)
-        }
-    }
-}
-
-fn with_tasks<R>(f: impl FnOnce(&HashMap<u32, CancellationToken>) -> R) -> R {
-    with_task_registry(tasks(), f)
-}
-
-fn with_tasks_mut<R>(f: impl FnOnce(&mut HashMap<u32, CancellationToken>) -> R) -> R {
-    with_task_registry_mut(tasks(), f)
-}
-
-fn with_registered_task<T, E>(
-    registry: &Mutex<HashMap<u32, CancellationToken>>,
-    task_id: u32,
-    token: CancellationToken,
-    setup: impl FnOnce() -> std::result::Result<T, E>,
-) -> std::result::Result<T, E> {
-    with_task_registry_mut(registry, |tasks| {
-        tasks.insert(task_id, token);
-    });
-
-    match setup() {
-        Ok(value) => Ok(value),
-        Err(error) => {
-            with_task_registry_mut(registry, |tasks| {
-                tasks.remove(&task_id);
-            });
-            Err(error)
-        }
-    }
-}
+use std::any::Any;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 #[napi(object, object_to_js = false)]
 pub struct NativeRenderOptions {
-    pub count: Option<u32>,
+    /// JavaScript numbers arrive as `f64`; Rust checks they are integers in
+    /// range, so nothing wraps or truncates at this boundary.
+    pub count: Option<f64>,
     pub shape: Option<String>,
-    /// `"auto"` or an integer; Rust validates both.
-    pub alpha: Option<Either<u32, String>>,
-    pub seed: Option<i64>,
+    /// `"auto"` or a number; Rust validates both.
+    pub alpha: Option<Either<f64, String>>,
+    /// A safe-integer number or a `bigint` in `0..=2^64 - 1`.
+    pub seed: Option<Either<f64, BigInt>>,
     pub background: Option<String>,
     #[napi(js_name = "resizeInput")]
-    pub resize_input: Option<u32>,
+    pub resize_input: Option<f64>,
     #[napi(js_name = "outputSize")]
-    pub output_size: Option<u32>,
+    pub output_size: Option<f64>,
 }
 
 #[napi(object, object_to_js = false)]
@@ -115,6 +58,25 @@ pub struct NativeApproximateResult {
     pub height: u32,
 }
 
+/// Handle to one running render. Dropping it does not cancel the render.
+#[napi]
+pub struct NativeTask {
+    token: CancellationToken,
+}
+
+#[napi]
+impl NativeTask {
+    /// Requests cancellation; the render stops before its next step.
+    #[napi]
+    pub fn cancel(&self) {
+        self.token.cancel();
+    }
+}
+
+/// Starts a render on the tokio blocking pool and returns
+/// `{ promise, task }`.
+///
+/// Errors carry the stable code from [`ApproximateError::code`] as `err.code`.
 #[napi(js_name = "startApproximate")]
 pub fn start_approximate(env: &Env, request: NativeApproximateRequest) -> Result<Object<'_>> {
     let NativeApproximateRequest {
@@ -124,54 +86,83 @@ pub fn start_approximate(env: &Env, request: NativeApproximateRequest) -> Result
         execution,
     } = request;
     let progress = execution.and_then(|execution| execution.on_progress);
-    let request = normalize_request(input, output, render)?;
+    let request =
+        normalize_request(input, output, render).map_err(|error| js_error(env, &error))?;
     let token = CancellationToken::new();
-    let token_for_future = token.clone();
-    let task_id = NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed);
+    let task_token = token.clone();
 
-    with_registered_task(tasks(), task_id, token, || {
-        let promise = env.spawn_future_with_callback(
-            async move {
-                let mut on_progress = |info: ProgressInfo| {
-                    if let Some(tsfn) = progress.as_ref() {
-                        let _ = tsfn.call(
-                            Ok(NativeProgressInfo {
-                                step: info.step,
-                                total: info.total,
-                                score: info.score,
-                            }),
-                            ThreadsafeFunctionCallMode::NonBlocking,
-                        );
-                    }
-                };
-                let execution = Execution::new().cancellation(&token_for_future);
-                let execution = if progress.is_some() {
-                    execution.progress(&mut on_progress)
-                } else {
-                    execution
-                };
-                let result = approximate(request, execution);
-                with_tasks_mut(|tasks| {
-                    tasks.remove(&task_id);
-                });
+    let promise = env.spawn_future_with_callback(
+        async move {
+            // The render is CPU-bound: run it on the blocking pool, not on a
+            // tokio worker.
+            let joined =
+                spawn_blocking(move || catch_panic(|| render_request(request, &token, progress)))
+                    .await;
+            Ok(joined.unwrap_or_else(|join_error| {
+                Err(ApproximateError::internal(format!(
+                    "render task failed: {join_error}"
+                )))
+            }))
+        },
+        |env, outcome| {
+            outcome
+                .map(NativeApproximateResult::from)
+                .map_err(|error| js_error(env, &error))
+        },
+    )?;
 
-                result.map(NativeApproximateResult::from).map_err(map_error)
-            },
-            |_, result| Ok(result),
-        )?;
+    let mut handle = Object::new(env)?;
+    handle.set("promise", promise)?;
+    handle.set("task", NativeTask { token: task_token })?;
+    Ok(handle)
+}
 
-        let mut handle = Object::new(env)?;
-        handle.set("promise", promise)?;
-        handle.set("taskId", task_id)?;
-        Ok(handle)
+fn render_request(
+    request: ApproximateRequest,
+    token: &CancellationToken,
+    progress: Option<ThreadsafeFunction<NativeProgressInfo>>,
+) -> std::result::Result<ApproximateResult, ApproximateError> {
+    let mut on_progress = |info: ProgressInfo| {
+        if let Some(tsfn) = progress.as_ref() {
+            let _ = tsfn.call(
+                Ok(NativeProgressInfo {
+                    step: info.step,
+                    total: info.total,
+                    score: info.score,
+                }),
+                ThreadsafeFunctionCallMode::NonBlocking,
+            );
+        }
+    };
+    let execution = Execution::new().cancellation(token);
+    let execution = if progress.is_some() {
+        execution.progress(&mut on_progress)
+    } else {
+        execution
+    };
+    approximate(request, execution)
+}
+
+/// Runs `f`, turning a panic into an internal error that carries the panic
+/// message. The release profile unwinds, and rayon re-raises worker panics
+/// on the calling thread, so this catches panics anywhere in the render.
+fn catch_panic<T>(
+    f: impl FnOnce() -> std::result::Result<T, ApproximateError>,
+) -> std::result::Result<T, ApproximateError> {
+    catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|payload| {
+        Err(ApproximateError::internal(format!(
+            "render panicked: {}",
+            panic_message(payload.as_ref())
+        )))
     })
 }
 
-#[napi(js_name = "cancelApproximate")]
-pub fn cancel_approximate(task_id: u32) {
-    if let Some(token) = with_tasks(|tasks| tasks.get(&task_id).cloned()) {
-        token.cancel();
-    }
+fn panic_message(payload: &(dyn Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload")
 }
 
 /// Parses the explicit fields and leaves omitted ones to the Rust defaults.
@@ -179,34 +170,50 @@ fn normalize_request(
     input: Buffer,
     output: String,
     render: NativeRenderOptions,
-) -> Result<ApproximateRequest> {
-    let output = output.parse::<OutputFormat>().map_err(validation_error)?;
+) -> std::result::Result<ApproximateRequest, ApproximateError> {
+    let invalid = ApproximateError::invalid_option;
+    let output = output
+        .parse::<OutputFormat>()
+        .map_err(|_| invalid(RenderOption::Output))?;
 
     let mut partial = PartialRenderOptions::default();
-    partial.count = render.count;
+    if let Some(count) = render.count {
+        partial.set_number(RenderOption::Count, count)?;
+    }
     partial.shape = render
         .shape
         .as_deref()
         .map(str::parse::<ShapeKind>)
         .transpose()
-        .map_err(validation_error)?;
-    partial.alpha = render
-        .alpha
-        .map(|alpha| match alpha {
-            Either::A(value) => Alpha::try_from(value),
-            Either::B(value) => value.parse::<Alpha>(),
-        })
-        .transpose()
-        .map_err(validation_error)?;
+        .map_err(|_| invalid(RenderOption::Shape))?;
+    match render.alpha {
+        Some(Either::A(alpha)) => partial.set_number(RenderOption::Alpha, alpha)?,
+        Some(Either::B(alpha)) => {
+            partial.alpha = Some(
+                alpha
+                    .parse::<Alpha>()
+                    .map_err(|_| invalid(RenderOption::Alpha))?,
+            );
+        }
+        None => {}
+    }
     partial.background = render
         .background
         .as_deref()
         .map(str::parse::<BackgroundOption>)
         .transpose()
-        .map_err(validation_error)?;
-    partial.seed = render.seed.map(parse_seed).transpose()?;
-    partial.resize_input = render.resize_input;
-    partial.output_size = render.output_size;
+        .map_err(|_| invalid(RenderOption::Background))?;
+    match render.seed {
+        Some(Either::A(seed)) => partial.set_number(RenderOption::Seed, seed)?,
+        Some(Either::B(seed)) => partial.seed = Some(bigint_seed(&seed)?),
+        None => {}
+    }
+    if let Some(resize_input) = render.resize_input {
+        partial.set_number(RenderOption::ResizeInput, resize_input)?;
+    }
+    if let Some(output_size) = render.output_size {
+        partial.set_number(RenderOption::OutputSize, output_size)?;
+    }
 
     Ok(ApproximateRequest {
         input: input.into(),
@@ -215,30 +222,51 @@ fn normalize_request(
     })
 }
 
-/// JavaScript numbers arrive as `i64`; the seed is unsigned.
-fn parse_seed(seed: i64) -> Result<u64> {
-    u64::try_from(seed)
-        .map_err(|_| napi_error("ValidationError", "seed must be a positive integer"))
+/// A `bigint` seed must be in `0..=u64::MAX`.
+fn bigint_seed(seed: &BigInt) -> std::result::Result<u64, ApproximateError> {
+    let (negative, value, lossless) = seed.get_u64();
+    if negative || !lossless {
+        return Err(ApproximateError::invalid_option(RenderOption::Seed));
+    }
+    Ok(value)
 }
 
-fn validation_error(error: impl std::fmt::Display) -> Error {
-    napi_error("ValidationError", error.to_string())
-}
-
-fn map_error(error: ApproximateError) -> Error {
-    match error {
-        ApproximateError::Validation(message) => napi_error("ValidationError", message),
-        ApproximateError::Aborted => napi_error("AbortError", "operation aborted"),
-        ApproximateError::Internal(message) => napi_error("Error", message),
-        other => napi_error("Error", other.to_string()),
+/// The Node spelling of an option name. This is the only place that maps
+/// Rust option names to Node ones.
+fn node_option_name(option: RenderOption) -> &'static str {
+    match option {
+        RenderOption::ResizeInput => "resizeInput",
+        RenderOption::OutputSize => "outputSize",
+        other => other.name(),
     }
 }
 
-fn napi_error(name: &str, message: impl Into<String>) -> Error {
-    Error::new(
-        Status::GenericFailure,
-        format!("[{name}] {}", message.into()),
-    )
+/// The message Node callers see: option names in Node spelling, followed by
+/// the chain of error sources.
+fn node_message(error: &ApproximateError) -> String {
+    let mut message = match error {
+        ApproximateError::InvalidOption { option } => {
+            format!("{} {}", node_option_name(*option), option.requirement())
+        }
+        other => other.to_string(),
+    };
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    message
+}
+
+/// A JavaScript `Error` whose `code` is the stable error code.
+///
+/// napi-rs only sets a string `code` on errors it creates from an
+/// `Error<S: AsRef<str>>`; the promise path takes `Error<Status>`, so the
+/// error object is created here and passed through as a reference.
+fn js_error(env: &Env, error: &ApproximateError) -> Error {
+    let unknown = JsError::from(Error::new(error.code(), node_message(error))).into_unknown(*env);
+    Error::from(unknown)
 }
 
 impl From<ApproximateResult> for NativeApproximateResult {
@@ -263,18 +291,22 @@ impl From<ApproximateResult> for NativeApproximateResult {
 mod tests {
     use super::*;
     use std::num::NonZeroU8;
-    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     fn render_options(shape: &str) -> NativeRenderOptions {
         NativeRenderOptions {
-            count: Some(1),
+            count: Some(1.0),
             shape: Some(shape.to_string()),
-            alpha: Some(Either::A(128)),
-            seed: Some(7),
+            alpha: Some(Either::A(128.0)),
+            seed: Some(Either::A(7.0)),
             background: Some("auto".to_string()),
-            resize_input: Some(32),
-            output_size: Some(32),
+            resize_input: Some(32.0),
+            output_size: Some(32.0),
         }
+    }
+
+    fn normalize(render: NativeRenderOptions) -> std::result::Result<ApproximateRequest, String> {
+        normalize_request(Buffer::from(vec![0_u8; 4]), "svg".to_string(), render)
+            .map_err(|error| format!("{}: {}", error.code(), node_message(&error)))
     }
 
     #[test]
@@ -301,53 +333,47 @@ mod tests {
             .expect_err("removed output format should fail");
 
             assert_eq!(
-                error.reason,
-                format!("[ValidationError] unknown output format: {output}")
+                node_message(&error),
+                "output must be one of: svg, png",
+                "{output}"
             );
         }
     }
 
     #[test]
     fn normalize_request_rejects_unknown_shape() {
-        let error = normalize_request(
-            Buffer::from(vec![0_u8; 4]),
-            "svg".to_string(),
-            render_options("hexagon"),
-        )
-        .expect_err("shape should fail");
+        let error = normalize(render_options("hexagon")).expect_err("shape should fail");
 
-        assert_eq!(error.reason, "[ValidationError] unknown shape: hexagon");
+        assert_eq!(
+            error,
+            "INVALID_OPTION: shape must be one of: any, triangle, rectangle, ellipse, circle, \
+             rotated-rectangle, quadratic, rotated-ellipse, polygon"
+        );
     }
 
     #[test]
     fn normalize_request_uses_rust_defaults_for_omitted_render_fields() {
-        let request = normalize_request(
-            Buffer::from(vec![0_u8; 4]),
-            "svg".to_string(),
-            NativeRenderOptions {
-                count: None,
-                shape: None,
-                alpha: None,
-                seed: None,
-                background: None,
-                resize_input: None,
-                output_size: None,
-            },
-        )
+        let request = normalize(NativeRenderOptions {
+            count: None,
+            shape: None,
+            alpha: None,
+            seed: None,
+            background: None,
+            resize_input: None,
+            output_size: None,
+        })
         .expect("request should normalize");
 
         assert_eq!(request.render, RenderOptions::default());
     }
 
-    fn normalize_alpha(alpha: Either<u32, String>) -> Result<ApproximateRequest> {
-        normalize_request(
-            Buffer::from(vec![0_u8; 4]),
-            "svg".to_string(),
-            NativeRenderOptions {
-                alpha: Some(alpha),
-                ..render_options("any")
-            },
-        )
+    fn normalize_alpha(
+        alpha: Either<f64, String>,
+    ) -> std::result::Result<ApproximateRequest, String> {
+        normalize(NativeRenderOptions {
+            alpha: Some(alpha),
+            ..render_options("any")
+        })
     }
 
     #[test]
@@ -359,7 +385,7 @@ mod tests {
 
     #[test]
     fn normalize_request_accepts_integer_alpha() {
-        let request = normalize_alpha(Either::A(200)).expect("integer alpha");
+        let request = normalize_alpha(Either::A(200.0)).expect("integer alpha");
 
         assert_eq!(
             request.render.alpha,
@@ -370,101 +396,144 @@ mod tests {
     #[test]
     fn normalize_request_rejects_zero_and_out_of_range_alpha() {
         for alpha in [
-            Either::A(0),
-            Either::A(256),
+            Either::A(0.0),
+            Either::A(256.0),
+            Either::A(2_f64.powi(32) + 128.0),
+            Either::A(1.5),
             Either::B("0".to_string()),
             Either::B("half".to_string()),
         ] {
             let error = normalize_alpha(alpha).expect_err("alpha should fail");
 
             assert_eq!(
-                error.reason,
-                "[ValidationError] alpha must be auto or an integer 1..255"
+                error,
+                "INVALID_OPTION: alpha must be auto or an integer 1..255"
             );
         }
     }
 
     #[test]
-    fn normalize_request_rejects_negative_seed() {
-        let error = normalize_request(
-            Buffer::from(vec![0_u8; 4]),
-            "svg".to_string(),
-            NativeRenderOptions {
-                seed: Some(-1),
-                ..render_options("any")
-            },
-        )
-        .expect_err("negative seed should fail");
+    fn numeric_options_do_not_wrap_and_use_node_names() {
+        let wrapping = 2_f64.powi(32) + 1.0;
+        type Setter = fn(&mut NativeRenderOptions, f64);
+        let cases: [(Setter, &str); 3] = [
+            (|r, v| r.count = Some(v), "count"),
+            (|r, v| r.resize_input = Some(v), "resizeInput"),
+            (|r, v| r.output_size = Some(v), "outputSize"),
+        ];
+        for (set, name) in cases {
+            for value in [wrapping, 1e20, -1.0, 1.5, f64::NAN] {
+                let mut render = render_options("any");
+                set(&mut render, value);
 
-        assert_eq!(
-            error.reason,
-            "[ValidationError] seed must be a positive integer"
-        );
+                let error = normalize(render).expect_err("value should fail");
+
+                assert!(
+                    error.starts_with(&format!("INVALID_OPTION: {name} must be an integer from ")),
+                    "{name} = {value}: {error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn number_seeds_must_be_safe_non_negative_integers() {
+        for seed in [-1.0, 1.5, f64::NAN, 2_f64.powi(53), 1e20] {
+            let error = normalize(NativeRenderOptions {
+                seed: Some(Either::A(seed)),
+                ..render_options("any")
+            })
+            .expect_err("seed should fail");
+
+            assert!(
+                error.starts_with("INVALID_OPTION: seed must be an integer from 0 to 2^64 - 1"),
+                "{seed}: {error}"
+            );
+        }
+
+        let request = normalize(NativeRenderOptions {
+            seed: Some(Either::A(2_f64.powi(53) - 1.0)),
+            ..render_options("any")
+        })
+        .expect("max safe integer seed");
+        assert_eq!(request.render.seed, Some(9_007_199_254_740_991));
+    }
+
+    fn bigint(sign_bit: bool, words: Vec<u64>) -> BigInt {
+        BigInt { sign_bit, words }
+    }
+
+    #[test]
+    fn bigint_seeds_cover_the_full_u64_range() {
+        for value in [0, 7, u64::MAX] {
+            assert_eq!(bigint_seed(&bigint(false, vec![value])).ok(), Some(value));
+        }
+        for seed in [bigint(true, vec![1]), bigint(false, vec![0, 1])] {
+            assert!(matches!(
+                bigint_seed(&seed),
+                Err(ApproximateError::InvalidOption {
+                    option: RenderOption::Seed
+                })
+            ));
+        }
     }
 
     #[test]
     fn normalize_request_rejects_invalid_background() {
-        let error = normalize_request(
-            Buffer::from(vec![0_u8; 4]),
-            "svg".to_string(),
-            NativeRenderOptions {
-                background: Some("#1234".to_string()),
-                ..render_options("any")
-            },
-        )
+        let error = normalize(NativeRenderOptions {
+            background: Some("#1234".to_string()),
+            ..render_options("any")
+        })
         .expect_err("background should fail");
 
         assert_eq!(
-            error.reason,
-            "[ValidationError] background must be auto or an opaque hex color (RGB or RRGGBB)"
+            error,
+            "INVALID_OPTION: background must be auto or an opaque hex color (RGB or RRGGBB)"
         );
     }
 
     #[test]
-    fn task_registry_helpers_recover_from_poisoned_locks() {
-        let registry = Mutex::new(HashMap::new());
+    fn node_message_appends_the_source_chain() {
+        let error = ApproximateError::Internal {
+            reason: "PNG encoding failed".into(),
+            source: Some(Box::new(std::io::Error::other("disk full"))),
+        };
 
-        let _ = catch_unwind(AssertUnwindSafe(|| {
-            with_task_registry_mut(&registry, |tasks| {
-                tasks.insert(1, CancellationToken::new());
-                panic!("poison the mutex");
-            });
-        }));
-
-        with_task_registry_mut(&registry, |tasks| {
-            tasks.insert(2, CancellationToken::new());
-        });
-
-        let task_ids =
-            with_task_registry(&registry, |tasks| tasks.keys().copied().collect::<Vec<_>>());
-        assert!(task_ids.contains(&1));
-        assert!(task_ids.contains(&2));
-    }
-
-    #[test]
-    fn registered_task_is_removed_when_setup_fails() {
-        let registry = Mutex::new(HashMap::new());
-        let result = with_registered_task(
-            &registry,
-            7,
-            CancellationToken::new(),
-            || -> std::result::Result<(), &'static str> { Err("boom") },
+        assert_eq!(
+            node_message(&error),
+            "internal render error: PNG encoding failed: disk full"
         );
-
-        assert_eq!(result, Err("boom"));
-        assert!(!with_task_registry(&registry, |tasks| tasks.contains_key(&7)));
     }
 
     #[test]
-    fn registered_task_stays_present_when_setup_succeeds() {
-        let registry = Mutex::new(HashMap::new());
-        let token = CancellationToken::new();
+    fn catch_panic_turns_a_panic_into_an_internal_error() {
+        let result: std::result::Result<(), _> = catch_panic(|| panic!("boom {}", 7));
 
-        let result = with_registered_task(&registry, 7, token.clone(), || {
-            Ok::<_, &'static str>(token.is_cancelled())
-        });
+        match result {
+            Err(error @ ApproximateError::Internal { .. }) => {
+                assert_eq!(error.code(), "INTERNAL");
+                assert_eq!(
+                    node_message(&error),
+                    "internal render error: render panicked: boom 7"
+                );
+            }
+            other => panic!("expected internal error, got {other:?}"),
+        }
+    }
 
-        assert_eq!(result, Ok(false));
-        assert!(with_task_registry(&registry, |tasks| tasks.contains_key(&7)));
+    #[test]
+    fn catch_panic_passes_results_through() {
+        assert_eq!(catch_panic(|| Ok(5)).ok(), Some(5));
+        assert!(matches!(
+            catch_panic::<()>(|| Err(ApproximateError::Aborted)),
+            Err(ApproximateError::Aborted)
+        ));
+    }
+
+    #[test]
+    fn panic_message_reads_static_and_formatted_payloads() {
+        assert_eq!(panic_message(&"static"), "static");
+        assert_eq!(panic_message(&String::from("formatted")), "formatted");
+        assert_eq!(panic_message(&42_u8), "non-string panic payload");
     }
 }

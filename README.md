@@ -148,13 +148,15 @@ console.log(result.data.slice(0, 32));
 
 Render options:
 
-- `count?: number` optimization steps. Higher values improve quality. Default: `100`.
+- `count?: number` optimization steps, an integer `1..100000`. Higher values improve quality. Default: `100`.
 - `shape?: "any" | "triangle" | "rectangle" | "ellipse" | "circle" | "rotated-rectangle" | "quadratic" | "rotated-ellipse" | "polygon"`. Default: `"any"`.
 - `alpha?: "auto" | number` shape opacity. Use `"auto"` to let the optimizer choose each shape's opacity, or a fixed integer `1..255`. Any other value, including `0`, throws a `ValidationError`. Default: `"auto"`.
-- `seed?: number` deterministic RNG seed (non-negative integer). Omit it to let Rust choose a non-deterministic seed.
+- `seed?: number | bigint` deterministic RNG seed, an integer `0..2^64 - 1`. A `number` seed must be a safe integer (at most `Number.MAX_SAFE_INTEGER`); pass larger seeds as a `bigint`. Omit it to let Rust choose a non-deterministic seed.
 - `background?: "auto" | string` opaque background color. Use `"auto"` (the alpha-weighted mean color of the input, or white for a fully transparent input) or a hex color in `RGB` or `RRGGBB` form, with optional leading `#`. Transparent inputs are flattened onto the background before rendering, so the output is always opaque. Default: `"auto"`.
-- `resizeInput?: number` resolution used during optimization. Smaller values run faster but capture less detail. Default: `256`.
-- `outputSize?: number` resolution of the final exported image. Default: `1024`.
+- `resizeInput?: number` resolution used during optimization, an integer `2..2048`. Smaller values run faster but capture less detail. Default: `256`.
+- `outputSize?: number` resolution of the final exported image, an integer `2..8192`. Default: `1024`.
+
+Numeric options are checked in Rust: a fraction, `NaN`, or a value outside its range throws a `ValidationError`; nothing is wrapped or truncated.
 
 These two options are independent — optimize at low resolution for speed, export at full resolution:
 
@@ -192,7 +194,16 @@ const uri = toDataUri(result);
 console.log(uri.slice(0, 64));
 ```
 
-Handle errors by catching typed error classes:
+Handle errors by catching typed error classes. Every error the package throws or rejects with extends `PrimevalError`, which has a stable `code` and, for errors from the native layer, a `cause` set to the native error:
+
+| Class | `code` | When |
+| --- | --- | --- |
+| `ValidationError` | `INVALID_OPTION` | an option or request field is invalid |
+| `ValidationError` | `INVALID_IMAGE` | the input is not a decodable JPEG, PNG, or WebP image, is larger than 16384 pixels on a side, or is smaller than 2 x 2 pixels |
+| `AbortError` | `ABORTED` | `execution.signal` cancelled the render |
+| `InternalError` | `INTERNAL` | a failure valid input should not cause, such as an encoder error or a caught native panic |
+
+Branch on `instanceof` or `code`, not on the message text.
 
 ```js
 import { approximate, ValidationError } from "@aleburato/primeval";
@@ -205,7 +216,7 @@ try {
   });
 } catch (error) {
   if (error instanceof ValidationError) {
-    console.error("bad input or options:", error.message);
+    console.error(`bad input or options (${error.code}):`, error.message);
   } else {
     throw error;
   }
@@ -248,12 +259,12 @@ try {
 
 Package notes:
 
-- Accepted input formats: **JPEG, PNG, and WebP**.
+- Accepted input formats: **JPEG, PNG, and WebP**, at least 2 x 2 and at most 16384 x 16384 pixels; decoding may allocate at most 512 MiB.
 - Missing `render` fields are forwarded to Rust and resolved there; the package does not reinvent render defaults in TypeScript.
 - Current Rust defaults are `count: 100`, `shape: "any"`, `alpha: "auto"`, omitted `seed`, `background: "auto"`, `resizeInput: 256`, and `outputSize: 1024`.
 - `approximate()` returns exactly one output format per call: `svg` or `png`.
 - The default shape is `any` (mixed); all nine CLI shape modes are available.
-- Errors are mapped to `ValidationError` and `AbortError` — use `instanceof` to distinguish them.
+- Errors are `ValidationError`, `AbortError`, or `InternalError`, all subclasses of `PrimevalError`; see the table above.
 - For SVG results, `data` is a `string`; for raster results, `data` is a `Buffer`.
 - SVG output keeps the shapes at working resolution inside a `viewBox` and sets `width` and `height` to the output size, so it scales cleanly to any size. PNG output is an anti-aliased, opaque RGB image at the output size, with the same geometry as the SVG.
 
@@ -280,13 +291,13 @@ primeval <input> [options]
 - `-o, --output <PATH>`: output file path. The format comes from the extension only: `.svg` writes SVG and `.png` writes PNG (case-insensitive); any other extension, or none, is an error. Use `-` to write SVG to stdout (PNG cannot be written to stdout). Defaults to `<input-stem>.svg` next to the input file, or to stdout when the input is `-`.
 - `-f, --force`: overwrite an existing output file.
 - `-q, --quiet`: print no progress and no notices on stderr.
-- `--count <N>` optimization steps. Higher values improve quality. Default: `100`.
+- `--count <N>` optimization steps, `1..100000`. Higher values improve quality. Default: `100`.
 - `--shape any|triangle|rectangle|ellipse|circle|rotated-rectangle|quadratic|rotated-ellipse|polygon`. Default: `any`.
 - `--alpha auto|<N>` shape opacity. Use `auto` to let the optimizer choose each shape's opacity, or a fixed integer `1..255`. Default: `auto`.
 - `--background <VALUE>` opaque background color. Use `auto` (the alpha-weighted mean color of the input, or white for a fully transparent input) or a hex color in `RGB` or `RRGGBB` form, with optional leading `#`. Transparent inputs are flattened onto the background, so the output is always opaque. Default: `auto`.
-- `--resize-input <N>` resolution used during optimization. Smaller values run faster but capture less detail; the final output is always rendered at `--output-size` resolution. Default: `256`.
-- `--output-size <N>` resolution of the final exported image. Default: `1024`.
-- `--seed <N>` deterministic RNG seed (non-negative integer). If omitted, Rust selects a random seed.
+- `--resize-input <N>` resolution used during optimization, `2..2048`. Smaller values run faster but capture less detail; the final output is always rendered at `--output-size` resolution. Default: `256`.
+- `--output-size <N>` resolution of the final exported image, `2..8192`. Default: `1024`.
+- `--seed <N>` deterministic RNG seed, `0..18446744073709551615`. If omitted, Rust selects a random seed.
 - `-v, --version` print the package version and exit.
 - `-h, --help` print usage to stdout and exit.
 
@@ -297,7 +308,7 @@ CLI notes:
 - Progress is shown only when stderr is a terminal: a single line, updated in place, with the step, the total, the score, and the elapsed time.
 - Ctrl-C cancels the render and exits without writing the output; a second Ctrl-C exits immediately.
 - Errors go to stderr; stdout carries only the SVG for `--output -`, `--help`, and `--version`.
-- Exit codes: `0` success, `1` runtime error (unreadable input, invalid image data or option values rejected by the renderer, existing output, write failure), `2` usage error (unknown option, missing or extra arguments, invalid numeric value or shape, unsupported output extension, empty output path), `130` interrupted by Ctrl-C.
+- Exit codes: `0` success, `1` runtime error (unreadable input, invalid image data or option values rejected by the renderer, existing output, write failure), `2` usage error (unknown option, missing or extra arguments, a numeric option that is not a non-negative integer, unknown shape, unsupported output extension, empty output path), `130` interrupted by Ctrl-C.
 
 ## Benchmarks
 

@@ -163,8 +163,8 @@ mod scalar {
                 let db2 = tb - ab;
                 let da2 = ta - aa;
 
-                total -= (dr1 * dr1 + dg1 * dg1 + db1 * db1 + da1 * da1) as u64;
-                total += (dr2 * dr2 + dg2 * dg2 + db2 * db2 + da2 * da2) as u64;
+                total = total.wrapping_sub((dr1 * dr1 + dg1 * dg1 + db1 * db1 + da1 * da1) as u64);
+                total = total.wrapping_add((dr2 * dr2 + dg2 * dg2 + db2 * db2 + da2 * da2) as u64);
             }
         }
 
@@ -448,20 +448,24 @@ mod neon {
                 // SAFETY: these helpers only run register-only NEON operations
                 // (no memory access); NEON is a baseline aarch64 feature.
                 unsafe {
-                    total -= sum_squared_diff_u8x8(target_channels.0, current_channels.0);
-                    total -= sum_squared_diff_u8x8(target_channels.1, current_channels.1);
-                    total -= sum_squared_diff_u8x8(target_channels.2, current_channels.2);
-                    total -= sum_squared_diff_u8x8(target_channels.3, current_channels.3);
+                    total = total
+                        .wrapping_sub(sum_squared_diff_u8x8(target_channels.0, current_channels.0));
+                    total = total
+                        .wrapping_sub(sum_squared_diff_u8x8(target_channels.1, current_channels.1));
+                    total = total
+                        .wrapping_sub(sum_squared_diff_u8x8(target_channels.2, current_channels.2));
+                    total = total
+                        .wrapping_sub(sum_squared_diff_u8x8(target_channels.3, current_channels.3));
 
                     let after_r = blend_vector_u8x8(current_channels.0, sr, ma, a);
                     let after_g = blend_vector_u8x8(current_channels.1, sg, ma, a);
                     let after_b = blend_vector_u8x8(current_channels.2, sb, ma, a);
                     let after_a = blend_vector_u8x8(current_channels.3, sa, ma, a);
 
-                    total += sum_squared_diff_u8x8(target_channels.0, after_r);
-                    total += sum_squared_diff_u8x8(target_channels.1, after_g);
-                    total += sum_squared_diff_u8x8(target_channels.2, after_b);
-                    total += sum_squared_diff_u8x8(target_channels.3, after_a);
+                    total = total.wrapping_add(sum_squared_diff_u8x8(target_channels.0, after_r));
+                    total = total.wrapping_add(sum_squared_diff_u8x8(target_channels.1, after_g));
+                    total = total.wrapping_add(sum_squared_diff_u8x8(target_channels.2, after_b));
+                    total = total.wrapping_add(sum_squared_diff_u8x8(target_channels.3, after_a));
                 }
                 byte_index += 32;
             }
@@ -497,8 +501,8 @@ mod neon {
                 let db2 = tb - ab;
                 let da2 = ta - aa;
 
-                total -= (dr1 * dr1 + dg1 * dg1 + db1 * db1 + da1 * da1) as u64;
-                total += (dr2 * dr2 + dg2 * dg2 + db2 * db2 + da2 * da2) as u64;
+                total = total.wrapping_sub((dr1 * dr1 + dg1 * dg1 + db1 * db1 + da1 * da1) as u64);
+                total = total.wrapping_add((dr2 * dr2 + dg2 * dg2 + db2 * db2 + da2 * da2) as u64);
             }
         }
 
@@ -668,8 +672,8 @@ pub(crate) fn difference_partial_raw(
             let db2 = tb - ab;
             let da2 = ta - aa;
 
-            total -= (dr1 * dr1 + dg1 * dg1 + db1 * db1 + da1 * da1) as u64;
-            total += (dr2 * dr2 + dg2 * dg2 + db2 * db2 + da2 * da2) as u64;
+            total = total.wrapping_sub((dr1 * dr1 + dg1 * dg1 + db1 * db1 + da1 * da1) as u64);
+            total = total.wrapping_add((dr2 * dr2 + dg2 * dg2 + db2 * db2 + da2 * da2) as u64);
         }
     }
 
@@ -696,6 +700,11 @@ pub(crate) fn difference_partial(
 /// (no write to any intermediate buffer) and accumulates the squared-difference
 /// update in a single pass. This halves memory traffic compared to the
 /// two-pass approach used outside the hot energy-evaluation loop.
+///
+/// The running total uses wrapping arithmetic: a scanline set that covers a
+/// pixel twice (the quadratic stroke, ENG-2) subtracts that pixel's old
+/// difference twice and can dip below zero part-way through a small canvas.
+/// Wrapping keeps debug builds from panicking and matches release builds.
 #[must_use]
 pub(crate) fn energy_from_lines_raw(
     target: &Buffer,

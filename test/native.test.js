@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
-
-import { AbortError, approximate, ValidationError } from "@aleburato/primeval";
+import zlib from "node:zlib";
+import { AbortError, approximate, PrimevalError, ValidationError } from "@aleburato/primeval";
 
 const FIXTURE_IMAGE = fs.readFileSync(
   path.join(process.cwd(), "docs", "readme", "originals", "monalisa.jpg"),
@@ -155,8 +155,124 @@ test("native approximate maps invalid bytes to ValidationError", async () => {
       output: "svg",
       render: render(),
     }),
-    (error) => error instanceof ValidationError,
+    (error) =>
+      error instanceof ValidationError &&
+      error.code === "INVALID_IMAGE" &&
+      error.message.startsWith("invalid image data: ") &&
+      error.cause instanceof Error &&
+      error.cause.code === "INVALID_IMAGE",
   );
+});
+
+// A minimal 8-bit RGB PNG, so tests can build odd sizes without fixtures.
+function solidPng(width, height) {
+  const crcTable = Array.from({ length: 256 }, (_, n) => {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    return c >>> 0;
+  });
+  const crc = (bytes) => {
+    let c = 0xffffffff;
+    for (const byte of bytes) c = crcTable[(c ^ byte) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type, data) => {
+    const body = Buffer.concat([Buffer.from(type, "ascii"), data]);
+    const out = Buffer.alloc(body.length + 8);
+    out.writeUInt32BE(data.length, 0);
+    body.copy(out, 4);
+    out.writeUInt32BE(crc(body), body.length + 4);
+    return out;
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8;
+  header[9] = 2;
+  const row = Buffer.concat([Buffer.from([0]), Buffer.alloc(width * 3, 0x80)]);
+  const raw = Buffer.concat(Array.from({ length: height }, () => row));
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk("IHDR", header),
+    chunk("IDAT", zlib.deflateSync(raw)),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+test("native approximate rejects a 1000x1 image as INVALID_IMAGE", async () => {
+  await assert.rejects(
+    approximate({ input: solidPng(1000, 1), output: "svg", render: render() }),
+    (error) =>
+      error instanceof ValidationError &&
+      error.code === "INVALID_IMAGE" &&
+      error.message ===
+        "invalid image data: the image is 1000x1 pixels; both sides must be at least 2",
+  );
+});
+
+test("native approximate renders a 2000x5 banner on a 256x2 canvas", async () => {
+  const result = await approximate({
+    input: solidPng(2000, 5),
+    output: "svg",
+    render: render({ count: 2, resizeInput: 256 }),
+  });
+
+  assert.match(result.data, /viewBox="0 0 256 2"/);
+});
+
+test("numeric options are range-checked in Rust without wrapping", () => {
+  const cases = [
+    ["count", "count must be an integer from 1 to 100000"],
+    ["resizeInput", "resizeInput must be an integer from 2 to 2048"],
+    ["outputSize", "outputSize must be an integer from 2 to 8192"],
+  ];
+  for (const [name, message] of cases) {
+    for (const value of [2 ** 32 + 1, 2 ** 32 + 16, 1e20, -1, 0, 1.5, Number.NaN, Infinity]) {
+      assert.throws(
+        () =>
+          approximate({ input: FIXTURE_IMAGE, output: "svg", render: render({ [name]: value }) }),
+        (error) =>
+          error instanceof ValidationError &&
+          error.code === "INVALID_OPTION" &&
+          error.message === message,
+        `${name} = ${value}`,
+      );
+    }
+  }
+});
+
+test("seeds accept safe integers and bigints up to 2^64 - 1", async () => {
+  const seedMessage = /^seed must be an integer from 0 to 2\^64 - 1/;
+  for (const seed of [2 ** 53, 1e20, -1, 1.5, -1n, 2n ** 64n]) {
+    assert.throws(
+      () => approximate({ input: FIXTURE_IMAGE, output: "svg", render: render({ seed }) }),
+      (error) =>
+        error instanceof ValidationError &&
+        error.code === "INVALID_OPTION" &&
+        seedMessage.test(error.message),
+      String(seed),
+    );
+  }
+  assert.throws(
+    () => approximate({ input: FIXTURE_IMAGE, output: "svg", render: render({ seed: "7" }) }),
+    (error) =>
+      error instanceof ValidationError && error.message === "seed must be a number or a bigint",
+  );
+
+  const asNumber = await approximate({ input: FIXTURE_IMAGE, output: "svg", render: render() });
+  const asBigint = await approximate({
+    input: FIXTURE_IMAGE,
+    output: "svg",
+    render: render({ seed: 7n }),
+  });
+  assert.equal(asBigint.data, asNumber.data);
+
+  const maxSeed = await approximate({
+    input: FIXTURE_IMAGE,
+    output: "svg",
+    render: render({ seed: 2n ** 64n - 1n }),
+  });
+  assert.equal(maxSeed.format, "svg");
 });
 
 test("approximate rejects removed output formats with ValidationError", async () => {
@@ -169,7 +285,9 @@ test("approximate rejects removed output formats with ValidationError", async ()
           render: render(),
         }),
       (error) =>
-        error instanceof ValidationError && error.message === `unknown output format: ${output}`,
+        error instanceof ValidationError &&
+        error.code === "INVALID_OPTION" &&
+        error.message === "output must be one of: svg, png",
     );
   }
 });
@@ -191,7 +309,12 @@ test("native approximate maps abort signals to AbortError", async () => {
         },
       },
     }),
-    (error) => error instanceof AbortError,
+    (error) =>
+      error instanceof AbortError &&
+      error instanceof PrimevalError &&
+      error.code === "ABORTED" &&
+      error.cause instanceof Error &&
+      error.cause.code === "ABORTED",
   );
 });
 
@@ -217,4 +340,18 @@ test("native approximate emits monotonic progress exactly count times", async ()
   );
   assert.ok(progress.every((info) => info.total === 6));
   assert.ok(progress.every((info, index) => index === 0 || info.step > progress[index - 1].step));
+});
+
+test("aborting after the render settled is a no-op", async () => {
+  const controller = new AbortController();
+
+  const result = await approximate({
+    input: FIXTURE_IMAGE,
+    output: "svg",
+    render: render({ count: 2 }),
+    execution: { signal: controller.signal },
+  });
+  controller.abort();
+
+  assert.equal(result.format, "svg");
 });

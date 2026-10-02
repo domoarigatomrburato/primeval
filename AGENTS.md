@@ -9,7 +9,7 @@ Main components:
 - `crates/primeval-core`: optimization engine, rasterization, scoring, and export
 - `crates/primeval-render`: high-level decode -> render -> encode facade shared by binding and package surfaces
 - `binding`: napi-rs crate named `primeval-node`
-- `src/index.ts`: single-source TypeScript wrapper for the npm package; `src/native-binding.ts` is the native boundary shim
+- `src/index.ts`: single-source TypeScript wrapper for the npm package; `src/errors.ts` holds its error classes and the mapping from native error codes; `src/native-binding.ts` is the native boundary shim
 - `src/cli.ts`: Node CLI entrypoint distributed via npm package `bin`
 - `scripts/`: binding-loader generation and `napi.targets` tooling
 - `test/`: Node/package tests; `test/tooling/`: packaging, loader, and release-metadata tests

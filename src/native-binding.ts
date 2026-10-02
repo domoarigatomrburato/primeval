@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 
 // Keep the generated binding boundary here so the public wrapper can stay focused
-// on validation, normalization, and error mapping.
+// on type checks and error mapping.
 export interface NativeApproximateResult {
   format: string;
   data: Buffer | Uint8Array;
@@ -18,16 +18,27 @@ export interface NativeProgressInfo {
   score: number;
 }
 
+/** Cancels one running render. */
+export interface NativeTask {
+  cancel(): void;
+}
+
 export interface NativeHandle {
   promise: Promise<NativeApproximateResult>;
-  taskId: number;
+  task: NativeTask;
 }
+
+/**
+ * Stable codes the binding sets as `err.code`, from Rust's
+ * `ApproximateError::code`.
+ */
+export type NativeErrorCode = "INVALID_OPTION" | "INVALID_IMAGE" | "ABORTED" | "INTERNAL";
 
 export interface NativeRenderOptions {
   count?: number;
   shape?: string;
   alpha?: number | string;
-  seed?: number;
+  seed?: number | bigint;
   background?: string;
   resizeInput?: number;
   outputSize?: number;
@@ -46,7 +57,6 @@ export interface NativeApproximateRequest {
 
 export interface NativeBinding {
   startApproximate(request: NativeApproximateRequest): NativeHandle;
-  cancelApproximate(taskId: number): void;
 }
 
 let nativeBinding: NativeBinding | undefined;

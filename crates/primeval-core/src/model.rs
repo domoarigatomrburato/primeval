@@ -102,11 +102,7 @@ impl Model {
     /// Searches for the best next shape of `kind` and paints it.
     ///
     /// Returns the number of candidate evaluations the search made.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the search produced no candidate.
-    pub fn step(&mut self, kind: ShapeKind, alpha: Alpha) -> Result<u64, String> {
+    pub fn step(&mut self, kind: ShapeKind, alpha: Alpha) -> u64 {
         let evaluations_before: u64 = self.workers.iter().map(|worker| worker.evaluations).sum();
         self.error_grid.compute(&self.target, &self.current);
 
@@ -145,12 +141,12 @@ impl Model {
                 let right_energy = right.cached_energy.unwrap_or(u64::MAX);
                 left_energy.cmp(&right_energy)
             })
-            .ok_or_else(|| "worker search produced no state".to_string())?;
+            .expect("a model always has at least one worker");
 
         self.add(best.shape, best.alpha);
 
         let evaluations_after: u64 = self.workers.iter().map(|worker| worker.evaluations).sum();
-        Ok(evaluations_after - evaluations_before)
+        evaluations_after - evaluations_before
     }
 
     /// Paints `shape` at `alpha`, which must be `1..=255`.
@@ -245,17 +241,43 @@ mod tests {
             },
         );
 
-        let _ = model
-            .step(ShapeKind::Triangle, fixed_alpha(128))
-            .expect("first step should succeed");
+        let _ = model.step(ShapeKind::Triangle, fixed_alpha(128));
         let first_total: u64 = model.workers.iter().map(|worker| worker.evaluations).sum();
 
-        let second_reported = model
-            .step(ShapeKind::Triangle, fixed_alpha(128))
-            .expect("second step should succeed");
+        let second_reported = model.step(ShapeKind::Triangle, fixed_alpha(128));
         let second_total: u64 = model.workers.iter().map(|worker| worker.evaluations).sum();
 
         assert_eq!(second_reported, second_total - first_total);
+    }
+
+    #[test]
+    fn every_shape_kind_steps_on_tiny_targets() {
+        let mut kinds = vec![ShapeKind::Any];
+        kinds.extend_from_slice(ShapeKind::all_kinds());
+        for (width, height) in [(2, 2), (2, 9), (9, 2)] {
+            for &kind in &kinds {
+                let target = Buffer::new_from_color(width, height, Color::new(200, 40, 90, 255));
+                let mut model = Model::new(
+                    target,
+                    Color::new(0, 0, 0, 255),
+                    ModelOptions {
+                        seed: Some(11),
+                        workers: 2,
+                        ..ModelOptions::default()
+                    },
+                );
+                for _ in 0..3 {
+                    model.step(kind, Alpha::Auto);
+                }
+
+                let drawing = model.drawing();
+                assert_eq!(
+                    (drawing.width, drawing.height, drawing.shapes.len()),
+                    (width, height, 3),
+                    "{kind:?} on {width}x{height}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -272,9 +294,7 @@ mod tests {
             },
         );
 
-        let evaluations = model
-            .step(ShapeKind::Triangle, fixed_alpha(128))
-            .expect("step should succeed");
+        let evaluations = model.step(ShapeKind::Triangle, fixed_alpha(128));
 
         assert!(evaluations > 0);
     }

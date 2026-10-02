@@ -84,15 +84,22 @@ function usage(): string {
   ].join("\n");
 }
 
-function parseInteger(name: string, value: string, min: number): number {
+// Only the syntax is checked here; Rust owns the ranges. A value too large to
+// be exact as a number is far outside every numeric range, so Rust rejects it
+// instead of seeing a wrapped value.
+function parseInteger(name: string, value: string): number {
   if (!/^\d+$/.test(value)) {
     throw usageError(`${name} must be an integer`);
   }
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < min) {
-    throw usageError(`${name} must be at least ${min}`);
+  return Number(value);
+}
+
+// Seeds use the full u64 range, so they are passed exactly as a bigint.
+function parseSeed(value: string): bigint {
+  if (!/^\d+$/.test(value)) {
+    throw usageError("seed must be an integer");
   }
-  return parsed;
+  return BigInt(value);
 }
 
 function parseAlpha(raw: string): "auto" | number {
@@ -311,20 +318,20 @@ async function main(): Promise<number> {
   const format = outputPath === STDIO ? "svg" : formatFromExtension(outputPath);
 
   if (values.shape !== undefined && !(VALID_SHAPES as readonly string[]).includes(values.shape)) {
-    throw usageError(`unknown shape: ${values.shape}`);
+    throw usageError(`shape must be one of: ${VALID_SHAPES.join(", ")}`);
   }
   const render: RenderOptions = {
-    ...(values.count === undefined ? {} : { count: parseInteger("count", values.count, 1) }),
+    ...(values.count === undefined ? {} : { count: parseInteger("count", values.count) }),
     ...(values.shape === undefined ? {} : { shape: values.shape as Shape }),
     ...(values.alpha === undefined ? {} : { alpha: parseAlpha(values.alpha) }),
     ...(values.background === undefined ? {} : { background: values.background }),
     ...(values["resize-input"] === undefined
       ? {}
-      : { resizeInput: parseInteger("resize-input", values["resize-input"], 1) }),
+      : { resizeInput: parseInteger("resize-input", values["resize-input"]) }),
     ...(values["output-size"] === undefined
       ? {}
-      : { outputSize: parseInteger("output-size", values["output-size"], 1) }),
-    ...(values.seed === undefined ? {} : { seed: parseInteger("seed", values.seed, 0) }),
+      : { outputSize: parseInteger("output-size", values["output-size"]) }),
+    ...(values.seed === undefined ? {} : { seed: parseSeed(values.seed) }),
   };
 
   const force = values.force === true;

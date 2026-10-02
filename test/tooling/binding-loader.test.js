@@ -15,7 +15,7 @@ function runGeneratedBindingLoader({ processMock, requireImpl }) {
       "const require = globalThis.__require\n",
     )
     .replace(
-      "export const { cancelApproximate, startApproximate } = loadNativeBinding()\n",
+      "export const { NativeTask, startApproximate } = loadNativeBinding()\n",
       "globalThis.__bindingExports = loadNativeBinding()\n",
     );
 

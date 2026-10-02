@@ -8,8 +8,8 @@ use tiny_skia::{FillRule, LineCap, Paint, Path, PathBuilder, Pixmap, Rect, Strok
 ///
 /// The canvas is stretched onto the output with `scale(width / canvas width,
 /// height / canvas height)`, which matches the SVG writer's `viewBox` up to the
-/// rounding of the output size. Returns `None` when tiny-skia cannot allocate
-/// the pixmap.
+/// rounding of the output size. Returns `None` when the pixmap or the RGB
+/// buffer cannot be allocated, including when its size overflows `usize`.
 pub(crate) fn render_rgb(drawing: &Drawing, width: u32, height: u32) -> Option<Vec<u8>> {
     let mut pixmap = Pixmap::new(width, height)?;
     pixmap.fill(skia_color(drawing.background));
@@ -69,13 +69,19 @@ pub(crate) fn render_rgb(drawing: &Drawing, width: u32, height: u32) -> Option<V
 
     // The background is opaque and source-over keeps it opaque, so the
     // premultiplied colour channels are the straight ones.
-    Some(
+    let len = usize::try_from(width)
+        .ok()?
+        .checked_mul(usize::try_from(height).ok()?)?
+        .checked_mul(3)?;
+    let mut rgb = Vec::new();
+    rgb.try_reserve_exact(len).ok()?;
+    rgb.extend(
         pixmap
             .pixels()
             .iter()
-            .flat_map(|pixel| [pixel.red(), pixel.green(), pixel.blue()])
-            .collect(),
-    )
+            .flat_map(|pixel| [pixel.red(), pixel.green(), pixel.blue()]),
+    );
+    Some(rgb)
 }
 
 /// The unrotated outline of a filled geometry, in canvas coordinates.
