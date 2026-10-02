@@ -329,14 +329,13 @@ The problems are concentrated at the edges: how binaries are built, how failures
 
 - **Severity / status:** Medium. Reproduced. `next: yes`.
 - **Evidence:**
-  - Rust `parse_alpha_str` accepts `"auto"`, but CLI `--alpha auto` gives "alpha must be an integer".
+  - Rust `parse_alpha_str` accepts `"auto"`, but CLI `--alpha auto` gives "alpha must be an integer" (goes away with API-4).
   - The same rule is spelled three ways: "resize_input must be at least 1" (Rust), "resizeInput ..." (TypeScript) and "resize-input ..." (CLI).
   - The seed message says "positive integer" although 0 is accepted.
   - `shape: null` is accepted at runtime although the type forbids it.
 - **Fix:**
   - Pick one vocabulary in Rust and make every layer consume it.
   - Report errors with the public (camelCase) field names, mapped in exactly one place.
-  - The CLI part of the drift disappears with RM-7.
 
 ### NODE-8: Typings and packaging details
 
@@ -363,50 +362,9 @@ The problems are concentrated at the edges: how binaries are built, how failures
 - **Severity / status:** Low. Reported, speculative. `next: yes`.
 - **Detail:** on Linux the loader calls `process.report.getReport()` without first setting `process.report.excludeNetwork = true`, which the napi-rs template sets for speed. Otherwise the diagnostics are good: musl detection, combined load errors, install guidance, sandboxed unit tests.
 
-### CLI-1: Usage text goes to stdout on errors
+### CLI decisions (T2)
 
-- **Severity / status:** Medium. Reproduced. `next: yes`.
-- **Where:** `src/cli.ts:187-188` prints "missing input path" to stderr, then `printUsage()` to stdout.
-- **Evidence:** `primeval -o - > out.svg` writes 16 lines of help text into `out.svg`.
-- **Fix:** print usage to stderr on errors; only `--help` prints to stdout.
-
-### CLI-2: Inconsistent output handling
-
-- **Severity / status:** Medium. Reproduced. `next: yes`.
-- **Evidence:**
-  - Explicit `--output` silently overwrites (`keep.svg` was replaced), while a derived output path refuses to overwrite (`cli.ts:213`).
-  - The derived-path check is `existsSync` followed by `writeFileSync` (`:283-285`): racy, and it follows dangling symlinks.
-  - `-o mismatch.png --format svg` writes SVG into a `.png`.
-  - `-o <directory>` runs the full render and then dies with an `EISDIR` stack trace.
-  - `--output ""` is treated as omitted.
-- **Fix:**
-  - Decide one overwrite policy (refuse unless `--force`).
-  - Write with `{ flag: "wx" }`.
-  - Validate the output destination before rendering.
-  - Infer the format from the extension only (RM-7).
-
-### CLI-3: Error and exit-code conventions
-
-- **Severity / status:** Low. Reproduced. `next: yes`.
-- **Items:**
-  - User errors print stack traces (`--background zzz`, `EISDIR`).
-  - Usage errors exit 1; 2 is conventional.
-  - The `AbortError` branch (`cli.ts:290-292`) is unreachable because the CLI never passes a signal.
-  - SIGINT does not abort the render.
-- **Fix:**
-  - Print `message` only for `PrimevalError`s, with exit code 2 for usage and 1 for runtime errors.
-  - Wire SIGINT to an `AbortController` and exit 130.
-
-### CLI-4: Missing conveniences
-
-- **Severity / status:** Low. Reproduced. `next: yes`.
-- **Items:**
-  - No stdin input (`-` gives "- does not exist or is not readable").
-  - Raster output to stdout is refused although `cli.ts:275-276` already handles buffers.
-  - No `-v`.
-  - Progress lines lack the step total and don't update a single TTY line.
-  - `--help` shows no defaults.
-- **Already good:** strict `util.parseArgs`, clear unknown-option errors, EPIPE handled (`| head` exits 0).
+CLI-1 to CLI-4 landed with RM-7. Deliberate choices: stdout output is SVG only (the format comes from the extension, and there is no `--format`); `--help` lists no defaults, because they belong to Rust and the README; progress is shown only on a TTY.
 
 ---
 
@@ -643,7 +601,6 @@ Takeaways:
 | API-2 | Medium | Verified | yes | Errors are stringly typed: `Model::step` returns `Result<u64, String>` (`model.rs:114`, and that error cannot happen); `FromStr` uses `Err = String` (`shapes.rs:238`, `export.rs:50`); encoders return `Box<dyn Error>`, which is not `Send + Sync` (`export.rs:64`, `:78`, `:98`); render's `ApproximateError` (`lib.rs:144-148`) has no `source()` and turns image errors into strings. | One typed error per crate with `std::error::Error` + `source`, `#[non_exhaustive]`, keeping `io::ErrorKind`. |
 | API-3 | Medium | Verified | **yes (key)** | Output concerns live in the engine: `export.rs` (the PNG encoder, `thumbnail`, `average_background`, CLI file naming in `output_paths`) is in core, and `Model` mixes search with `output_size`, `scale`, `svg()`, `render_output()`. | **Define the engine boundary:** the engine takes a target buffer plus options and produces an ordered list of committed shapes (shape, colour, alpha) with canvas metadata. Decode, resize, SVG/PNG writing and replay live in `primeval-render`. This is what lets a future engine replace the current one without touching render, binding, TS or CLI (section 15). Core then drops `image`. |
 | API-4 | Low | Verified | yes | Alpha is a magic number: `alpha: i32` with 0 meaning auto (`model.rs:114`, `state.rs:14-15`), sent as a number from TypeScript, stringified (`src/index.ts` around `:290`) and re-parsed in Rust. | An `Alpha::{Auto, Fixed(u8)}` enum end to end; `alpha?: "auto" \| number` in TypeScript. |
-| API-5 | Low | Verified | no | Dead or vestigial code (see RM-9). | Delete. |
 | API-6 | Low | Verified | partial | `ShapeKind` keeps parallel name tables (`shapes.rs:194-254`: `variants()`, `FromStr`, display). | One `const` table. |
 | API-7 | Low | Measured | partial | 186 public items lack docs (`-W missing_docs`). Some docs are wrong: `difference_full_raw` claims a normalised RMS but returns a raw `u64`; `raster.rs:8` and `:172` mention a "tiny-skia pipeline" that does not exist; `raster.rs:177` says "non-zero winding" while the code uses even-odd. | `#![warn(missing_docs)]` on the public surface and fix the wrong docs. Broken links, module docs and the rustdoc gate landed in T1. |
 | API-8 | Medium | Measured | yes | Not publishable: `cargo publish --dry-run` warns "manifest has no description" for core and **fails** for render (path dependency without `version`). `rust-version`, `readme`, `keywords`, `categories` and `documentation` are missing. `binding` lacks `publish = false`. Crate versions (0.1.0) are not aligned with npm. | Decide whether the crates are public. If yes, add the metadata, versioned path deps and version alignment (REL-6); if not, `publish = false` everywhere. |
@@ -656,7 +613,7 @@ Takeaways:
 
 | ID | Severity | Status | `next` | Finding | Fix |
 | --- | --- | --- | --- | --- | --- |
-| TEST-1 | Medium | Verified | yes | `test/contracts.test.js` checks contracts by regex over source files. It compares `src/index.ts` arrays with `variants()`, which is used nowhere else and can drift from `FromStr`. It greps for `?? 100`-style defaults but misses `\|\|`, destructuring, `cli.ts` and the README. It checks binding parsers by name only. It missed real drift: the `jpeg` alias, `--alpha auto`, NODE-1. | Replace with **runtime, table-driven** tests that run one table of inputs and expected outcomes through the API, the binding and the CLI (omitted = explicit default, boundaries, error class and code). No code generation (section 13). |
+| TEST-1 | Medium | Verified | yes | `test/contracts.test.js` checks contracts by regex over source files. It compares `src/index.ts` arrays with `variants()`, which is used nowhere else and can drift from `FromStr`. It greps for `?? 100`-style defaults but misses `\|\|`, destructuring, `cli.ts` and the README. It checks binding parsers by name only. It missed real drift: the `jpeg` alias, `--alpha auto`, NODE-1. | Replace with **runtime, table-driven** tests that run one table of inputs and expected outcomes through the API, the binding and the CLI (omitted = explicit default, boundaries, error class and code). No code generation (section 13). Then delete `ShapeKind::variants()` and `OutputFormat::variants()`, which only the regex tests still use. |
 | TEST-2 | Medium | Reproduced | yes | The abort test (`test/native.test.js:115-134`) aborts at step 1 of only 32 cheap steps (~62 ms). A 200 ms main-thread stall makes 40/40 runs resolve instead of reject. | Use a large `count` or an already-aborted signal, plus a deterministic late-abort test once NODE-4 is fixed. |
 | TEST-3 | Medium | Reproduced | yes | Missing negative tests, each of which corresponds to a bug in this plan: invalid `background` mapping, throwing `onProgress`, thin/1×1/multi-byte/huge inputs, u32 overflow, JPG via the API, concurrency, already-aborted signals, CLI `--background` / `--version` / unknown option / write failure, README examples. | Add them with the fixes (red-green per `AGENTS.md`). |
 | TEST-4 | Medium | Verified | partial | Engine tests (112) have gaps: some are weak or circular (`worker.rs:521-548` asserts nothing; a "keeps radius equal" test only checks r ≥ 1; the replay test in `model.rs` is circular; a score test only checks > 0). Missing: tiny images, per-shape score parity, NEON vs scalar parity, seed determinism, PNG vs SVG geometry. | Add `proptest`: rasterizer invariants (in bounds, `x1 ≤ x2`, alpha ≤ 0xFFFF, no duplicate pixels, odd and tiny sizes), fused energy = full recomputation after drawing, the blend bound, `clamp_line` vs `crop_scanlines`, hex colour round-trip, error-grid samples in bounds. |
@@ -672,7 +629,6 @@ All TOOL items landed in T1. Follow-ups:
 - `napi-prebuilds.yml` calls the quality workflow with `uses: ./...` plus `# zizmor: ignore[self-repository]`. Switch to the `$/...` syntax and drop the ignore once actionlint accepts it (1.7.12 does not).
 - Dependabot does not bump the actionlint `docker://` digest in the hygiene job; update it by hand.
 - Two things only CI can confirm, on the first pull request run: `rustup toolchain install` (no arguments) installs the toolchain and components from `rust-toolchain.toml`, and the pinned actionlint image works as a `docker://` step.
-- `approx` leaves with RM-9.
 
 ---
 
@@ -696,8 +652,6 @@ The project has never been published, so every removal is free.
 | ID | `next` | Remove | Why | What it simplifies |
 | --- | --- | --- | --- | --- |
 | RM-4 | yes (contract landed in T2; kernels are PERF-4) | **Alpha channel in the engine**: work in RGB, composite transparent inputs onto the background at decode time, accept only opaque backgrounds (`RGB` / `RRGGBB`) | ENG-16 inconsistency; about 25% of per-pixel work (PERF-4); simpler kernels; transparent output has little value for this product. PERF-0 measures the gain when PERF-4 lands. | 3-byte buffers, RGB-only NEON (`vld3_u8`), one background rule across SVG and PNG. |
-| RM-7 | yes | **CLI extras**: `--format`, the `jpeg` alias, `--progress auto\|plain\|off`, defaulting the output format to the input's | `--format svg -o x.png` writes SVG into a `.png`; three spellings of one thing. | Format comes from the `--output` extension only; the **default output is SVG** (the flagship format); `--quiet` replaces `--progress`; revisit the `_primitive` suffix. |
-| RM-9 | no | **Dead code in core** | Profiling hooks (`profile_quadratic` is always false, `QuadraticProfileStats`, `worker.rs:93-139`); `export::output_paths` (`export.rs:153`, CLI file naming); `util::number_string` (`util.rs:42`); `util::rotate` (tests only); `ShapeKind::variants` and `OutputFormat::variants` (used only by regex tests); `Polygon.convex` (always false, so the convexity check is dead); `Quadratic.width` (never mutated); `WorkerCtx::scratch_vertices`; `parse_alpha_u32`; the unused `_round` parameter in `Shape::mutate`; the `approx` dev-dependency. | Less surface; lets the workspace dead-code lints work once API-1 lands. |
 
 ---
 
@@ -741,8 +695,6 @@ Done. Every TOOL item plus REL-3 and REL-4 landed; section 9 lists the follow-up
 
 Removals before hardening, so no effort goes into code that is about to disappear.
 
-- [ ] RM-7 CLI simplification (format from extension, SVG default, `--quiet`)
-- [ ] RM-9 Delete dead code
 - [ ] API-3 **Engine boundary**: engine produces committed shapes; decode, replay and encoders move to render; core drops `image`
 - [ ] API-1 Restrict core visibility; `#[non_exhaustive]`
 - [ ] API-4 Typed alpha end to end
@@ -758,7 +710,6 @@ Removals before hardening, so no effort goes into code that is about to disappea
 - [ ] NODE-5 `spawn_blocking`
 - [ ] NODE-7 One vocabulary
 - [ ] NODE-8, NODE-9, NODE-10 Typings, cancellation handle, loader detail
-- [ ] CLI-1 to CLI-4
 - [ ] TEST-1, TEST-2, TEST-3, TEST-5, TEST-6
 
 ### T4: Portable native builds and release
