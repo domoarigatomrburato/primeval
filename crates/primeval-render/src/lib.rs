@@ -47,6 +47,9 @@
 mod benches;
 mod error;
 mod input;
+#[cfg(any(test, feature = "lab"))]
+#[doc(hidden)]
+pub mod lab;
 mod output;
 mod raster;
 mod svg;
@@ -437,16 +440,7 @@ pub fn approximate(
         output,
         render,
     } = request;
-    validate_options(&render)?;
-
-    execution.check_cancelled()?;
-    let image = decode_input(&input)?;
-    drop(input);
-    execution.check_cancelled()?;
-    let (working, background) = prepare_target(image, render.background, render.resize_input);
-    let (width, height) = working.dimensions();
-    let target = Buffer::from_rgb(width, height, working.into_raw())
-        .ok_or_else(|| ApproximateError::internal("working image has an invalid pixel length"))?;
+    let (target, background) = working_target(input, &render, || execution.check_cancelled())?;
     let mut options = ModelOptions::default();
     options.seed = render.seed;
     let mut model = Model::new(target, background, options);
@@ -471,6 +465,31 @@ pub fn approximate(
 
     execution.check_cancelled()?;
     encode_output(&model.drawing(), render.output_size, output)
+}
+
+/// Validate `render`, decode `input`, and build the working-resolution
+/// target and its resolved background: everything [`approximate`] does
+/// before it creates the model. `check_cancelled` runs before and after
+/// decoding; `input` is dropped as soon as it is decoded.
+///
+/// `lab::working_target` calls this too, so the evaluation runner cannot
+/// drift from [`approximate`].
+fn working_target(
+    input: impl AsRef<[u8]>,
+    render: &RenderOptions,
+    check_cancelled: impl Fn() -> Result<(), ApproximateError>,
+) -> Result<(Buffer, Color), ApproximateError> {
+    validate_options(render)?;
+
+    check_cancelled()?;
+    let image = decode_input(input.as_ref())?;
+    drop(input);
+    check_cancelled()?;
+    let (working, background) = prepare_target(image, render.background, render.resize_input);
+    let (width, height) = working.dimensions();
+    let target = Buffer::from_rgb(width, height, working.into_raw())
+        .ok_or_else(|| ApproximateError::internal("working image has an invalid pixel length"))?;
+    Ok((target, background))
 }
 
 fn encode_output(

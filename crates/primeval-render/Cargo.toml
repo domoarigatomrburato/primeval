@@ -26,6 +26,10 @@ rayon = "1.10"
 # Compiles the in-crate Divan benchmarks (`src/benches.rs`) so they can reach
 # crate-private items. Never enabled by dependents; see CONTRIBUTING.md.
 bench = ["dep:divan"]
+# Exposes the hidden `lab` module (`src/lab.rs`) for the engine evaluation
+# runner (`examples/engine.rs`). Never enabled by dependents; see
+# CONTRIBUTING.md.
+lab = []
 
 [lib]
 # The library has no libtest benchmarks; `cargo bench` runs only `benches/`.
@@ -35,3 +39,7 @@ bench = false
 name = "render"
 harness = false
 required-features = ["bench"]
+
+[[example]]
+name = "engine"
+required-features = ["lab"]
