@@ -149,8 +149,8 @@ CLI-1 to CLI-4 landed with RM-7. Deliberate choices: stdout output is SVG only (
 
 | ID | Severity | Status | `next` | Where | Problem | Fix |
 | --- | --- | --- | --- | --- | --- | --- |
-| ENG-6 | Low | Verified | no | `score.rs:58-76` | `compute_color` ignores `line.alpha` (coverage), so anti-aliased edges and quadratic pixels are fitted as fully covered and the colour comes out under-saturated. This matches Go; the quality impact is unmeasured. | Weighted least squares: `s* = Σw(t−(1−w)c) / Σw²` with `w = (alpha/255)·(ma/65535)`. |
-| ENG-10 | Low | Reported | no | `error_grid.rs:80-97`, `:141-144`, `:172-173` | Biased sampling only covers `cell_w × cell_h` per cell, but the last row/column absorbs the remainder, which is then reached only by the 20% uniform samples. | Sample within each cell's real bounds. |
+| ENG-18 | Low | Verified | no | `raster.rs` (`rasterize_ellipse`) | Circles and axis-aligned ellipses are `2·rx+1` pixels wide but `2·ry−1` tall: the row loop runs `dy in 0..ry` (inherited from Go), so r = 4 gives 9×7. The geometry test passes because its bound is per unit of perimeter. | Cover rows `-ry..=ry` symmetrically; tighten the geometry test for these kinds; measure. |
+| ENG-19 | Low | Measured | no | `score.rs` (`compute_color`), quadratic | Since the coverage-weighted colour fit (ENG-6, T5), sub-pixel quadratic strokes (width 0.5 at working resolution) get saturated colours that compensate for their partial coverage, but at output size they are mostly fully covered, so the PNG is 1.6–5.1% worse (RMSE) for quadratics while the engine score improves 2–8%. | Fit and score quadratics against coverage that matches the output (e.g. a minimum stroke width of one working pixel, or output-resolution coverage); measure with the runner. |
 
 ---
 
@@ -295,7 +295,6 @@ Since ENG-4 (T5), runner quality is identical across thread counts; times still 
 
 | ID | Severity | Status | `next` | Finding | Fix |
 | --- | --- | --- | --- | --- | --- |
-| TEST-4 | Medium | Verified | partial | Engine tests (112) have gaps: some are weak or circular (`worker.rs:521-548` asserts nothing; a "keeps radius equal" test only checks r ≥ 1; the replay test in `model.rs` is circular; a score test only checks > 0). Missing: tiny images, per-shape score parity, NEON vs scalar parity, seed determinism, PNG vs SVG geometry. | Add `proptest`: rasterizer invariants (in bounds, `x1 ≤ x2`, alpha ≤ 0xFFFF, no duplicate pixels, odd and tiny sizes), fused energy = full recomputation after drawing, the blend bound, `clamp_line` vs `crop_scanlines`, hex colour round-trip, error-grid samples in bounds. |
 
 ---
 
@@ -386,8 +385,10 @@ REL-1, REL-2, REL-5 and REL-6 landed (section 2 lists what only CI can confirm a
 
 Required in any case, because the current engine becomes the reference and baseline for "next".
 
-- [ ] ENG-6, ENG-10
-- [ ] TEST-4 Property tests for rasterizers and scoring
+Landed: ENG-1 to ENG-4, ENG-6 to ENG-11, ENG-13 to ENG-15, ENG-17 (no aspect-ratio limit, by measurement) and TEST-4.
+
+- [ ] ENG-18 Symmetric ellipse rows
+- [ ] ENG-19 Quadratic colour fit against output coverage
 
 ### T6: Performance, gated by benchmarks
 
