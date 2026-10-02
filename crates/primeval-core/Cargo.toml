@@ -1,6 +1,6 @@
 [package]
 name = "primeval-core"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 homepage.workspace = true
 repository.workspace = true

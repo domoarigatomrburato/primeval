@@ -419,7 +419,7 @@ dependencies = [
 
 [[package]]
 name = "primeval-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rand",
  "rand_chacha",
@@ -430,7 +430,7 @@ dependencies = [
 
 [[package]]
 name = "primeval-node"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "napi",
  "napi-build",
@@ -440,7 +440,7 @@ dependencies = [
 
 [[package]]
 name = "primeval-render"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "image",
  "primeval-core",

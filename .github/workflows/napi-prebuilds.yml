@@ -73,8 +73,33 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
 
+      # llvm-objdump for the artifact gate, from the pinned toolchain.
+      - run: rustup component add llvm-tools
+
       - name: Build native addon
-        run: npx napi build -p primeval-node --release --target "$TARGET" --platform --no-js --output-dir .
+        run: |
+          args=(build -p primeval-node --release --target "$TARGET" --platform --no-js --output-dir .)
+          if [ "$NAPI_CROSS" = "true" ]; then
+            # Link against the glibc 2.17 sysroot of @napi-rs/cross-toolchain (pinned by the lockfile).
+            args+=(--use-napi-cross)
+          fi
+          npx napi "${args[@]}"
+        env:
+          TARGET: ${{ matrix.target }}
+          NAPI_CROSS: ${{ matrix.napi-cross }}
+
+      - name: Check artifact ISA and glibc
+        run: node scripts/check-artifact.mjs "$TARGET"
+        env:
+          TARGET: ${{ matrix.target }}
+
+      # Each target builds on a runner of its own platform, so this executes the artifact.
+      - name: Smoke test the addon
+        run: |
+          # Not `npm run build`: its chmod does not run under cmd.exe on Windows.
+          npx tsc
+          npm run generate:binding
+          node scripts/smoke-test-addon.mjs "$TARGET"
         env:
           TARGET: ${{ matrix.target }}
 
@@ -123,8 +148,35 @@ jobs:
       - name: Verify native package completeness
         run: node scripts/napi-targets.mjs verify-artifacts npm
 
-      - name: Publish platform packages
-        run: npx napi pre-publish -t npm --npm-dir npm
+      # Skips every package already on the registry and publishes the root
+      # package last, so a failed run can be re-run as is.
+      - name: Publish packages
+        run: node scripts/release-packages.mjs publish npm "$TAG"
+        env:
+          TAG: ${{ github.ref_name }}
 
-      - name: Publish npm package
-        run: npm publish --access public
+      - name: Verify published packages
+        run: node scripts/release-packages.mjs verify "$TAG"
+        env:
+          TAG: ${{ github.ref_name }}
+
+  github-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Create GitHub release
+        run: |
+          if gh release view "$TAG" --repo "$REPO" > /dev/null 2>&1; then
+            echo "GitHub release $TAG already exists"
+          else
+            gh release create "$TAG" --repo "$REPO" --verify-tag --generate-notes
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}

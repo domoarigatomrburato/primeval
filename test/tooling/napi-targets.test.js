@@ -57,9 +57,76 @@ test("release matrix runners are derived from napi targets", () => {
       {
         runner: "ubuntu-latest",
         target: "x86_64-unknown-linux-gnu",
+        "napi-cross": true,
       },
     ],
   });
+});
+
+test("every release target builds and smoke tests on a runner of its own platform", () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8"));
+  const { include } = releaseMatrixForTargets(pkg.napi.targets);
+  assert.deepEqual(Object.fromEntries(include.map(({ target, runner }) => [target, runner])), {
+    "aarch64-apple-darwin": "macos-15",
+    // Intel runner, so the x64 addon runs natively rather than under Rosetta.
+    "x86_64-apple-darwin": "macos-15-intel",
+    "aarch64-unknown-linux-gnu": "ubuntu-24.04-arm",
+    "x86_64-unknown-linux-gnu": "ubuntu-latest",
+    "x86_64-pc-windows-msvc": "windows-latest",
+  });
+  // Linux GNU builds link against the glibc 2.17 sysroot of the napi-rs cross toolchain.
+  assert.deepEqual(
+    include.filter((entry) => entry["napi-cross"]).map(({ target }) => target),
+    ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"],
+  );
+});
+
+test("release workflow gates, smoke tests, and publishes re-runnably", () => {
+  const workflow = fs.readFileSync(
+    path.join(process.cwd(), ".github", "workflows", "napi-prebuilds.yml"),
+    "utf8",
+  );
+  const step = (name) => {
+    const index = workflow.indexOf(`- name: ${name}\n`);
+    assert.notEqual(index, -1, `missing step: ${name}`);
+    return index;
+  };
+
+  assert.match(workflow, /--use-napi-cross/);
+  assert.match(workflow, /rustup component add llvm-tools/);
+  assert.ok(step("Build native addon") < step("Check artifact ISA and glibc"));
+  assert.ok(step("Check artifact ISA and glibc") < step("Smoke test the addon"));
+  assert.ok(step("Smoke test the addon") < step("Upload artifacts"));
+  assert.match(workflow, /node scripts\/check-artifact\.mjs "\$TARGET"/);
+  assert.match(workflow, /node scripts\/smoke-test-addon\.mjs "\$TARGET"/);
+
+  assert.ok(step("Verify native package completeness") < step("Publish packages"));
+  assert.ok(step("Publish packages") < step("Verify published packages"));
+  assert.match(workflow, /node scripts\/release-packages\.mjs publish npm "\$TAG"/);
+  assert.match(workflow, /node scripts\/release-packages\.mjs verify "\$TAG"/);
+  assert.doesNotMatch(workflow, /napi pre-publish/);
+  assert.doesNotMatch(workflow, /^\s*run: npm publish/m);
+
+  assert.match(workflow, /gh release view "\$TAG"/);
+  assert.match(workflow, /gh release create "\$TAG"[^\n]*--verify-tag[^\n]*--generate-notes/);
+  assert.doesNotMatch(workflow, /cache: npm|rust-cache|actions\/cache/);
+});
+
+test("rust checks also run on arm64 macOS so the NEON paths are tested", () => {
+  const qualityWorkflow = fs.readFileSync(
+    path.join(process.cwd(), ".github", "workflows", "quality.yml"),
+    "utf8",
+  );
+  const rustChecks = qualityWorkflow.match(/^ {2}rust-checks:\n((?:(?: {4,}.*)?\n)+)/m);
+  assert.ok(rustChecks, "missing rust-checks job");
+  const runners = rustChecks[1].match(/^ {8}runner: \[([^\]]*)\]\s*$/m);
+  assert.ok(runners, "missing runner matrix in rust-checks job");
+  assert.deepEqual(
+    runners[1].split(",").map((runner) => runner.trim()),
+    ["ubuntu-latest", "macos-15"],
+  );
+  assert.match(rustChecks[1], /runs-on: \$\{\{ matrix\.runner \}\}/);
+  assert.match(rustChecks[1], /run: npm run verify:rust/);
 });
 
 test("package metadata validation rejects drift between targets and optional dependencies", () => {

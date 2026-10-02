@@ -46,6 +46,16 @@ npm run verify
 
 `npm run verify` includes `npm run lint`, which runs Biome over `src/`, `scripts/`, and `test/` to check formatting, import order, and lint rules. Run `npm run format` to apply formatting, import order, and safe lint fixes.
 
+## Profiling
+
+Builds target each architecture's portable baseline; the repository sets no `target-cpu`, and the release workflow rejects artifacts that use AVX-512 or SVE. To profile with every instruction your own CPU supports, opt in for that build only and keep the output in a separate target directory:
+
+```bash
+RUSTFLAGS="-C target-cpu=native" cargo build --profile profiling --target-dir target/native
+```
+
+Never commit a `target-cpu` setting (for example in `.cargo/config.toml`): a tooling test fails on it, because binaries built that way crash on CPUs that lack the build machine's features.
+
 ## Pull Requests
 
 - Keep changes narrowly scoped.

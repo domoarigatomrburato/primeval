@@ -7,6 +7,8 @@ members = [
 ]
 
 [workspace.package]
+# Always equal to the npm package version; `npm run bump:version` updates both.
+version = "0.1.1"
 homepage = "https://github.com/domoarigatomrburato/primeval"
 repository = "https://github.com/domoarigatomrburato/primeval"
 license = "MIT"
