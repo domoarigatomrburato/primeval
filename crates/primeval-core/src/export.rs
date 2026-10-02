@@ -1,6 +1,4 @@
 use crate::{Buffer, Color};
-use gif::{Encoder, Frame, Repeat};
-use image::codecs::jpeg::JpegEncoder;
 use image::{DynamicImage, GenericImageView, ImageEncoder, RgbaImage, imageops};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -10,14 +8,12 @@ use std::str::FromStr;
 pub enum OutputFormat {
     Svg,
     Png,
-    Jpg,
-    Gif,
 }
 
 impl OutputFormat {
     #[must_use]
     pub const fn variants() -> &'static [&'static str] {
-        &["svg", "png", "jpg", "gif"]
+        &["svg", "png"]
     }
 
     #[must_use]
@@ -25,8 +21,6 @@ impl OutputFormat {
         match self {
             Self::Svg => "svg",
             Self::Png => "png",
-            Self::Jpg => "jpg",
-            Self::Gif => "gif",
         }
     }
 
@@ -40,8 +34,6 @@ impl OutputFormat {
         match self {
             Self::Svg => "image/svg+xml",
             Self::Png => "image/png",
-            Self::Jpg => "image/jpeg",
-            Self::Gif => "image/gif",
         }
     }
 }
@@ -53,8 +45,6 @@ impl FromStr for OutputFormat {
         match value {
             "svg" => Ok(Self::Svg),
             "png" => Ok(Self::Png),
-            "jpg" | "jpeg" => Ok(Self::Jpg),
-            "gif" => Ok(Self::Gif),
             other => Err(format!("unknown output format: {other}")),
         }
     }
@@ -71,55 +61,6 @@ pub fn encode_png(buffer: &Buffer) -> Result<Vec<u8>, Box<dyn std::error::Error>
         image.height(),
         image::ColorType::Rgba8.into(),
     )?;
-    Ok(out.into_inner())
-}
-
-/// Encode a buffer as a JPEG image with the given quality (1–100).
-pub fn encode_jpg(buffer: &Buffer, quality: u8) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let rgb = rgba_to_rgb(buffer.pixels());
-    let mut out = Cursor::new(Vec::new());
-    let mut encoder = JpegEncoder::new_with_quality(&mut out, quality);
-    encoder.encode(
-        &rgb,
-        buffer.width(),
-        buffer.height(),
-        image::ColorType::Rgb8.into(),
-    )?;
-    Ok(out.into_inner())
-}
-
-/// Encode a sequence of buffers as an animated GIF.
-///
-/// `delay` is the inter-frame delay in centiseconds; `last_delay` applies to the final frame.
-pub fn encode_gif(
-    frames: &[Buffer],
-    delay: u16,
-    last_delay: u16,
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let Some(first) = frames.first() else {
-        return Ok(Vec::new());
-    };
-
-    let mut out = Cursor::new(Vec::new());
-    {
-        let mut encoder = Encoder::new(&mut out, first.width() as u16, first.height() as u16, &[])?;
-        encoder.set_repeat(Repeat::Infinite)?;
-        for (index, frame_buffer) in frames.iter().enumerate() {
-            let mut rgba = frame_buffer.pixels().to_vec();
-            let mut frame = Frame::from_rgba_speed(
-                frame_buffer.width() as u16,
-                frame_buffer.height() as u16,
-                &mut rgba,
-                10,
-            );
-            frame.delay = if index + 1 == frames.len() {
-                last_delay
-            } else {
-                delay
-            };
-            encoder.write_frame(&frame)?;
-        }
-    }
     Ok(out.into_inner())
 }
 
@@ -174,14 +115,6 @@ pub fn average_background(image: &DynamicImage) -> Color {
     Buffer::from_image(&image.to_rgba8()).average_color()
 }
 
-fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
-    let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
-    for pixel in rgba.as_chunks::<4>().0 {
-        rgb.extend_from_slice(&pixel[..3]);
-    }
-    rgb
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,12 +133,7 @@ mod tests {
 
     #[test]
     fn output_format_round_trips_public_names() {
-        let cases = [
-            (OutputFormat::Svg, "svg"),
-            (OutputFormat::Png, "png"),
-            (OutputFormat::Jpg, "jpg"),
-            (OutputFormat::Gif, "gif"),
-        ];
+        let cases = [(OutputFormat::Svg, "svg"), (OutputFormat::Png, "png")];
 
         for (format, value) in cases {
             assert_eq!(format.as_str(), value);
@@ -215,26 +143,25 @@ mod tests {
             );
         }
 
-        assert_eq!(
-            "jpeg".parse::<OutputFormat>().expect("jpeg"),
-            OutputFormat::Jpg
-        );
+        assert_eq!(OutputFormat::variants(), &["svg", "png"]);
     }
 
     #[test]
     fn output_format_rejects_unknown_name() {
-        assert!("bmp".parse::<OutputFormat>().is_err());
+        for value in ["bmp", "jpg", "jpeg", "gif"] {
+            assert!(value.parse::<OutputFormat>().is_err(), "{value}");
+        }
     }
 
     #[test]
     fn output_paths_use_format_extensions() {
-        let paths = output_paths("out/base.png", &[OutputFormat::Svg, OutputFormat::Gif]);
+        let paths = output_paths("out/base.gif", &[OutputFormat::Svg, OutputFormat::Png]);
 
         assert_eq!(
             paths,
             vec![
                 (OutputFormat::Svg, PathBuf::from("out/base.svg")),
-                (OutputFormat::Gif, PathBuf::from("out/base.gif")),
+                (OutputFormat::Png, PathBuf::from("out/base.png")),
             ]
         );
     }

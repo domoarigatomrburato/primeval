@@ -255,7 +255,6 @@ fn normalize_request(
             resize_input: render.resize_input.unwrap_or(defaults.resize_input),
             output_size: render.output_size.unwrap_or(defaults.output_size),
             workers: defaults.workers,
-            gif_frame_step: defaults.gif_frame_step,
         },
     })
 }
@@ -326,13 +325,34 @@ mod tests {
                 path: None,
                 data: Some(Buffer::from(vec![0_u8; 4])),
             },
-            "jpeg".to_string(),
+            "png".to_string(),
             render_options("rotated-rectangle"),
         )
         .expect("request should normalize");
 
-        assert_eq!(request.output, OutputFormat::Jpg);
+        assert_eq!(request.output, OutputFormat::Png);
         assert_eq!(request.render.shape, ShapeKind::RotatedRectangle);
+    }
+
+    #[test]
+    fn normalize_request_rejects_removed_output_formats() {
+        for output in ["jpeg", "jpg", "gif"] {
+            let error = normalize_request(
+                NativeInputSource {
+                    kind: "bytes".to_string(),
+                    path: None,
+                    data: Some(Buffer::from(vec![0_u8; 4])),
+                },
+                output.to_string(),
+                render_options("triangle"),
+            )
+            .expect_err("removed output format should fail");
+
+            assert_eq!(
+                error.reason,
+                format!("[ValidationError] unknown output format: {output}")
+            );
+        }
     }
 
     #[test]

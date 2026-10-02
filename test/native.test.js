@@ -107,6 +107,21 @@ test("native approximate maps invalid bytes to ValidationError", async () => {
   );
 });
 
+test("approximate rejects removed output formats with ValidationError", async () => {
+  for (const output of ["jpg", "jpeg", "gif"]) {
+    await assert.rejects(
+      async () =>
+        approximate({
+          input: { kind: "bytes", data: FIXTURE_IMAGE },
+          output,
+          render: render(),
+        }),
+      (error) =>
+        error instanceof ValidationError && error.message === `unknown output format: ${output}`,
+    );
+  }
+});
+
 test("native approximate maps abort signals to AbortError", async () => {
   const controller = new AbortController();
 

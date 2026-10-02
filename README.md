@@ -2,7 +2,7 @@
 
 `primeval` is a Rust-powered image approximation tool that turns photos and artwork into **stylized reconstructions built from simple geometric shapes**.
 
-Give it an input image and it searches for a layered approximation you can export as **PNG, JPG, GIF, or clean SVG** output.
+Give it an input image and it searches for a layered approximation you can export as **clean SVG or PNG** output.
 
 <!-- markdownlint-disable MD033 -->
 
@@ -32,7 +32,7 @@ Browse the full example gallery in [`docs/gallery.md`](docs/gallery.md).
 - Fast hill-climbing search with multi-threaded worker contexts
 - Nine shape modes in the CLI: mixed (`any`), triangle, rectangle, ellipse, circle, rotated rectangle, quadratic curve, rotated ellipse, and polygon
 - Small working-resolution optimization with high-resolution output replay
-- Vector export via SVG, plus raster output for PNG, JPG, and animated GIFs
+- Vector export via SVG, plus raster output as PNG
 
 ## Install
 
@@ -48,13 +48,13 @@ Prebuilt native addons are provided for macOS (arm64, x64), Linux GNU libc (arm6
 >
 > - Linux musl/Alpine is not supported yet; use a glibc-based distribution or container image.
 > - Do not install with `--omit=optional` or equivalent package-manager settings; the native addon is delivered through platform-specific optional dependencies.
-> - Accepted input formats are JPEG and PNG only.
+> - Accepted input formats are JPEG, PNG, and WebP only.
 
 The package also exposes a CLI binary named `primeval`.
 
 ## Quick Start
 
-Accepted input formats: **JPEG and PNG**. Output can be SVG, PNG, JPG, or animated GIF.
+Accepted input formats: **JPEG, PNG, and WebP**. Output can be SVG or PNG.
 
 Run the package CLI (no Rust build required):
 
@@ -62,7 +62,7 @@ Run the package CLI (no Rust build required):
 npx @aleburato/primeval photo.jpg --count 100
 ```
 
-This writes `photo_primitive.jpg` next to the input file. Use `--output` to choose a different path or format:
+This writes `photo_primitive.svg` next to the input file (a PNG input writes `<stem>_primitive.png`; any other input writes SVG). Use `--output` to choose a different path or format:
 
 ```bash
 npx @aleburato/primeval photo.jpg --output output/result.svg --count 100
@@ -75,7 +75,7 @@ npm install -g @aleburato/primeval
 primeval photo.jpg --count 100
 ```
 
-Replace `photo.jpg` with the path to your own JPEG or PNG image.
+Replace `photo.jpg` with the path to your own JPEG, PNG, or WebP image.
 
 Useful options:
 
@@ -94,7 +94,7 @@ primeval photo.jpg --output result.png --count 300 --resize-input 128 --output-s
 
 - `--repeat <N>` extra random mutations to try per step; `0` means one candidate per step (default `0`)
 - `--seed <N>` for deterministic output
-- `--format svg|png|jpg|jpeg|gif` optional output format override (`jpeg` is accepted as an alias for `jpg`)
+- `--format svg|png` optional output format override
 - `--progress auto|plain|off` progress reporting mode (default `auto`)
 
 Write SVG output to stdout (explicit `--output -` required, SVG only):
@@ -113,7 +113,7 @@ primeval --help
 
 - `Unsupported Linux runtime: linux-<arch>-musl`: published Linux binaries currently target GNU libc only. Alpine and other musl-based environments are not supported yet.
 - `Failed to load native binding ...`: reinstall without omitting optional dependencies, make sure you are on Node 22.12+, and verify that your OS/CPU pair is one of the published targets listed above.
-- `invalid image data ...`: `primeval` accepts JPEG and PNG inputs only. Convert HEIC, WebP, TIFF, or other formats before rendering.
+- `invalid image data ...`: `primeval` accepts JPEG, PNG, and WebP inputs only. Convert HEIC, TIFF, GIF, or other formats before rendering.
 - `... does not exist or is not readable`: the CLI and Node API accept filesystem paths, but the path must exist and be readable from the current process.
 
 ## Node Package
@@ -142,7 +142,7 @@ console.log(result.data.slice(0, 32));
 `approximate()` accepts:
 
 - `input` (required): `{ kind: "bytes", data: Buffer | Uint8Array }` or `{ kind: "path", path: string }`
-- `output` (required): `"svg" | "png" | "jpg" | "gif"`
+- `output` (required): `"svg" | "png"`
 - `render` (optional): render options forwarded to Rust; omitted fields use Rust defaults
 - `execution` (optional): progress and cancellation controls
 
@@ -250,10 +250,10 @@ try {
 
 Package notes:
 
-- Accepted input formats: **JPEG and PNG**.
+- Accepted input formats: **JPEG, PNG, and WebP**.
 - Missing `render` fields are forwarded to Rust and resolved there; the package does not reinvent render defaults in TypeScript.
 - Current Rust defaults are `count: 100`, `shape: "any"`, `alpha: 0` (`auto`), `repeat: 0`, omitted `seed`, `background: "auto"`, `resizeInput: 256`, and `outputSize: 1024`.
-- `approximate()` returns exactly one output format per call: `svg`, `png`, `jpg`, or `gif`.
+- `approximate()` returns exactly one output format per call: `svg` or `png`.
 - The default shape is `any` (mixed); all nine CLI shape modes are available.
 - Errors are mapped to `ValidationError`, `NotFoundError`, and `AbortError` — use `instanceof` to distinguish them.
 - For SVG results, `data` is a `string`; for raster results, `data` is a `Buffer`.
@@ -273,9 +273,9 @@ The images below use identical settings (`shape: any`, `count: 200`, `seed: 42`)
 
 `primeval` accepts:
 
-- `input` (required positional): path to a JPEG or PNG image
-- `--output <PATH>` (optional): output file path. Defaults to `<input-stem>_primitive.<ext>` next to the input file, where `<ext>` is inferred from `--format` or from the input extension. Use `-` to write SVG to stdout.
-- `--format svg|png|jpg|jpeg|gif` output format. If omitted, format is inferred from `--output`'s extension, or from the input extension when `--output` is also omitted. `jpeg` is accepted as an alias for `jpg`.
+- `input` (required positional): path to a JPEG, PNG, or WebP image
+- `--output <PATH>` (optional): output file path. Defaults to `<input-stem>_primitive.<ext>` next to the input file, where `<ext>` is `--format` if given, otherwise `png` for a `.png` input and `svg` for any other input. Use `-` to write SVG to stdout.
+- `--format svg|png` output format. If omitted, format is inferred from `--output`'s extension (an unsupported extension such as `.jpg` is an error), or from the input extension when `--output` is also omitted.
 - `--count <N>` optimization steps. Higher values improve quality. Default: `100`.
 - `--shape any|triangle|rectangle|ellipse|circle|rotated-rectangle|quadratic|rotated-ellipse|polygon`. Default: `any`.
 - `--alpha <N>` shape opacity. Accepted values: `0..255` where `0` means auto-detect. Default: `0`.

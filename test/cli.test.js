@@ -141,58 +141,43 @@ test("cli treats --alpha 0 as auto", () => {
   assert.match(svg, /^<svg\b/);
 });
 
-test("cli infers jpg output from .jpeg extension", () => {
+const RENDER_ARGS = [
+  "--count",
+  "4",
+  "--resize-input",
+  "8",
+  "--output-size",
+  "16",
+  "--seed",
+  "7",
+  "--progress",
+  "off",
+];
+
+test("cli rejects removed output formats inferred from --output", () => {
   const tmpDir = makeTmpDir();
-  const output = path.join(tmpDir, "out.jpeg");
 
-  const result = runCli([
-    fixturePath,
-    "--output",
-    output,
-    "--count",
-    "4",
-    "--resize-input",
-    "8",
-    "--output-size",
-    "16",
-    "--seed",
-    "7",
-    "--progress",
-    "off",
-  ]);
+  for (const extension of ["jpg", "jpeg", "gif"]) {
+    const output = path.join(tmpDir, `out.${extension}`);
+    const result = runCli([fixturePath, "--output", output, ...RENDER_ARGS]);
 
-  assert.equal(result.status, 0, result.stderr);
-  const bytes = fs.readFileSync(output);
-  assert.equal(bytes[0], 0xff);
-  assert.equal(bytes[1], 0xd8);
+    assert.equal(result.status, 1, `expected failure for .${extension}`);
+    assert.match(result.stderr, new RegExp(`unknown output format: ${extension}\\b`));
+    assert.equal(fs.existsSync(output), false);
+  }
 });
 
-test("cli accepts --format jpeg as an alias for jpg", () => {
+test("cli rejects removed --format values", () => {
   const tmpDir = makeTmpDir();
   const output = path.join(tmpDir, "out.bin");
 
-  const result = runCli([
-    fixturePath,
-    "--output",
-    output,
-    "--format",
-    "jpeg",
-    "--count",
-    "4",
-    "--resize-input",
-    "8",
-    "--output-size",
-    "16",
-    "--seed",
-    "7",
-    "--progress",
-    "off",
-  ]);
+  for (const format of ["jpg", "jpeg", "gif"]) {
+    const result = runCli([fixturePath, "--output", output, "--format", format, ...RENDER_ARGS]);
 
-  assert.equal(result.status, 0, result.stderr);
-  const bytes = fs.readFileSync(output);
-  assert.equal(bytes[0], 0xff);
-  assert.equal(bytes[1], 0xd8);
+    assert.equal(result.status, 1, `expected failure for --format ${format}`);
+    assert.match(result.stderr, new RegExp(`unknown output format: ${format}\\b`));
+    assert.equal(fs.existsSync(output), false);
+  }
 });
 
 test("cli prints help", () => {
@@ -241,12 +226,29 @@ test("cli auto-derives output filename when --output is omitted", () => {
   ]);
 
   assert.equal(result.status, 0, result.stderr);
-  const expected = path.join(tmpDir, "monalisa_primitive.jpg");
+  const expected = path.join(tmpDir, "monalisa_primitive.svg");
   assert.ok(fs.existsSync(expected), `expected output file ${expected} to exist`);
-  const svg = fs.readFileSync(expected);
-  // JPEG magic bytes (auto-derived format matches input extension)
-  assert.equal(svg[0], 0xff);
-  assert.equal(svg[1], 0xd8);
+  // JPEG is not an output format, so a .jpg input derives an SVG output.
+  assert.match(fs.readFileSync(expected, "utf8"), /^<svg\b/);
+  assert.equal(fs.existsSync(path.join(tmpDir, "monalisa_primitive.jpg")), false);
+});
+
+test("cli auto-derives png output from a .png input", () => {
+  const tmpDir = makeTmpDir();
+  const pngInput = path.join(tmpDir, "monalisa.png");
+  fs.copyFileSync(
+    path.join(repoRoot, "docs", "readme", "comparisons", "monalisa-any-200-alpha-128.png"),
+    pngInput,
+  );
+
+  const result = runCli([pngInput, ...RENDER_ARGS]);
+
+  assert.equal(result.status, 0, result.stderr);
+  const expected = path.join(tmpDir, "monalisa_primitive.png");
+  assert.ok(fs.existsSync(expected), `expected output file ${expected} to exist`);
+  const bytes = fs.readFileSync(expected);
+  assert.equal(bytes[0], 0x89);
+  assert.equal(bytes[1], 0x50);
 });
 
 test("cli auto-derives output with correct format when --format is given", () => {
@@ -283,8 +285,8 @@ test("cli fails with collision when auto-derived output already exists", () => {
   const tmpDir = makeTmpDir();
   const inputCopy = path.join(tmpDir, "monalisa.jpg");
   fs.copyFileSync(fixturePath, inputCopy);
-  // Pre-create the would-be output file (jpg, matching input extension)
-  fs.writeFileSync(path.join(tmpDir, "monalisa_primitive.jpg"), "placeholder");
+  // Pre-create the would-be output file (svg, derived for a .jpg input)
+  fs.writeFileSync(path.join(tmpDir, "monalisa_primitive.svg"), "placeholder");
 
   const result = runCli([
     inputCopy,

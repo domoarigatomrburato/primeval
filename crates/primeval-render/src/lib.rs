@@ -41,7 +41,7 @@
 //! ```
 
 use image::DynamicImage;
-use primeval_core::export::{average_background, encode_gif, encode_jpg, encode_png, thumbnail};
+use primeval_core::export::{average_background, encode_png, thumbnail};
 use primeval_core::shapes::ShapeKind;
 use primeval_core::{Buffer, Color, Model, ModelOptions};
 use std::path::PathBuf;
@@ -52,9 +52,9 @@ pub use primeval_core::OutputFormat;
 /// Source image input for a render request.
 #[derive(Clone, Debug, PartialEq)]
 pub enum InputSource {
-    /// Raw encoded image bytes, typically PNG or JPEG.
+    /// Raw encoded image bytes in JPEG, PNG, or WebP format.
     Bytes(Vec<u8>),
-    /// A filesystem path to an encoded image file.
+    /// A filesystem path to a JPEG, PNG, or WebP image file.
     Path(PathBuf),
 }
 
@@ -97,8 +97,6 @@ pub struct RenderOptions {
     pub output_size: u32,
     /// Worker override. `None` uses available parallelism.
     pub workers: Option<usize>,
-    /// Keep every `gif_frame_step`th replay frame when exporting GIFs.
-    pub gif_frame_step: usize,
 }
 
 impl Default for RenderOptions {
@@ -113,7 +111,6 @@ impl Default for RenderOptions {
             resize_input: 256,
             output_size: 1024,
             workers: None,
-            gif_frame_step: 1,
         }
     }
 }
@@ -150,7 +147,7 @@ pub enum ApproximateResult {
         width: u32,
         height: u32,
     },
-    /// Encoded raster output such as PNG, JPG, or GIF.
+    /// Encoded PNG raster output.
     Raster {
         format: OutputFormat,
         data: Vec<u8>,
@@ -266,10 +263,8 @@ pub fn parse_seed_i64(value: i64) -> Result<u64, String> {
 /// rerunning optimization.
 pub struct ApproximationRun {
     model: Model,
-    gif_frame_step: usize,
     rendered: Option<Buffer>,
     svg: Option<String>,
-    frames: Option<Vec<Buffer>>,
 }
 
 impl ApproximationRun {
@@ -303,20 +298,6 @@ impl ApproximationRun {
                 width,
                 height,
             }),
-            OutputFormat::Jpg => Ok(ApproximateResult::Raster {
-                format: OutputFormat::Jpg,
-                data: encode_jpg(self.rendered(), 95)
-                    .map_err(|err| ApproximateError::internal(err.to_string()))?,
-                width,
-                height,
-            }),
-            OutputFormat::Gif => Ok(ApproximateResult::Raster {
-                format: OutputFormat::Gif,
-                data: encode_gif(self.frames(), 50, 250)
-                    .map_err(|err| ApproximateError::internal(err.to_string()))?,
-                width,
-                height,
-            }),
         }
     }
 
@@ -327,11 +308,6 @@ impl ApproximationRun {
 
     fn svg(&mut self) -> &str {
         self.svg.get_or_insert_with(|| self.model.svg())
-    }
-
-    fn frames(&mut self) -> &[Buffer] {
-        self.frames
-            .get_or_insert_with(|| gif_frames(&self.model, self.gif_frame_step))
     }
 }
 
@@ -402,10 +378,8 @@ pub fn prepare(
 
     Ok(ApproximationRun {
         model,
-        gif_frame_step: request.render.gif_frame_step,
         rendered: None,
         svg: None,
-        frames: None,
     })
 }
 
@@ -425,11 +399,6 @@ fn validate_options(render: &RenderOptions) -> Result<(), ApproximateError> {
     }
     if render.workers == Some(0) {
         return Err(ApproximateError::validation("workers must be at least 1"));
-    }
-    if render.gif_frame_step == 0 {
-        return Err(ApproximateError::validation(
-            "gif_frame_step must be at least 1",
-        ));
     }
     if let AlphaOption::Fixed(alpha) = render.alpha
         && alpha == 0
@@ -463,18 +432,6 @@ pub fn default_worker_count() -> usize {
     std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(1)
-}
-
-fn gif_frames(model: &Model, gif_frame_step: usize) -> Vec<Buffer> {
-    let mut frames = model.frames(0.001);
-    if gif_frame_step > 1 {
-        frames = frames
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, frame)| (index % gif_frame_step == 0).then_some(frame))
-            .collect();
-    }
-    frames
 }
 
 #[cfg(test)]
@@ -516,7 +473,6 @@ mod tests {
             resize_input: 8,
             output_size: 16,
             workers: Some(1),
-            gif_frame_step: 1,
         }
     }
 
@@ -624,26 +580,73 @@ mod tests {
     }
 
     #[test]
-    fn encoders_emit_expected_headers() {
+    fn png_encoder_emits_png_header() {
         let image = Buffer::new_from_color(4, 4, Color::new(10, 20, 30, 255));
         let png = encode_png(&image).expect("png");
-        let jpg = encode_jpg(&image, 90).expect("jpg");
-        let gif = encode_gif(
-            &[
-                image.clone(),
-                Buffer::new_from_color(4, 4, Color::new(30, 20, 10, 255)),
-            ],
-            50,
-            250,
-        )
-        .expect("gif");
 
         assert!(png.starts_with(&[0x89, b'P', b'N', b'G']));
-        assert!(jpg.starts_with(&[0xFF, 0xD8]));
-        assert!(gif.starts_with(b"GIF89a"));
-        assert!(!png.is_empty());
-        assert!(!jpg.is_empty());
-        assert!(!gif.is_empty());
+    }
+
+    fn encoded_fixture(format: ImageFormat) -> Vec<u8> {
+        let image = DynamicImage::ImageRgb8(fixture_image().to_rgb8());
+        let mut out = Cursor::new(Vec::new());
+        image.write_to(&mut out, format).expect("encode fixture");
+        out.into_inner()
+    }
+
+    fn assert_renders_svg(bytes: Vec<u8>) {
+        let cancelled = AtomicBool::new(false);
+        let result = approximate(
+            request(InputSource::Bytes(bytes), OutputFormat::Svg),
+            None,
+            &cancelled,
+        )
+        .expect("render should succeed");
+
+        match result {
+            ApproximateResult::Svg { width, height, .. } => {
+                assert_eq!((width, height), (16, 10));
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn webp_input_renders() {
+        let bytes = encoded_fixture(ImageFormat::WebP);
+        assert!(bytes.starts_with(b"RIFF"));
+        assert_eq!(&bytes[8..12], b"WEBP");
+
+        assert_renders_svg(bytes);
+    }
+
+    #[test]
+    fn jpeg_input_renders() {
+        let bytes = encoded_fixture(ImageFormat::Jpeg);
+        assert!(bytes.starts_with(&[0xFF, 0xD8]));
+
+        assert_renders_svg(bytes);
+    }
+
+    #[test]
+    fn gif_input_is_rejected_as_invalid_image_data() {
+        // Minimal valid 1x1 GIF89a.
+        const GIF: &[u8] = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff\
+            !\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;";
+        let cancelled = AtomicBool::new(false);
+
+        let result = approximate(
+            request(InputSource::Bytes(GIF.to_vec()), OutputFormat::Svg),
+            None,
+            &cancelled,
+        );
+
+        match result {
+            Err(ApproximateError::Validation(message)) => {
+                assert!(message.starts_with("invalid image data"), "{message}");
+            }
+            other => panic!("expected validation error, got {other:?}"),
+        }
     }
 
     #[test]
@@ -819,20 +822,12 @@ mod tests {
 
         let svg = run.result(OutputFormat::Svg).expect("svg result");
         let png = run.result(OutputFormat::Png).expect("png result");
-        let gif = run.result(OutputFormat::Gif).expect("gif result");
 
         assert!(matches!(svg, ApproximateResult::Svg { .. }));
         assert!(matches!(
             png,
             ApproximateResult::Raster {
                 format: OutputFormat::Png,
-                ..
-            }
-        ));
-        assert!(matches!(
-            gif,
-            ApproximateResult::Raster {
-                format: OutputFormat::Gif,
                 ..
             }
         ));

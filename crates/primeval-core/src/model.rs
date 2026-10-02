@@ -216,23 +216,11 @@ impl Model {
     pub fn render_output(&self) -> Buffer {
         let mut output =
             Buffer::new_from_color(self.output_width, self.output_height, self.background);
-        self.replay_history_into(&mut output, None);
+        self.replay_history_into(&mut output);
         output
     }
 
-    #[must_use]
-    pub fn frames(&self, score_delta: f64) -> Vec<Buffer> {
-        let mut output =
-            Buffer::new_from_color(self.output_width, self.output_height, self.background);
-        self.replay_history_into(&mut output, Some(score_delta))
-    }
-
-    fn replay_history_into(&self, output: &mut Buffer, score_delta: Option<f64>) -> Vec<Buffer> {
-        let mut result = Vec::new();
-        if score_delta.is_some() {
-            result.push(output.clone());
-        }
-        let mut previous = 10.0;
+    fn replay_history_into(&self, output: &mut Buffer) {
         let mut worker = WorkerCtx::new(
             self.output_width as i32,
             self.output_height as i32,
@@ -242,16 +230,7 @@ impl Model {
         for committed in &self.history {
             let lines = self.rasterize_output_shape(&committed.shape, &mut worker);
             crate::score::draw_lines(output, committed.color, lines);
-            if let Some(score_delta) = score_delta {
-                let delta = previous - committed.score;
-                if delta >= score_delta {
-                    previous = committed.score;
-                    result.push(output.clone());
-                }
-            }
         }
-
-        result
     }
 
     fn rasterize_output_shape<'a>(

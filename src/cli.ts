@@ -18,7 +18,7 @@ import {
 const require = createRequire(import.meta.url);
 const packageJson = require("../package.json") as { version: string };
 
-const VALID_FORMATS: readonly OutputFormat[] = ["svg", "png", "jpg", "gif"];
+const VALID_FORMATS: readonly OutputFormat[] = ["svg", "png"];
 const VALID_SHAPES = [
   "any",
   "triangle",
@@ -35,9 +35,6 @@ type ProgressMode = "auto" | "plain" | "off";
 
 function parseOutputFormat(value: string): OutputFormat | undefined {
   const normalized = value.toLowerCase();
-  if (normalized === "jpeg") {
-    return "jpg";
-  }
   if ((VALID_FORMATS as readonly string[]).includes(normalized)) {
     return normalized as OutputFormat;
   }
@@ -51,7 +48,7 @@ function printUsage(): void {
       "",
       "Options:",
       "  -o, --output <path|->      Output path (or - for stdout); defaults to <input-stem>_primitive.<ext>",
-      "      --format <fmt>         svg|png|jpg|jpeg|gif (optional override)",
+      "      --format <fmt>         svg|png (optional override)",
       "      --count <n>            Number of optimization steps",
       "      --shape <kind>         any|triangle|rectangle|ellipse|circle|rotated-rectangle|quadratic|rotated-ellipse|polygon",
       "      --alpha <n>            Alpha 0..255 where 0 means auto",
@@ -101,6 +98,9 @@ function inferFormat(outputPath: string): OutputFormat {
   const format = parseOutputFormat(extension);
   if (format) {
     return format;
+  }
+  if (extension) {
+    fail(`unknown output format: ${extension}`);
   }
   fail("could not infer output format from output extension; use --format");
 }

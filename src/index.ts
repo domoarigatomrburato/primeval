@@ -10,7 +10,7 @@ export type InputSource =
   | { kind: "path"; path: string }
   | { kind: "bytes"; data: Buffer | Uint8Array };
 
-export type OutputFormat = "svg" | "png" | "jpg" | "gif";
+export type OutputFormat = "svg" | "png";
 
 export type Shape =
   | "any"
@@ -61,9 +61,9 @@ export type SvgResult = {
 };
 
 export type RasterResult = {
-  format: "png" | "jpg" | "gif";
+  format: "png";
   data: Buffer;
-  mimeType: "image/png" | "image/jpeg" | "image/gif";
+  mimeType: "image/png";
   width: number;
   height: number;
 };
@@ -114,7 +114,7 @@ const VALID_SHAPES: readonly Shape[] = [
   "polygon",
 ];
 
-const VALID_OUTPUTS: readonly OutputFormat[] = ["svg", "png", "jpg", "gif"];
+const VALID_OUTPUTS: readonly OutputFormat[] = ["svg", "png"];
 
 interface NormalizedRender {
   count?: number;
@@ -327,9 +327,9 @@ function startApproximate(request: ApproximateRequest): {
       }
 
       return {
-        format: result.format as "png" | "jpg" | "gif",
+        format: result.format as "png",
         data: Buffer.isBuffer(result.data) ? result.data : Buffer.from(result.data),
-        mimeType: result.mimeType as "image/png" | "image/jpeg" | "image/gif",
+        mimeType: result.mimeType as "image/png",
         width: result.width,
         height: result.height,
       };

@@ -11,8 +11,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
-gif = "0.14"
+image = { version = "0.25", default-features = false, features = ["png"] }
 rand = { version = "0.10", default-features = false }
 rand_chacha = "0.10"
 rand_distr = "0.6"
