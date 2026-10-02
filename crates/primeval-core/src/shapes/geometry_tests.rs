@@ -192,14 +192,7 @@ fn mismatch_per_perimeter(kind: ShapeKind, dx: f64, dy: f64) -> f64 {
     let (mut worker, round) = make_test_round(W, H, 11);
     let (mut mismatched, mut perimeter_total) = (0usize, 0.0);
     for _ in 0..SHAPES_PER_KIND {
-        let mut shape = Shape::random(kind, &mut worker, &round);
-        if let Shape::Quadratic(quadratic) = &mut shape {
-            // The engine's 0.5-wide stroke never covers half a pixel in
-            // the geometry, so every pixel would sit at the threshold. The
-            // width is carried through unchanged; a wider stroke tests the
-            // same centre-line convention without ties.
-            quadratic.width = 3.0;
-        }
+        let shape = Shape::random(kind, &mut worker, &round);
         let engine = engine_mask(&shape, &mut worker);
         let geometry = shape.geometry();
         let drawn = geometry_mask(&shift(&geometry, dx, dy));
@@ -217,8 +210,10 @@ const SHAPES_PER_KIND: usize = 200;
 /// boundary, so the mismatch count grows with the perimeter, not the area;
 /// normalising by the perimeter makes one bound fit small and large shapes.
 /// Every rasterizer samples its shape at pixel centres, so a correct mapping
-/// stays at or below 0.07 (`Quadratic`, whose joins between flat segments
-/// are approximate) and a half-pixel offset costs at least 0.16.
+/// stays at or below 0.07 (`Circle`, whose four extreme pixels have their
+/// centres on the outline but are just under half covered) and a half-pixel
+/// offset costs at least 0.17. Axis-aligned ellipses and circles are also
+/// checked exactly, pixel centre by pixel centre, below.
 const BOUND: f64 = 0.1;
 
 const HALF_PIXEL_SHIFTS: [(f64, f64); 4] = [(0.5, 0.0), (-0.5, 0.0), (0.0, 0.5), (0.0, -0.5)];
@@ -301,4 +296,65 @@ fn circle_geometry_is_centred_on_the_pixel() {
             rotation: 0.0,
         }
     );
+}
+
+/// Whether the centre of pixel `(px, py)` lies inside or on `geometry`, an
+/// axis-aligned ellipse, computed exactly: both centres sit on the
+/// half-pixel lattice and the radii are integers.
+fn ellipse_contains_pixel_centre(geometry: &Geometry, px: i32, py: i32) -> bool {
+    let Geometry::Ellipse {
+        cx,
+        cy,
+        rx,
+        ry,
+        rotation,
+    } = *geometry
+    else {
+        panic!("expected an ellipse, got {geometry:?}");
+    };
+    assert_eq!(rotation, 0.0);
+    let dx = (f64::from(px) + 0.5 - cx) as i64;
+    let dy = (f64::from(py) + 0.5 - cy) as i64;
+    let (rx, ry) = (rx as i64, ry as i64);
+    dx * dx * ry * ry + dy * dy * rx * rx <= rx * rx * ry * ry
+}
+
+#[test]
+fn axis_aligned_ellipses_cover_exactly_the_pixel_centres_inside_their_geometry() {
+    let (mut worker, round) = make_test_round(W, H, 23);
+    for kind in [ShapeKind::Ellipse, ShapeKind::Circle] {
+        for _ in 0..SHAPES_PER_KIND {
+            let shape = Shape::random(kind, &mut worker, &round);
+            let engine = engine_mask(&shape, &mut worker);
+            let geometry = shape.geometry();
+            for py in 0..H as i32 {
+                for px in 0..W as i32 {
+                    assert_eq!(
+                        engine[py as usize * W as usize + px as usize],
+                        ellipse_contains_pixel_centre(&geometry, px, py),
+                        "{shape:?} at pixel ({px}, {py})"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn circle_of_radius_four_covers_nine_rows_and_nine_columns() {
+    let (mut worker, _round) = make_test_round(W, H, 0);
+    let shape = Shape::Circle(Circle { x: 20, y: 20, r: 4 });
+    let lines = shape.rasterize(&mut worker).to_vec();
+    let rows: Vec<i32> = lines.iter().map(|line| line.y).collect();
+    assert_eq!(rows.iter().min(), Some(&16));
+    assert_eq!(rows.iter().max(), Some(&24));
+    assert_eq!(lines.len(), 9, "one span per row: {lines:?}");
+    assert_eq!(lines.iter().map(|line| line.x1).min(), Some(16));
+    assert_eq!(lines.iter().map(|line| line.x2).max(), Some(24));
+    let tips: Vec<(i32, i32)> = lines
+        .iter()
+        .filter(|line| line.y == 16 || line.y == 24)
+        .map(|line| (line.x1, line.x2))
+        .collect();
+    assert_eq!(tips, vec![(20, 20), (20, 20)]);
 }

@@ -556,6 +556,16 @@ impl RotatedRectangle {
 impl Quadratic {
     const MUTATE_MARGIN: f64 = 16.0;
     const MAX_MUTATE_ATTEMPTS: u32 = 6;
+    /// Stroke width in working pixels. The colour fit weights pixels by
+    /// coverage, while the output draws the stroke at its scaled width,
+    /// where it is mostly fully covered. A stroke narrower than one pixel
+    /// never fully covers one, so its fitted colour over-saturates to make
+    /// up for the partial coverage and the output is worse. One pixel is
+    /// the narrowest width that fully covers the centre line. Wider strokes
+    /// score better still (1.5 measured about 6% better than 1.0), but they
+    /// change the look of the curves and cost more time, so the width stays
+    /// at the minimum that fixes the mismatch.
+    const STROKE_WIDTH: f64 = 1.0;
 
     /// The stroke rasterizer measures distances in continuous coordinates,
     /// so the control points map unchanged.
@@ -581,7 +591,7 @@ impl Quadratic {
             y2,
             x3,
             y3,
-            width: 0.5,
+            width: Self::STROKE_WIDTH,
         };
         quadratic.mutate(worker);
         quadratic
@@ -949,6 +959,12 @@ fn pixel_centre(x: i32, y: i32) -> Point {
     Point::new(f64::from(x) + 0.5, f64::from(y) + 0.5)
 }
 
+/// Fills an axis-aligned ellipse centred on pixel `(x, y)`.
+///
+/// Covers the pixels whose centres lie inside or on the ellipse with radii
+/// `rx` and `ry` around that pixel's centre, so the shape is `2·rx + 1`
+/// pixels wide and `2·ry + 1` tall, symmetric about its centre row and
+/// column.
 fn rasterize_ellipse<R>(
     worker: &mut WorkerCtx<R>,
     x: i32,
@@ -957,14 +973,13 @@ fn rasterize_ellipse<R>(
     ry: i32,
 ) -> &[Scanline] {
     worker.lines.clear();
-    let aspect = rx as f64 / ry as f64;
-    for dy in 0..ry {
+    for dy in 0..=ry {
         let y1 = y - dy;
         let y2 = y + dy;
         if (y1 < 0 || y1 >= worker.height) && (y2 < 0 || y2 >= worker.height) {
             continue;
         }
-        let span = (((ry * ry - dy * dy) as f64).sqrt() * aspect) as i32;
+        let span = ellipse_half_span(rx, ry, dy);
         let x1 = (x - span).max(0);
         let x2 = (x + span).min(worker.width - 1);
         if y1 >= 0 && y1 < worker.height {
@@ -985,6 +1000,25 @@ fn rasterize_ellipse<R>(
         }
     }
     &worker.lines
+}
+
+/// The largest `dx` with `(dx / rx)² + (dy / ry)² <= 1`, for `0 <= dy <= ry`.
+///
+/// Exact integer arithmetic: `dx² · ry² <= rx² · (ry² − dy²)` holds exactly
+/// when `dx · ry <= isqrt(rx² · (ry² − dy²))`. The integer square root
+/// starts from the hardware `f64` one and is corrected exactly;
+/// `i64::isqrt` is several times slower.
+fn ellipse_half_span(rx: i32, ry: i32, dy: i32) -> i32 {
+    let (rx, ry, dy) = (i64::from(rx), i64::from(ry), i64::from(dy));
+    let limit = rx * rx * (ry * ry - dy * dy);
+    let mut root = (limit as f64).sqrt() as i64;
+    while root * root > limit {
+        root -= 1;
+    }
+    while (root + 1) * (root + 1) <= limit {
+        root += 1;
+    }
+    (root / ry) as i32
 }
 
 /// Fills a triangle whose integer vertices are pixel centres.
@@ -1214,6 +1248,18 @@ mod tests {
                     x2: 7,
                     alpha: 0xFFFF
                 },
+                Scanline {
+                    y: 3,
+                    x1: 5,
+                    x2: 5,
+                    alpha: 0xFFFF
+                },
+                Scanline {
+                    y: 7,
+                    x1: 5,
+                    x2: 5,
+                    alpha: 0xFFFF
+                },
             ]
         );
     }
@@ -1252,6 +1298,38 @@ mod tests {
             width: 2.0,
         });
         assert!(!shape.rasterize(&mut worker).is_empty());
+    }
+
+    /// The colour fit weights pixels by coverage, but at output size a stroke
+    /// is drawn several pixels wide and mostly fully covered. A working-size
+    /// stroke that never fully covers a pixel gets saturated colours that
+    /// compensate for its partial coverage and look wrong at output size, so
+    /// random quadratics must be wide enough to fully cover their centre line.
+    #[test]
+    fn random_quadratics_fully_cover_pixels_on_their_centre_line() {
+        let (mut worker, round) = round(64, 48);
+        for _ in 0..50 {
+            let Shape::Quadratic(random) = Shape::random(ShapeKind::Quadratic, &mut worker, &round)
+            else {
+                panic!("expected a quadratic");
+            };
+            let straight = Shape::Quadratic(Quadratic {
+                x1: 4.0,
+                y1: 20.5,
+                x2: 30.0,
+                y2: 20.5,
+                x3: 56.0,
+                y3: 20.5,
+                ..random
+            });
+            let lines = straight.rasterize(&mut worker);
+            let centre_row: Vec<_> = lines.iter().filter(|line| line.y == 20).collect();
+            assert!(!centre_row.is_empty(), "{random:?}");
+            assert!(
+                centre_row.iter().all(|line| line.alpha == 0xFFFF),
+                "{random:?}: centre row {centre_row:?}"
+            );
+        }
     }
 
     #[test]
