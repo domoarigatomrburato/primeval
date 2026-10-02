@@ -82,7 +82,7 @@ To add an image, drop a JPEG, PNG or WebP file you may redistribute into `docs/r
 
 ## Profiling
 
-Builds target each architecture's portable baseline; the repository sets no `target-cpu`, and the release workflow rejects artifacts that use AVX-512 or SVE. To profile with every instruction your own CPU supports, opt in for that build only and keep the output in a separate target directory:
+Builds target each architecture's portable baseline; the repository sets no `target-cpu`, and the release workflow rejects artifacts that use SVE, or AVX-512 outside the few dependency functions that run only after a runtime CPU check (`DISPATCHED_FUNCTIONS` in `scripts/check-artifact.mjs`). To profile with every instruction your own CPU supports, opt in for that build only and keep the output in a separate target directory:
 
 ```bash
 RUSTFLAGS="-C target-cpu=native" cargo build --profile profiling --target-dir target/native

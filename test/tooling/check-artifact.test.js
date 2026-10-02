@@ -8,6 +8,7 @@ import {
   artifactChecksForTarget,
   findGlibcViolations,
   findIsaViolations,
+  scanDisassembly,
 } from "../../scripts/check-artifact.mjs";
 
 const repoRoot = process.cwd();
@@ -88,6 +89,105 @@ test("x86_64 ISA check flags vpternlog even without a zmm operand", () => {
   );
 });
 
+// The AVX-512 fold of crc32fast, as `objdump -d --no-show-raw-insn --demangle` prints it.
+function crc32Fold(symbol) {
+  return `
+0000000000a1b000 <${symbol}>:
+  a1b000:      	vpxorq	(%rsi), %zmm0, %zmm4
+  a1b006:      	vpbroadcastq	0x14c02e(%rip), %zmm3
+  a1b00f:      	vpternlogq	$0x96, (%rsi), %zmm6, %zmm4
+`;
+}
+
+const CRC32_FOLD = "crc32fast::specialized::pclmulqdq::calculate_avx512";
+const CRC32_REDUCE = "crc32fast::specialized::pclmulqdq::reduce512";
+const ENGINE_FUNCTION = "primeval_core::raster::fill::h0123456789abcdef";
+
+test("x86_64 ISA check accepts AVX-512 inside allowlisted runtime-dispatched functions", () => {
+  for (const [symbol, entry] of [
+    // Legacy mangling, demangled on ELF.
+    [`${CRC32_FOLD}::h0123456789abcdef`, CRC32_FOLD],
+    // v0 mangling, demangled with crate disambiguators.
+    ["crc32fast[1a2b3c4d5e6f7a8b]::specialized::pclmulqdq::calculate_avx512", CRC32_FOLD],
+    // v0 mangling as LLVM demangles it, without disambiguators.
+    [CRC32_FOLD, CRC32_FOLD],
+    // Mach-O symbol whose leading underscore survived demangling.
+    [`_${CRC32_FOLD}::h0123456789abcdef`, CRC32_FOLD],
+    [`${CRC32_REDUCE}::hfedcba9876543210`, CRC32_REDUCE],
+  ]) {
+    const { violations, accepted } = scanDisassembly(
+      `${crc32Fold(symbol)}${X86_PORTABLE}`,
+      "x86_64",
+    );
+    assert.deepEqual(violations, [], symbol);
+    assert.deepEqual(accepted, [{ function: entry, count: 3 }], symbol);
+  }
+});
+
+test("x86_64 ISA check counts accepted instructions per allowlisted function", () => {
+  const disassembly = [
+    crc32Fold(`${CRC32_FOLD}::h1111111111111111`),
+    crc32Fold(CRC32_REDUCE),
+    crc32Fold(`${CRC32_FOLD}::h2222222222222222`),
+  ].join("");
+  assert.deepEqual(scanDisassembly(disassembly, "x86_64").accepted, [
+    { function: CRC32_FOLD, count: 6 },
+    { function: CRC32_REDUCE, count: 3 },
+  ]);
+});
+
+test("x86_64 ISA check names the enclosing function of each violation", () => {
+  const disassembly = `${crc32Fold(CRC32_FOLD)}${crc32Fold(ENGINE_FUNCTION)}`;
+  const { violations, accepted } = scanDisassembly(disassembly, "x86_64");
+  assert.deepEqual(accepted, [{ function: CRC32_FOLD, count: 3 }]);
+  assert.deepEqual(
+    violations.map(({ line, reason, function: name }) => [line, reason, name]),
+    [
+      [8, "AVX-512 zmm register", ENGINE_FUNCTION],
+      [9, "AVX-512 zmm register", ENGINE_FUNCTION],
+      [10, "AVX-512 zmm register", ENGINE_FUNCTION],
+    ],
+  );
+  assert.deepEqual(findIsaViolations(disassembly, "x86_64"), violations);
+});
+
+test("x86_64 ISA check rejects AVX-512 before any symbol header", () => {
+  const violations = findIsaViolations(X86_AVX512_ATT, "x86_64");
+  assert.equal(violations.length, 2);
+  for (const violation of violations) {
+    assert.equal(violation.function, null);
+  }
+});
+
+test("x86_64 ISA check does not allowlist lookalike function names", () => {
+  for (const symbol of [
+    "evil::crc32fast::specialized::pclmulqdq::calculate_avx512_copy",
+    "evil::crc32fast::specialized::pclmulqdq::calculate_avx512",
+    `${CRC32_FOLD}_copy`,
+    `${CRC32_FOLD}::helper`,
+    `${CRC32_FOLD}::{{closure}}`,
+    "crc32fast::specialized::pclmulqdq::calculate_avx2",
+    ".text",
+  ]) {
+    const { violations, accepted } = scanDisassembly(crc32Fold(symbol), "x86_64");
+    assert.deepEqual(accepted, [], symbol);
+    assert.deepEqual(
+      violations.map(({ function: name }) => name),
+      [symbol, symbol, symbol],
+    );
+  }
+});
+
+test("aarch64 ISA check has no allowlist", () => {
+  const { violations, accepted } = scanDisassembly(
+    `0000000000016000 <${CRC32_FOLD}>:\n${ARM_SVE}`,
+    "aarch64",
+  );
+  assert.deepEqual(accepted, []);
+  assert.equal(violations.length, 4);
+  assert.ok(violations.every(({ function: name }) => name === CRC32_FOLD));
+});
+
 test("aarch64 ISA check accepts NEON, LSE atomics and zero registers", () => {
   assert.deepEqual(findIsaViolations(ARM_PORTABLE, "aarch64"), []);
 });
@@ -136,22 +236,28 @@ test("glibc check rejects symbol versions above the maximum", () => {
 test("artifact checks are derived from the napi target", () => {
   assert.deepEqual(artifactChecksForTarget("x86_64-unknown-linux-gnu"), {
     arch: "x86_64",
+    scanIsa: true,
     maxGlibc: "2.17",
   });
   assert.deepEqual(artifactChecksForTarget("aarch64-unknown-linux-gnu"), {
     arch: "aarch64",
+    scanIsa: true,
     maxGlibc: "2.17",
   });
+  // MSVC images carry no function symbols, so the scan could not tell crates apart.
   assert.deepEqual(artifactChecksForTarget("x86_64-pc-windows-msvc"), {
     arch: "x86_64",
+    scanIsa: false,
     maxGlibc: null,
   });
   assert.deepEqual(artifactChecksForTarget("aarch64-apple-darwin"), {
     arch: "aarch64",
+    scanIsa: true,
     maxGlibc: null,
   });
   assert.deepEqual(artifactChecksForTarget("x86_64-apple-darwin"), {
     arch: "x86_64",
+    scanIsa: true,
     maxGlibc: null,
   });
   assert.throws(() => artifactChecksForTarget("riscv64gc-unknown-linux-gnu"), /unsupported/);
@@ -161,6 +267,14 @@ test("every napi target has artifact checks", () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
   for (const target of pkg.napi.targets) {
     assert.doesNotThrow(() => artifactChecksForTarget(target), target);
+  }
+});
+
+test("only Windows napi targets skip the ISA scan", () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
+  assert.ok(pkg.napi.targets.includes("x86_64-pc-windows-msvc"));
+  for (const target of pkg.napi.targets) {
+    assert.equal(artifactChecksForTarget(target).scanIsa, !target.includes("-windows-"), target);
   }
 });
 
