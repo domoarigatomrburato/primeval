@@ -20,7 +20,7 @@ export interface Glue {
     input: Uint8Array,
     output: string,
     render: object,
-    onProgress?: (info: { step: number; total: number; score: number }) => void,
+    onProgress?: (info: { step: number; total: number; score: number; shape: string }) => void,
   ): WorkerResult;
   setPanicReporter(channel: string, report: (message: string) => void): void;
   __panicForTests(inPool: boolean): void;

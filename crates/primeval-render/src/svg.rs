@@ -28,11 +28,21 @@ pub(crate) fn write_svg(drawing: &Drawing, width: u32, height: u32) -> String {
     );
     for shape in &drawing.shapes {
         write_shape(&mut svg, &shape.geometry, shape.color);
+        svg.push('\n');
     }
     svg.push_str("</svg>\n");
     svg
 }
 
+/// The SVG element of one shape, exactly as its line in [`write_svg`]'s
+/// output, without the newline.
+pub(crate) fn shape_element(geometry: &Geometry, color: Color) -> String {
+    let mut element = String::with_capacity(96);
+    write_shape(&mut element, geometry, color);
+    element
+}
+
+/// Append the element of one shape to `svg`, without a newline.
 fn write_shape(svg: &mut String, geometry: &Geometry, color: Color) {
     let fill = paint("fill", color);
     let _ = match geometry {
@@ -41,7 +51,7 @@ fn write_shape(svg: &mut String, geometry: &Geometry, color: Color) {
             y,
             width,
             height,
-        } => writeln!(
+        } => write!(
             svg,
             "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"{fill}/>",
             num(*x),
@@ -50,7 +60,7 @@ fn write_shape(svg: &mut String, geometry: &Geometry, color: Color) {
             num(*height)
         ),
         // A circle looks the same at any rotation.
-        Geometry::Ellipse { cx, cy, rx, ry, .. } if rx == ry => writeln!(
+        Geometry::Ellipse { cx, cy, rx, ry, .. } if rx == ry => write!(
             svg,
             "<circle cx=\"{}\" cy=\"{}\" r=\"{}\"{fill}/>",
             num(*cx),
@@ -75,7 +85,7 @@ fn write_shape(svg: &mut String, geometry: &Geometry, color: Color) {
                     num(*cy)
                 )
             };
-            writeln!(
+            write!(
                 svg,
                 "<ellipse cx=\"{}\" cy=\"{}\" rx=\"{}\" ry=\"{}\"{transform}{fill}/>",
                 num(*cx),
@@ -90,14 +100,14 @@ fn write_shape(svg: &mut String, geometry: &Geometry, color: Color) {
                 .map(|point| format!("{},{}", num(point.x), num(point.y)))
                 .collect::<Vec<_>>()
                 .join(" ");
-            writeln!(svg, "<polygon points=\"{points}\"{fill}/>")
+            write!(svg, "<polygon points=\"{points}\"{fill}/>")
         }
         Geometry::Quadratic {
             start,
             control,
             end,
             width,
-        } => writeln!(
+        } => write!(
             svg,
             "<path d=\"M{} Q{} {}\" fill=\"none\"{} stroke-width=\"{}\"/>",
             pair(*start),

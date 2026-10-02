@@ -45,6 +45,7 @@ export const execution: ExecutionOptions = {
 };
 export const render: RenderOptions = { count: 10, shape: "triangle" satisfies Shape };
 export const outputFormats: Equal<OutputFormat, "svg" | "png"> = true;
+export const progressShape: Equal<ProgressInfo["shape"], string> = true;
 
 export const isPrimevalError = (
   error: ValidationError | AbortError | InternalError,

@@ -80,6 +80,19 @@ export type ProgressInfo = {
    * is better.
    */
   score: number;
+  /**
+   * The SVG element of the shape this step added, exactly as its line in the
+   * SVG output, without the newline, whatever the `output` format. Its
+   * coordinates are in the final SVG's `viewBox`, the working canvas, so the
+   * shapes of every step, in order, are the shape lines of the SVG the same
+   * render (same seed and options) returns.
+   *
+   * To draw progress live, wrap the shapes received so far in an `<svg>` with
+   * the final document's `viewBox` and background, for example taken from a
+   * `count: 1` render with the same options: the background and canvas size
+   * do not depend on `count`.
+   */
+  shape: string;
 };
 
 /** Progress and cancellation controls. */

@@ -17,6 +17,7 @@ export interface NativeProgressInfo {
   step: number;
   total: number;
   score: number;
+  shape: string;
 }
 
 /** Cancels one running render. */

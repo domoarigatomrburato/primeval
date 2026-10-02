@@ -13,7 +13,7 @@ declare module "*/wasm/single/primeval.js" {
     input: Uint8Array,
     output: string,
     render: object,
-    onProgress?: (info: { step: number; total: number; score: number }) => void,
+    onProgress?: (info: { step: number; total: number; score: number; shape: string }) => void,
   ): { format: string; mimeType: string; width: number; height: number; data: Uint8Array };
   export function setPanicReporter(channel: string, report: (message: string) => void): void;
   export function __panicForTests(inPool: boolean): void;
@@ -28,7 +28,7 @@ declare module "*/wasm/threaded/primeval.js" {
     input: Uint8Array,
     output: string,
     render: object,
-    onProgress?: (info: { step: number; total: number; score: number }) => void,
+    onProgress?: (info: { step: number; total: number; score: number; shape: string }) => void,
   ): { format: string; mimeType: string; width: number; height: number; data: Uint8Array };
   export function setPanicReporter(channel: string, report: (message: string) => void): void;
   export function __panicForTests(inPool: boolean): void;

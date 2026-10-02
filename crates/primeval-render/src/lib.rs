@@ -22,8 +22,9 @@
 //! render.resize_input = 128;
 //! render.output_size = 512;
 //!
-//! let mut steps = Vec::new();
-//! let mut on_progress = |info: ProgressInfo| steps.push(info.step);
+//! // Each step's shape is the SVG element it adds, in the output's `viewBox`.
+//! let mut shapes = Vec::new();
+//! let mut on_progress = |info: ProgressInfo| shapes.push(info.shape);
 //! let result = approximate(
 //!     ApproximateRequest {
 //!         input: std::fs::read("photo.jpg")?,
@@ -262,7 +263,7 @@ pub struct ApproximateRequest {
 
 /// Per-step progress information emitted during optimization.
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ProgressInfo {
     /// The step just completed, from `1` to `total`.
     pub step: u32,
@@ -272,6 +273,12 @@ pub struct ProgressInfo {
     /// after this step: the RMSE over the RGB channels divided by 255, from
     /// `0.0` (identical) to `1.0`.
     pub score: f64,
+    /// The SVG element of the shape this step added, exactly as its line in
+    /// the SVG output, without the newline, whatever the output format. Its
+    /// coordinates are in the SVG's `viewBox`, the working canvas, so the
+    /// shapes of every step, in order, are the shape lines of the SVG that
+    /// the same render returns.
+    pub shape: String,
 }
 
 /// A cheap-to-clone handle that cancels a running [`approximate`] call.
@@ -450,10 +457,14 @@ pub fn approximate(
         model.step(render.shape, render.alpha);
 
         if let Some(progress) = execution.progress.as_mut() {
+            let shape = model
+                .last_shape()
+                .ok_or_else(|| ApproximateError::internal("a step committed no shape"))?;
             progress(ProgressInfo {
                 step: step + 1,
                 total: render.count,
                 score: model.score_f64(),
+                shape: svg::shape_element(&shape.geometry, shape.color),
             });
         }
     }
@@ -880,6 +891,66 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(steps, [(1, 3), (2, 3), (3, 3)]);
+    }
+
+    /// The shape lines of an SVG document: every line between the
+    /// background `<rect>` and the closing `</svg>`.
+    fn svg_shape_lines(svg: &str) -> Vec<&str> {
+        let lines: Vec<&str> = svg.lines().collect();
+        assert!(lines[1].starts_with("<rect width="), "{svg}");
+        assert_eq!(lines.last(), Some(&"</svg>"));
+        lines[2..lines.len() - 1].to_vec()
+    }
+
+    #[test]
+    fn progress_shapes_are_the_final_svg_shape_lines_in_order() {
+        let kinds = [
+            ShapeKind::Any,
+            ShapeKind::Triangle,
+            ShapeKind::Rectangle,
+            ShapeKind::Ellipse,
+            ShapeKind::Circle,
+            ShapeKind::RotatedRectangle,
+            ShapeKind::Quadratic,
+            ShapeKind::RotatedEllipse,
+            ShapeKind::Polygon,
+        ];
+        let mut elements = std::collections::BTreeSet::new();
+        for shape in kinds {
+            let mut options = render_options();
+            options.count = 6;
+            options.shape = shape;
+            options.resize_input = 24;
+            let mut shapes = Vec::new();
+            let mut on_progress = |info: ProgressInfo| shapes.push(info.shape);
+
+            let result = approximate(
+                ApproximateRequest {
+                    input: fixture_bytes(),
+                    output: OutputFormat::Svg,
+                    render: options,
+                },
+                Execution::new().progress(&mut on_progress),
+            );
+
+            let Ok(ApproximateResult::Svg { data, .. }) = result else {
+                panic!("{shape:?}: expected an SVG result, got {result:?}");
+            };
+            assert_eq!(shapes, svg_shape_lines(&data), "{shape:?}");
+            assert!(shapes.iter().all(|line| !line.contains('\n')), "{shape:?}");
+            for line in &shapes {
+                if line.starts_with("<path ") {
+                    elements.insert("path");
+                } else if line.starts_with("<ellipse ") && line.contains(" transform=\"rotate(") {
+                    elements.insert("rotated ellipse");
+                }
+            }
+        }
+        // The stroke and the rotation are the formatting most likely to drift.
+        assert_eq!(
+            elements.into_iter().collect::<Vec<_>>(),
+            ["path", "rotated ellipse"]
+        );
     }
 
     #[test]

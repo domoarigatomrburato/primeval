@@ -457,6 +457,52 @@ test("native approximate emits monotonic progress exactly count times", async ()
   assert.ok(progress.every((info, index) => index === 0 || info.step > progress[index - 1].step));
 });
 
+/** The shape lines of an SVG document: those between the background and `</svg>`. */
+function svgShapeLines(svg) {
+  const lines = svg.trimEnd().split("\n");
+  assert.match(lines[1], /^<rect width=/);
+  assert.equal(lines.at(-1), "</svg>");
+  return lines.slice(2, -1);
+}
+
+for (const shape of ["quadratic", "rotated-ellipse", "any"]) {
+  test(`progress shapes are the final SVG's ${shape} shape lines in order`, async () => {
+    const shapes = [];
+
+    const result = await approximate({
+      input: FIXTURE_IMAGE,
+      output: "svg",
+      render: render({ count: 6, shape, resizeInput: 24 }),
+      execution: {
+        onProgress(info) {
+          assert.equal(typeof info.shape, "string");
+          shapes.push(info.shape);
+        },
+      },
+    });
+
+    assert.equal(shapes.length, 6);
+    assert.deepEqual(shapes, svgShapeLines(result.data));
+  });
+}
+
+test("progress shapes do not depend on the output format", async () => {
+  const shapesFor = async (output) => {
+    const shapes = [];
+    await approximate({
+      input: FIXTURE_IMAGE,
+      output,
+      render: render({ count: 4 }),
+      execution: { onProgress: (info) => shapes.push(info.shape) },
+    });
+    return shapes;
+  };
+
+  const svg = await shapesFor("svg");
+  assert.equal(svg.length, 4);
+  assert.deepEqual(await shapesFor("png"), svg);
+});
+
 test("aborting after the render settled is a no-op", async () => {
   const controller = new AbortController();
 

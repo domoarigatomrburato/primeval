@@ -47,6 +47,7 @@ pub struct NativeProgressInfo {
     pub step: u32,
     pub total: u32,
     pub score: f64,
+    pub shape: String,
 }
 
 #[napi(object)]
@@ -133,6 +134,7 @@ fn render_request(
                     step: info.step,
                     total: info.total,
                     score: info.score,
+                    shape: info.shape,
                 }),
                 ThreadsafeFunctionCallMode::NonBlocking,
             );

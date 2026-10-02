@@ -38,7 +38,7 @@ pub use pool::{PoolBuilder, memory, start_pool_worker};
 /// `render` holds the render options in their JavaScript spelling (`count`,
 /// `shape`, `alpha`, `seed`, `background`, `resizeInput`, `outputSize`); an
 /// `undefined` or missing field takes the Rust default. `on_progress`, if
-/// given, is called with `{ step, total, score }` after each step; if it
+/// given, is called with `{ step, total, score, shape }` after each step; if it
 /// throws, the render stops and `approximate` throws that value.
 ///
 /// # Errors
@@ -72,6 +72,7 @@ pub fn approximate(
         set(&progress, "step", info.step.into());
         set(&progress, "total", info.total.into());
         set(&progress, "score", info.score.into());
+        set(&progress, "shape", info.shape.into());
         if let Err(error) = callback.call1(&JsValue::UNDEFINED, &progress) {
             thrown = Some(error);
             token.cancel();

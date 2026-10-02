@@ -207,6 +207,17 @@ impl Model {
         score::raw_score_to_normalized(self.score, self.current.width(), self.current.height())
     }
 
+    /// The most recently committed shape, as the last shape of
+    /// [`Model::drawing`] would be, or `None` before the first step. Unlike
+    /// [`Model::drawing`], it converts only that one shape.
+    #[must_use]
+    pub fn last_shape(&self) -> Option<DrawnShape> {
+        self.history.last().map(|committed| DrawnShape {
+            geometry: committed.shape.geometry(),
+            color: committed.color,
+        })
+    }
+
     /// The committed shapes in paint order, as engine-independent geometry
     /// on the working-resolution canvas.
     #[must_use]
@@ -337,6 +348,27 @@ mod tests {
                     "{kind:?} on {width}x{height}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn last_shape_is_the_last_shape_of_the_drawing() {
+        let target = Buffer::new_from_color(8, 8, Color::new(200, 40, 90, 255));
+        let mut model = Model::new(
+            target,
+            Color::new(0, 0, 0, 255),
+            ModelOptions {
+                seed: Some(5),
+                ..ModelOptions::default()
+            },
+        );
+        assert_eq!(model.last_shape(), None);
+
+        for step in 1..=3 {
+            model.step(ShapeKind::Any, Alpha::Auto);
+            let drawing = model.drawing();
+            assert_eq!(drawing.shapes.len(), step);
+            assert_eq!(model.last_shape().as_ref(), drawing.shapes.last());
         }
     }
 

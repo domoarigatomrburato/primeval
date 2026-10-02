@@ -176,6 +176,28 @@ for (const isolated of [true, false]) {
       assert.ok(progress.every((info) => typeof info.score === "number"));
     });
 
+    test("onProgress shapes are the final SVG's shape lines in order", async () => {
+      const { shapes, svg } = await shared.page.evaluate(
+        async ({ name, render }) => {
+          const shapes = [];
+          const result = await window.primeval.approximate({
+            input: await window.fixture(name),
+            output: "svg",
+            render,
+            execution: { onProgress: (info) => shapes.push(info.shape) },
+          });
+          return { shapes, svg: result.data };
+        },
+        { name: FIXTURE, render: { ...SMALL, count: 6, shape: "quadratic" } },
+      );
+
+      const lines = svg.trimEnd().split("\n");
+      assert.equal(lines.at(-1), "</svg>");
+      assert.equal(shapes.length, 6);
+      assert.ok(shapes.every((shape) => typeof shape === "string"));
+      assert.deepEqual(shapes, lines.slice(2, -1));
+    });
+
     test("a throwing onProgress rejects with the thrown value and stops the render", async () => {
       const outcome = await shared.page.evaluate(
         async ({ name, render }) => {
