@@ -61,3 +61,14 @@ test("the README API examples run against the built package", async () => {
   assert.match(output("toDataUri(result)"), /^data:image\/png;base64,/);
   assert.equal(output("controller.abort()"), "render aborted\n");
 });
+
+test("the README API examples read photo.jpg, not repository paths", () => {
+  const readme = fs.readFileSync(path.join(repoRoot, "README.md"), "utf8");
+  const blocks = [...readme.matchAll(/^```js\n(.*?)^```$/gms)].map(([, code]) => code);
+  const reads = blocks.flatMap((code) =>
+    [...code.matchAll(/readFile\(([^)]*)\)/g)].map(([, arg]) => arg),
+  );
+
+  assert.ok(reads.length >= 5, `found ${reads.length} readFile calls`);
+  assert.deepEqual(new Set(reads), new Set(['"photo.jpg"']));
+});

@@ -1,5 +1,8 @@
 # primeval
 
+[![Quality](https://github.com/domoarigatomrburato/primeval/actions/workflows/quality.yml/badge.svg)](https://github.com/domoarigatomrburato/primeval/actions/workflows/quality.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 `primeval` is a Rust-powered image approximation tool that turns photos and artwork into **stylized reconstructions built from simple geometric shapes**.
 
 Give it an input image and it searches for a layered approximation you can export as **clean SVG or PNG** output.
@@ -11,13 +14,13 @@ Give it an input image and it searches for a layered approximation you can expor
     <td align="center"><img src="docs/images/thumbs/monalisa/any-200.jpg" alt="Mona Lisa with mixed shapes after 200 steps." width="100%" /></td>
     <td align="center"><img src="docs/images/thumbs/monalisa/quadratic-1000.jpg" alt="Mona Lisa with quadratic curves after 1000 steps." width="100%" /></td>
     <td align="center"><img src="docs/images/thumbs/americangothic/polygon-50.jpg" alt="American Gothic with polygon shapes after 50 steps." width="100%" /></td>
-    <td align="center"><img src="docs/images/thumbs/kenna-fiume-po/circle-200.jpg" alt="Fiume Po (M.Kenna) with circles after 200 steps." width="100%" /></td>
+    <td align="center"><img src="docs/images/thumbs/americangothic/circle-200.jpg" alt="American Gothic with circles after 200 steps." width="100%" /></td>
   </tr>
   <tr>
     <td align="center"><sub>Mona Lisa · mixed · 200 steps</sub></td>
     <td align="center"><sub>Mona Lisa · quadratic · 1000 steps</sub></td>
     <td align="center"><sub>American Gothic · polygon · 50 steps</sub></td>
-    <td align="center"><sub>Fiume Po (M.Kenna) · circle · 200 steps</sub></td>
+    <td align="center"><sub>American Gothic · circle · 200 steps</sub></td>
   </tr>
 </table>
 
@@ -31,7 +34,7 @@ Browse the full example gallery in [`docs/gallery.md`](docs/gallery.md).
 
 - Fast multi-threaded hill-climbing search whose seeded output does not depend on the number of CPU cores
 - Nine shape modes in the CLI: mixed (`any`), triangle, rectangle, ellipse, circle, rotated rectangle, quadratic curve, rotated ellipse, and polygon
-- Small working-resolution optimization with high-resolution output replay
+- Optimization at a small working resolution, with the same shapes exported at a high output resolution
 - Vector export via SVG, plus raster output as PNG
 
 ## Install
@@ -120,11 +123,13 @@ primeval --help
 
 The npm package is **ESM-only** and targets **Node 22.12+**.
 
+The examples below read `photo.jpg` from the current directory; replace it with the path to your own JPEG, PNG, or WebP image.
+
 ```js
 import { approximate } from "@aleburato/primeval";
 import { readFile } from "node:fs/promises";
 
-const input = await readFile("docs/readme/originals/monalisa.jpg");
+const input = await readFile("photo.jpg");
 
 const result = await approximate({
   input,
@@ -185,7 +190,7 @@ Convert results to a data URI:
 import { approximate, toDataUri } from "@aleburato/primeval";
 import { readFile } from "node:fs/promises";
 
-const input = await readFile("docs/readme/originals/monalisa.jpg");
+const input = await readFile("photo.jpg");
 const result = await approximate({
   input,
   output: "png",
@@ -201,7 +206,7 @@ Handle errors by catching typed error classes. `approximate()` never throws sync
 | Class | `code` | When |
 | --- | --- | --- |
 | `ValidationError` | `INVALID_OPTION` | an option or request field is invalid |
-| `ValidationError` | `INVALID_IMAGE` | the input is not a decodable JPEG, PNG, or WebP image, is larger than 16384 pixels on a side, or is smaller than 2 x 2 pixels |
+| `ValidationError` | `INVALID_IMAGE` | the input is not a decodable JPEG, PNG, or WebP image, is larger than 16384 pixels on a side, needs more than 512 MiB to decode, or is smaller than 2 x 2 pixels |
 | `AbortError` | `ABORTED` | `execution.signal` cancelled the render |
 | `InternalError` | `INTERNAL` | a failure valid input should not cause, such as a native addon that fails to load, an encoder error, or a caught native panic |
 
@@ -232,7 +237,7 @@ import { AbortError, approximate } from "@aleburato/primeval";
 import { readFile } from "node:fs/promises";
 
 const controller = new AbortController();
-const input = await readFile("docs/readme/originals/monalisa.jpg");
+const input = await readFile("photo.jpg");
 
 try {
   const promise = approximate({
@@ -311,6 +316,47 @@ CLI notes:
 - Ctrl-C cancels the render and exits without writing the output; a second Ctrl-C exits immediately.
 - Errors go to stderr; stdout carries only the SVG for `--output -`, `--help`, and `--version`. Errors about an option name its flag, for example `--resize-input must be an integer from 2 to 2048`.
 - Exit codes: `0` success, `1` runtime error (unreadable input, invalid image data or option values rejected by the renderer, existing output, write failure), `2` usage error (unknown option, missing or extra arguments, a numeric option that is not a non-negative integer, unknown shape, unsupported output extension, empty output path), `130` interrupted by Ctrl-C.
+
+## Deploying
+
+### Platforms
+
+Prebuilt addons cover macOS (arm64, x64), Linux GNU libc (arm64, x64), and Windows (x64), on Node 22.12+. The Linux addons are built against glibc 2.17, so they run on any distribution with glibc 2.17 or newer; musl-based systems such as Alpine are not supported. Every addon targets the baseline instruction set of its architecture: the release checks that none needs AVX-512 on x86_64 or SVE on aarch64.
+
+### Memory
+
+A render's memory, phase by phase:
+
+- **Decoding.** The input is decoded at full resolution, flattened onto the background, and resized to `resizeInput`, with temporary copies during conversion and resampling. This phase scales with the decoded image, not the file: a 4000 x 3000 photo decodes to about 36 MB of RGB. Inputs are limited to 16384 pixels per side and 512 MiB of decoder allocation. The full-resolution image is freed before the search starts.
+- **Search.** About 38 bytes per working pixel (the target, the canvas, and per-row prefix sums): about 2.5 MB at the default `resizeInput: 256` and about 150 MiB at the maximum, `2048`.
+- **Output.** On top of the search buffers, PNG output needs 7 bytes per output pixel while it is rasterized: 7 MiB at the default `outputSize: 1024` and 448 MiB at the maximum, `8192`. SVG output is text that grows with `count`, not with `outputSize`.
+
+The options are bounded: `count` ≤ 100000, `resizeInput` ≤ 2048, `outputSize` ≤ 8192. Budget memory per concurrent render.
+
+### Concurrency
+
+`approximate()` runs the render off the JavaScript thread, so the event loop stays free. Every render in a process shares one Rayon thread pool, one thread per available CPU by default (set `RAYON_NUM_THREADS` before the process starts to change it). Concurrent renders therefore share the cores rather than each getting all of them: bound the number in flight with a queue to bound latency and memory. `onProgress` reports each step, and an `AbortSignal` cancels a render; cancellation takes effect before the next step, while decoding itself runs to completion.
+
+### Batch throughput
+
+For many images, such as placeholders generated at build time, throughput matters more than the latency of one image. A single render does not scale linearly with cores: each step does some work over the whole canvas on one thread and then waits for its slowest search task, so cores sit idle. Starting a few `approximate()` calls at once, instead of awaiting each in turn, lets them fill those gaps in the shared pool and finishes the batch sooner. `approximate()` has no per-render thread count; to give each render fewer threads, split the batch across processes and set `RAYON_NUM_THREADS` in each.
+
+### Untrusted input
+
+- The Node API takes bytes, never paths: read the file yourself and decide what may be read. The CLI reads the path you give it, and accepts regular files only.
+- Only JPEG, PNG, and WebP are decoded, within the limits above; anything else rejects with `ValidationError` (`INVALID_IMAGE`).
+- Options are checked before any work starts, and out-of-range values reject with `ValidationError` (`INVALID_OPTION`). The accepted ranges still allow very long renders (`count: 100000` at `resizeInput: 2048`), so cap them further for untrusted callers.
+- Cap the file size before reading it; the decode limits bound the decoded image, not the upload.
+- Set a timeout, since a render's time grows with `count` and `resizeInput`:
+
+```js
+const result = await approximate({
+  input: await readFile("photo.jpg"),
+  output: "svg",
+  render: { count: 300 },
+  execution: { signal: AbortSignal.timeout(10_000) },
+});
+```
 
 ## Benchmarks
 

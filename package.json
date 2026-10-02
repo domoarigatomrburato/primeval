@@ -3,7 +3,27 @@
   "version": "0.1.1",
   "private": false,
   "type": "module",
-  "description": "TypeScript-first Node package for primeval image approximation.",
+  "description": "Approximate images with geometric shapes (triangles, ellipses, curves, polygons) and export SVG or PNG. Native Rust engine with a Node API and CLI.",
+  "keywords": [
+    "image",
+    "svg",
+    "png",
+    "primitive",
+    "geometric",
+    "shapes",
+    "approximation",
+    "placeholder",
+    "lqip",
+    "generative-art",
+    "rust",
+    "napi",
+    "cli"
+  ],
+  "homepage": "https://github.com/domoarigatomrburato/primeval#readme",
+  "bugs": {
+    "url": "https://github.com/domoarigatomrburato/primeval/issues"
+  },
+  "author": "Alessandro Burato",
   "license": "MIT",
   "repository": {
     "type": "git",
