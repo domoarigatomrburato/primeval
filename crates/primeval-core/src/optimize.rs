@@ -15,7 +15,7 @@ pub fn hill_climb<R: Rng>(
     let mut age = 0;
 
     while age < max_age {
-        let undo = current.do_move(worker, round);
+        let undo = current.do_move(worker);
         let energy = current.energy(worker, round);
         if energy >= best_energy {
             current.undo_move(undo);

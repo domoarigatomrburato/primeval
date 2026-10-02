@@ -1,7 +1,6 @@
 use crate::{Buffer, Color};
 use image::{DynamicImage, GenericImageView, ImageEncoder, RgbaImage, imageops};
 use std::io::Cursor;
-use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -86,29 +85,6 @@ pub fn thumbnail(image: &DynamicImage, max_size: u32) -> RgbaImage {
     )
 }
 
-/// Build output file paths from a base path and a list of formats.
-///
-/// When a single format is requested the base path is used as-is;
-/// for multiple formats the extension is replaced per format.
-#[must_use]
-pub fn output_paths(base_output: &str, emits: &[OutputFormat]) -> Vec<(OutputFormat, PathBuf)> {
-    let path = Path::new(base_output);
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("output");
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-
-    if emits.len() == 1 {
-        return vec![(emits[0], path.to_path_buf())];
-    }
-
-    emits
-        .iter()
-        .map(|emit| (*emit, parent.join(format!("{stem}.{}", emit.extension()))))
-        .collect()
-}
-
 /// Compute the alpha-weighted mean color of an image as an opaque background.
 ///
 /// Each channel is `sum(a * c) / sum(a)`, rounded down. A fully transparent
@@ -171,18 +147,5 @@ mod tests {
         for value in ["bmp", "jpg", "jpeg", "gif"] {
             assert!(value.parse::<OutputFormat>().is_err(), "{value}");
         }
-    }
-
-    #[test]
-    fn output_paths_use_format_extensions() {
-        let paths = output_paths("out/base.gif", &[OutputFormat::Svg, OutputFormat::Png]);
-
-        assert_eq!(
-            paths,
-            vec![
-                (OutputFormat::Svg, PathBuf::from("out/base.svg")),
-                (OutputFormat::Png, PathBuf::from("out/base.png")),
-            ]
-        );
     }
 }

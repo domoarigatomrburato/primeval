@@ -24,21 +24,7 @@ pub fn stroke_quadratic_direct<R: Rng>(
     let w = worker.width;
     let h = worker.height;
     worker.lines.clear();
-    worker.note_quadratic_raster_call();
-    let profile = &mut worker.quadratic_profile;
-    subdivide_and_stroke(
-        &mut worker.lines,
-        x1,
-        y1,
-        cx,
-        cy,
-        x2,
-        y2,
-        half_width,
-        w,
-        h,
-        profile,
-    );
+    subdivide_and_stroke(&mut worker.lines, x1, y1, cx, cy, x2, y2, half_width, w, h);
     &worker.lines
 }
 
@@ -56,11 +42,7 @@ fn subdivide_and_stroke(
     half_width: f64,
     w: i32,
     h: i32,
-    profile: &mut Option<crate::worker::QuadraticProfileStats>,
 ) {
-    if let Some(stats) = profile.as_mut() {
-        stats.subdivide_calls += 1;
-    }
     let chord_dx = x2 - x1;
     let chord_dy = y2 - y1;
     let chord_len_sq = chord_dx * chord_dx + chord_dy * chord_dy;
@@ -74,12 +56,7 @@ fn subdivide_and_stroke(
     };
 
     if flat {
-        let before = lines.len();
         stroke_segment(lines, x1, y1, x2, y2, half_width, w, h);
-        if let Some(stats) = profile.as_mut() {
-            stats.flat_segments += 1;
-            stats.emitted_scanlines += lines.len().saturating_sub(before) as u64;
-        }
     } else {
         let mx12 = (x1 + cx) * 0.5;
         let my12 = (y1 + cy) * 0.5;
@@ -87,8 +64,8 @@ fn subdivide_and_stroke(
         let my23 = (cy + y2) * 0.5;
         let mx = (mx12 + mx23) * 0.5;
         let my = (my12 + my23) * 0.5;
-        subdivide_and_stroke(lines, x1, y1, mx12, my12, mx, my, half_width, w, h, profile);
-        subdivide_and_stroke(lines, mx, my, mx23, my23, x2, y2, half_width, w, h, profile);
+        subdivide_and_stroke(lines, x1, y1, mx12, my12, mx, my, half_width, w, h);
+        subdivide_and_stroke(lines, mx, my, mx23, my23, x2, y2, half_width, w, h);
     }
 }
 

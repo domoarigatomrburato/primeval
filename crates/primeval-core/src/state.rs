@@ -50,9 +50,9 @@ impl State {
         energy
     }
 
-    pub fn do_move<R: Rng>(&mut self, worker: &mut WorkerCtx<R>, round: &SearchRound<'_>) -> Self {
+    pub fn do_move<R: Rng>(&mut self, worker: &mut WorkerCtx<R>) -> Self {
         let previous = self.clone();
-        self.shape.mutate(worker, round);
+        self.shape.mutate(worker);
         if self.alpha_mode == AlphaMode::Auto {
             let delta = worker.rng.random_range(0..21) - 10;
             self.alpha = (i32::from(self.alpha) + delta).clamp(1, 255) as u8;
@@ -103,7 +103,7 @@ mod tests {
         let mut state = State::new(Shape::Circle(Circle { x: 5, y: 5, r: 3 }), 128);
         let _ = state.energy(&mut worker, &round);
 
-        let _previous = state.do_move(&mut worker, &round);
+        let _previous = state.do_move(&mut worker);
 
         assert_eq!(state.cached_energy, None);
     }

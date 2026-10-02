@@ -2,7 +2,7 @@ use crate::error_grid::ErrorGrid;
 use crate::score;
 use crate::shapes::{Shape, ShapeKind};
 use crate::state::State;
-use crate::worker::{QuadraticProfileStats, SearchRound, WorkerCtx, merge_quadratic_profile_stats};
+use crate::worker::{SearchRound, WorkerCtx};
 use crate::{Buffer, Color};
 use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
@@ -12,7 +12,6 @@ pub struct CommittedShape {
     pub shape: Shape,
     pub color: Color,
     pub alpha: u8,
-    pub score: f64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -21,7 +20,6 @@ pub struct ModelOptions {
     pub workers: usize,
     pub grid_cols: u32,
     pub grid_rows: u32,
-    pub profile_quadratic: bool,
 }
 
 impl Default for ModelOptions {
@@ -31,7 +29,6 @@ impl Default for ModelOptions {
             workers: 1,
             grid_cols: 16,
             grid_rows: 16,
-            profile_quadratic: false,
         }
     }
 }
@@ -80,11 +77,10 @@ impl Model {
         let seed = options.seed.unwrap_or_else(crate::util::system_clock_seed);
         let workers = (0..worker_count)
             .map(|index| {
-                WorkerCtx::new_with_quadratic_profiling(
+                WorkerCtx::new(
                     target_width as i32,
                     target_height as i32,
                     crate::rng::create_rng(seed + index as u64),
-                    options.profile_quadratic,
                 )
             })
             .collect();
@@ -175,23 +171,12 @@ impl Model {
             shape,
             color,
             alpha,
-            score: self.score_f64(),
         });
     }
 
     #[must_use]
     pub fn score_f64(&self) -> f64 {
         score::raw_score_to_normalized(self.score, self.current.width(), self.current.height())
-    }
-
-    #[must_use]
-    pub fn quadratic_profile_stats(&self) -> Option<QuadraticProfileStats> {
-        let stats = merge_quadratic_profile_stats(
-            self.workers
-                .iter()
-                .filter_map(WorkerCtx::quadratic_profile_stats),
-        );
-        (stats != QuadraticProfileStats::default()).then_some(stats)
     }
 
     #[must_use]

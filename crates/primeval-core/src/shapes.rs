@@ -98,7 +98,6 @@ pub struct RotatedEllipse {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Polygon {
     pub order: usize,
-    pub convex: bool,
     pub x: [f64; 4],
     pub y: [f64; 4],
 }
@@ -129,7 +128,7 @@ impl Shape {
             ShapeKind::RotatedEllipse => {
                 Self::RotatedEllipse(RotatedEllipse::random(worker, round))
             }
-            ShapeKind::Polygon => Self::Polygon(Polygon::random(worker, round, 4, false)),
+            ShapeKind::Polygon => Self::Polygon(Polygon::random(worker, round, 4)),
             ShapeKind::Any => unreachable!("ShapeKind::Any is resolved before shape creation"),
         }
     }
@@ -147,7 +146,7 @@ impl Shape {
         }
     }
 
-    pub fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>, _round: &SearchRound<'_>) {
+    pub fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>) {
         match self {
             Self::Triangle(shape) => shape.mutate(worker),
             Self::Rectangle(shape) => shape.mutate(worker),
@@ -914,9 +913,7 @@ impl Quadratic {
                 }
             }
 
-            let valid = self.is_valid();
-            worker.note_quadratic_mutate_attempt(valid);
-            if valid {
+            if self.is_valid() {
                 return;
             }
         }
@@ -1013,18 +1010,12 @@ impl Polygon {
         }
         Self {
             order: self.order,
-            convex: self.convex,
             x,
             y,
         }
     }
 
-    fn random<R: Rng>(
-        worker: &mut WorkerCtx<R>,
-        round: &SearchRound<'_>,
-        order: usize,
-        convex: bool,
-    ) -> Self {
+    fn random<R: Rng>(worker: &mut WorkerCtx<R>, round: &SearchRound<'_>, order: usize) -> Self {
         let mut x = [0.0; 4];
         let mut y = [0.0; 4];
         let (x0, y0) = worker.sample_xy_float(round);
@@ -1034,36 +1025,9 @@ impl Polygon {
             x[i] = x0 + worker.rng.random::<f64>() * 40.0 - 20.0;
             y[i] = y0 + worker.rng.random::<f64>() * 40.0 - 20.0;
         }
-        let mut polygon = Self {
-            order,
-            convex,
-            x,
-            y,
-        };
+        let mut polygon = Self { order, x, y };
         polygon.mutate(worker);
         polygon
-    }
-
-    #[must_use]
-    pub fn is_valid(&self) -> bool {
-        if !self.convex {
-            return true;
-        }
-        let mut sign = false;
-        for a in 0..self.order {
-            let i = a % self.order;
-            let j = (a + 1) % self.order;
-            let k = (a + 2) % self.order;
-            let cross = cross3(
-                self.x[i], self.y[i], self.x[j], self.y[j], self.x[k], self.y[k],
-            );
-            if a == 0 {
-                sign = cross > 0.0;
-            } else if (cross > 0.0) != sign {
-                return false;
-            }
-        }
-        true
     }
 
     fn rasterize<'a, R>(&self, worker: &'a mut WorkerCtx<R>) -> &'a [Scanline] {
@@ -1084,22 +1048,17 @@ impl Polygon {
 
     fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>) {
         const MARGIN: f64 = 16.0;
-        loop {
-            if worker.rng.random::<f64>() < 0.25 {
-                let i = worker.rng.random_range(0..self.order);
-                let j = worker.rng.random_range(0..self.order);
-                self.x.swap(i, j);
-                self.y.swap(i, j);
-            } else {
-                let i = worker.rng.random_range(0..self.order);
-                self.x[i] = (self.x[i] + gaussian_sample(&mut worker.rng, POSITION_SIGMA))
-                    .clamp(-MARGIN, f64::from(worker.width - 1) + MARGIN);
-                self.y[i] = (self.y[i] + gaussian_sample(&mut worker.rng, POSITION_SIGMA))
-                    .clamp(-MARGIN, f64::from(worker.height - 1) + MARGIN);
-            }
-            if self.is_valid() {
-                break;
-            }
+        if worker.rng.random::<f64>() < 0.25 {
+            let i = worker.rng.random_range(0..self.order);
+            let j = worker.rng.random_range(0..self.order);
+            self.x.swap(i, j);
+            self.y.swap(i, j);
+        } else {
+            let i = worker.rng.random_range(0..self.order);
+            self.x[i] = (self.x[i] + gaussian_sample(&mut worker.rng, POSITION_SIGMA))
+                .clamp(-MARGIN, f64::from(worker.width - 1) + MARGIN);
+            self.y[i] = (self.y[i] + gaussian_sample(&mut worker.rng, POSITION_SIGMA))
+                .clamp(-MARGIN, f64::from(worker.height - 1) + MARGIN);
         }
     }
 
@@ -1119,14 +1078,6 @@ fn gaussian_sample<R: Rng>(rng: &mut R, sigma: f64) -> f64 {
 
 fn scale_i32(value: i32, scale: f32) -> i32 {
     (f64::from(value) * f64::from(scale)).round() as i32
-}
-
-fn cross3(x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64) -> f64 {
-    let dx1 = x2 - x1;
-    let dy1 = y2 - y1;
-    let dx2 = x3 - x2;
-    let dy2 = y3 - y2;
-    dx1 * dy2 - dy1 * dx2
 }
 
 fn rasterize_ellipse<R>(
@@ -1397,9 +1348,9 @@ mod tests {
 
     #[test]
     fn mutate_keeps_circle_radius_equal() {
-        let (mut worker, round) = round(32, 32);
+        let (mut worker, _) = round(32, 32);
         let mut shape = Shape::Circle(Circle { x: 10, y: 10, r: 4 });
-        shape.mutate(&mut worker, &round);
+        shape.mutate(&mut worker);
         match shape {
             Shape::Circle(circle) => assert!(circle.r >= 1),
             _ => panic!("expected circle"),
@@ -1439,16 +1390,11 @@ mod tests {
     }
 
     #[test]
-    fn quadratic_mutate_repairs_invalid_candidates_with_low_retry_budget() {
+    fn quadratic_mutate_always_yields_valid_shape() {
         // Run many mutations from the same starting state with different seeds.
-        // Every call must produce a valid shape without reopening the old
-        // high-churn invalid retry loop.
-        let mut total_attempts = 0_u64;
-        let mut full_budget_hits = 0_u64;
-
+        // Every call must produce a valid shape, through retries or repair.
         for seed in 0..500_u64 {
-            let mut worker =
-                WorkerCtx::new_with_quadratic_profiling(32, 32, crate::rng::create_rng(seed), true);
+            let mut worker = WorkerCtx::new(32, 32, crate::rng::create_rng(seed));
             let mut quadratic = Quadratic {
                 x1: 8.0,
                 y1: 8.0,
@@ -1461,21 +1407,7 @@ mod tests {
 
             quadratic.mutate(&mut worker);
             assert!(quadratic.is_valid(), "seed {seed} produced invalid shape");
-
-            let stats = worker.quadratic_profile_stats().unwrap();
-            total_attempts += stats.mutate_attempts;
-            full_budget_hits +=
-                u64::from(stats.mutate_attempts == u64::from(Quadratic::MAX_MUTATE_ATTEMPTS));
         }
-
-        assert!(
-            total_attempts < 2_000,
-            "unexpected retry churn: {total_attempts}"
-        );
-        assert!(
-            full_budget_hits < 250,
-            "too many repair fallbacks: {full_budget_hits}"
-        );
     }
 
     #[test]
@@ -1586,16 +1518,5 @@ mod tests {
             q.is_valid(),
             "sub-pixel quadratic should be valid with f64 precision"
         );
-    }
-
-    #[test]
-    fn polygon_convex_check_rejects_sign_flip() {
-        let polygon = Polygon {
-            order: 4,
-            convex: true,
-            x: [0.0, 2.0, 1.0, 0.0],
-            y: [0.0, 0.0, 1.0, 2.0],
-        };
-        assert!(!polygon.is_valid());
     }
 }

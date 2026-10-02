@@ -19,27 +19,6 @@ use rand::{Rng, RngExt};
 const BIASED_SAMPLING_RATE: f64 = 0.8;
 const QUADRATIC_HILL_CLIMB_SEEDS: usize = 2;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct QuadraticProfileStats {
-    pub mutate_attempts: u64,
-    pub mutate_invalid_retries: u64,
-    pub raster_calls: u64,
-    pub subdivide_calls: u64,
-    pub flat_segments: u64,
-    pub emitted_scanlines: u64,
-}
-
-impl QuadraticProfileStats {
-    fn merge(&mut self, other: &Self) {
-        self.mutate_attempts += other.mutate_attempts;
-        self.mutate_invalid_retries += other.mutate_invalid_retries;
-        self.raster_calls += other.raster_calls;
-        self.subdivide_calls += other.subdivide_calls;
-        self.flat_segments += other.flat_segments;
-        self.emitted_scanlines += other.emitted_scanlines;
-    }
-}
-
 /// Per-thread scratch state for candidate evaluation.
 ///
 /// Each worker thread gets its own `WorkerCtx` so that shape rasterization
@@ -55,14 +34,10 @@ pub struct WorkerCtx<R> {
     pub rect_min: Vec<i32>,
     /// Reusable storage for per-scanline max bounds during rectangle tracking.
     pub rect_max: Vec<i32>,
-    /// Reusable scratch buffer for flattened polygon vertices.
-    pub scratch_vertices: Vec<(f64, f64)>,
     /// The worker's own RNG instance.
     pub rng: R,
     /// Running count of energy evaluations performed by this worker.
     pub evaluations: u64,
-    /// Optional per-worker counters for Quadratic profiling.
-    pub(crate) quadratic_profile: Option<QuadraticProfileStats>,
 }
 
 /// Read-only shared state for a single search round, borrowed from the model.
@@ -83,16 +58,6 @@ pub struct SearchRound<'a> {
 impl<R: Rng> WorkerCtx<R> {
     #[must_use]
     pub fn new(width: i32, height: i32, rng: R) -> Self {
-        Self::new_with_quadratic_profiling(width, height, rng, false)
-    }
-
-    #[must_use]
-    pub fn new_with_quadratic_profiling(
-        width: i32,
-        height: i32,
-        rng: R,
-        profile_quadratic: bool,
-    ) -> Self {
         let edge_capacity = (width + 2 * height) as usize;
         Self {
             width,
@@ -100,43 +65,10 @@ impl<R: Rng> WorkerCtx<R> {
             lines: Vec::with_capacity(4096),
             rect_min: Vec::with_capacity(edge_capacity),
             rect_max: Vec::with_capacity(edge_capacity),
-            scratch_vertices: Vec::with_capacity(128),
             rng,
             evaluations: 0,
-            quadratic_profile: profile_quadratic.then_some(QuadraticProfileStats::default()),
         }
     }
-
-    pub fn note_quadratic_mutate_attempt(&mut self, valid: bool) {
-        if let Some(stats) = self.quadratic_profile.as_mut() {
-            stats.mutate_attempts += 1;
-            if !valid {
-                stats.mutate_invalid_retries += 1;
-            }
-        }
-    }
-
-    pub fn note_quadratic_raster_call(&mut self) {
-        if let Some(stats) = self.quadratic_profile.as_mut() {
-            stats.raster_calls += 1;
-        }
-    }
-
-    #[must_use]
-    pub fn quadratic_profile_stats(&self) -> Option<&QuadraticProfileStats> {
-        self.quadratic_profile.as_ref()
-    }
-}
-
-#[must_use]
-pub fn merge_quadratic_profile_stats<'a>(
-    stats: impl IntoIterator<Item = &'a QuadraticProfileStats>,
-) -> QuadraticProfileStats {
-    let mut merged = QuadraticProfileStats::default();
-    for stat in stats {
-        merged.merge(stat);
-    }
-    merged
 }
 
 impl<R: Rng> WorkerCtx<R> {
@@ -362,26 +294,6 @@ mod tests {
         assert!(w.lines.capacity() >= 4096);
         assert!(w.rect_min.capacity() >= (80 + 2 * 60) as usize);
         assert!(w.rect_max.capacity() >= (80 + 2 * 60) as usize);
-        assert_eq!(w.quadratic_profile_stats(), None);
-    }
-
-    #[test]
-    fn quadratic_profile_stats_track_mutation_and_raster_events() {
-        let mut worker = WorkerCtx::new_with_quadratic_profiling(32, 32, test_rng(), true);
-
-        worker.note_quadratic_mutate_attempt(false);
-        worker.note_quadratic_mutate_attempt(true);
-        crate::raster::stroke_quadratic_direct(&mut worker, 5.0, 16.0, 16.0, 5.0, 27.0, 16.0, 0.25);
-
-        let stats = worker
-            .quadratic_profile_stats()
-            .expect("quadratic profiling should be enabled");
-        assert_eq!(stats.mutate_attempts, 2);
-        assert_eq!(stats.mutate_invalid_retries, 1);
-        assert_eq!(stats.raster_calls, 1);
-        assert!(stats.subdivide_calls > 0);
-        assert!(stats.flat_segments > 0);
-        assert!(stats.emitted_scanlines > 0);
     }
 
     #[test]

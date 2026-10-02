@@ -208,16 +208,6 @@ pub fn parse_alpha_str(value: &str) -> Result<AlphaOption, String> {
     Ok(AlphaOption::Fixed(parsed as u8))
 }
 
-/// Parse numeric alpha input where `None` and `0` both mean auto.
-pub fn parse_alpha_u32(value: Option<u32>) -> Result<AlphaOption, String> {
-    match value {
-        None => Ok(AlphaOption::Auto),
-        Some(0) => Ok(AlphaOption::Auto),
-        Some(value) if (1..=255).contains(&value) => Ok(AlphaOption::Fixed(value as u8)),
-        Some(_) => Err("alpha must be 0..255 where 0 means auto".to_string()),
-    }
-}
-
 /// Parse a background color string or the special `auto` value.
 pub fn parse_background_str(value: &str) -> Result<BackgroundOption, String> {
     if value.eq_ignore_ascii_case("auto") {
@@ -258,7 +248,6 @@ pub fn approximate(
         ModelOptions {
             seed: render.seed,
             workers: default_worker_count(),
-            profile_quadratic: false,
             ..ModelOptions::default()
         },
     );
@@ -437,20 +426,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_alpha_helpers_cover_string_and_numeric_inputs() {
+    fn parse_alpha_str_covers_auto_fixed_and_invalid_inputs() {
         assert_eq!(parse_alpha_str("auto"), Ok(AlphaOption::Auto));
         assert_eq!(parse_alpha_str("0"), Ok(AlphaOption::Auto));
         assert_eq!(parse_alpha_str("128"), Ok(AlphaOption::Fixed(128)));
-        assert_eq!(parse_alpha_u32(None), Ok(AlphaOption::Auto));
-        assert_eq!(parse_alpha_u32(Some(0)), Ok(AlphaOption::Auto));
-        assert_eq!(parse_alpha_u32(Some(128)), Ok(AlphaOption::Fixed(128)));
 
         assert_eq!(
             parse_alpha_str("256").expect_err("alpha >255 should fail"),
-            "alpha must be 0..255 where 0 means auto"
-        );
-        assert_eq!(
-            parse_alpha_u32(Some(256)).expect_err("alpha >255 should fail"),
             "alpha must be 0..255 where 0 means auto"
         );
         assert_eq!(
@@ -767,7 +749,20 @@ mod tests {
             image::Rgb([(x * 6) as u8, (y * 10) as u8, ((x * y) % 256) as u8])
         }));
         let expected_target = thumbnail(&image, 16);
-        let expected_background = Buffer::from_image(&image.to_rgba8()).average_color();
+        let pixels = image.to_rgba8();
+        let pixel_count = u64::from(pixels.width()) * u64::from(pixels.height());
+        let (mut r_sum, mut g_sum, mut b_sum) = (0u64, 0u64, 0u64);
+        for pixel in pixels.pixels() {
+            r_sum += u64::from(pixel[0]);
+            g_sum += u64::from(pixel[1]);
+            b_sum += u64::from(pixel[2]);
+        }
+        let expected_background = Color::new(
+            (r_sum / pixel_count) as u8,
+            (g_sum / pixel_count) as u8,
+            (b_sum / pixel_count) as u8,
+            255,
+        );
 
         let (target, background) = prepare_target(image, BackgroundOption::Auto, 16);
 

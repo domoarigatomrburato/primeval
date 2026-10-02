@@ -123,33 +123,6 @@ impl Buffer {
         image::RgbaImage::from_raw(self.width, self.height, self.pixels.clone())
             .expect("pixel data length matches width * height * 4")
     }
-
-    /// Computes the average color of all pixels in the buffer.
-    ///
-    /// Alpha is always set to 255 in the result, matching the Go
-    /// `AverageImageColor` behavior.
-    #[must_use]
-    pub fn average_color(&self) -> crate::Color {
-        let pixel_count = self.width as usize * self.height as usize;
-        if pixel_count == 0 {
-            return crate::Color::default();
-        }
-
-        let (mut r_sum, mut g_sum, mut b_sum) = (0u64, 0u64, 0u64);
-        for chunk in self.pixels.as_chunks::<4>().0 {
-            r_sum += u64::from(chunk[0]);
-            g_sum += u64::from(chunk[1]);
-            b_sum += u64::from(chunk[2]);
-        }
-
-        let n = pixel_count as u64;
-        crate::Color {
-            r: (r_sum / n) as u8,
-            g: (g_sum / n) as u8,
-            b: (b_sum / n) as u8,
-            a: 255,
-        }
-    }
 }
 
 /// Computes the required byte length for a buffer, panicking on overflow.
@@ -203,33 +176,6 @@ mod tests {
     }
 
     #[test]
-    fn average_color_uniform_buffer() {
-        let c = Color::new(100, 150, 200, 255);
-        let buf = Buffer::new_from_color(4, 4, c);
-        let avg = buf.average_color();
-        assert_eq!(avg, Color::new(100, 150, 200, 255));
-    }
-
-    #[test]
-    fn average_color_mixed() {
-        let mut buf = Buffer::new(2, 1);
-        // Pixel (0,0) = (10, 20, 30, 255)
-        let pix = buf.pixels_mut();
-        pix[0] = 10;
-        pix[1] = 20;
-        pix[2] = 30;
-        pix[3] = 255;
-        // Pixel (1,0) = (30, 40, 50, 255)
-        pix[4] = 30;
-        pix[5] = 40;
-        pix[6] = 50;
-        pix[7] = 255;
-
-        let avg = buf.average_color();
-        assert_eq!(avg, Color::new(20, 30, 40, 255));
-    }
-
-    #[test]
     fn copy_from_copies_pixels() {
         let c = Color::new(42, 84, 126, 255);
         let src = Buffer::new_from_color(3, 3, c);
@@ -261,6 +207,5 @@ mod tests {
     fn zero_dimension_buffer() {
         let buf = Buffer::new(0, 0);
         assert_eq!(buf.pixels().len(), 0);
-        assert_eq!(buf.average_color(), Color::default());
     }
 }
