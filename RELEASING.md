@@ -51,7 +51,7 @@ When a `v*` tag is pushed, [.github/workflows/napi-prebuilds.yml](.github/workfl
 1. Re-run the shared quality workflow, including the Rust tests on arm64 macOS.
 2. Derive the native target matrix from `package.json` `napi.targets`.
 3. Build each native addon on a runner of its own platform. Linux GNU targets link against glibc 2.17 through `napi build --use-napi-cross`.
-4. Check each artifact with `scripts/check-artifact.mjs`: no AVX-512 (x86_64) or SVE (aarch64) instructions, and no glibc symbol newer than 2.17 on Linux.
+4. Check each artifact with `scripts/check-artifact.mjs`: no SVE (aarch64) instructions, no AVX-512 (x86_64) outside an allowlist of dependency functions chosen by runtime CPU detection, and no glibc symbol newer than 2.17 on Linux. Windows artifacts skip the instruction scan because MSVC images carry no function symbols; the Linux and macOS x86_64 artifacts are built from the same sources and flags.
 5. Smoke test each artifact with `scripts/smoke-test-addon.mjs`: load it through the package loader and render a small image to SVG and PNG.
 6. Build both WebAssembly builds for the browser entry with `npm run build:wasm`, on the pinned stable toolchain, the dated nightly, and the matching wasm-bindgen-cli (all pinned through `scripts/build-wasm.mjs`). The build fails if the threaded `.wasm` does not import a shared memory, the single-threaded one does, or either is over the size budget in that script.
 7. Assemble per-platform npm packages and verify that every expected package contains the correct `.node` payload.
