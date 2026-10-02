@@ -255,6 +255,7 @@ Package notes:
 - The default shape is `any` (mixed); all nine CLI shape modes are available.
 - Errors are mapped to `ValidationError` and `AbortError` — use `instanceof` to distinguish them.
 - For SVG results, `data` is a `string`; for raster results, `data` is a `Buffer`.
+- SVG output keeps the shapes at working resolution inside a `viewBox` and sets `width` and `height` to the output size, so it scales cleanly to any size. PNG output is an anti-aliased, opaque RGB image at the output size, with the same geometry as the SVG.
 
 ## Alpha Comparison (Mona Lisa, 200 steps, mixed shape)
 

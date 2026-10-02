@@ -40,13 +40,19 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+mod input;
+mod output;
+mod raster;
+mod svg;
+
 use image::{DynamicImage, RgbaImage};
-use primeval_core::export::{average_background, encode_png, thumbnail};
+use input::{average_background, thumbnail};
+use output::output_dimensions;
 use primeval_core::shapes::ShapeKind;
-use primeval_core::{Buffer, Color, Model, ModelOptions};
+use primeval_core::{Buffer, Color, Drawing, Model, ModelOptions};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-pub use primeval_core::OutputFormat;
+pub use output::OutputFormat;
 
 /// Alpha strategy for new shapes during optimization.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -241,10 +247,11 @@ pub fn approximate(
     let image = decode_input(&input)?;
     drop(input);
     let (working, background) = prepare_target(image, render.background, render.resize_input);
+    let target = Buffer::from_rgba(working.width(), working.height(), working.into_raw())
+        .ok_or_else(|| ApproximateError::internal("working image has an invalid pixel length"))?;
     let mut model = Model::new(
-        Buffer::from_image(&working),
+        target,
         background,
-        render.output_size,
         ModelOptions {
             seed: render.seed,
             workers: default_worker_count(),
@@ -274,29 +281,34 @@ pub fn approximate(
         }
     }
 
-    encode_output(&model, output)
+    encode_output(&model.drawing(), render.output_size, output)
 }
 
 fn encode_output(
-    model: &Model,
+    drawing: &Drawing,
+    output_size: u32,
     output: OutputFormat,
 ) -> Result<ApproximateResult, ApproximateError> {
-    let width = model.output_width;
-    let height = model.output_height;
+    let (width, height) = output_dimensions(drawing.width, drawing.height, output_size);
 
     match output {
         OutputFormat::Svg => Ok(ApproximateResult::Svg {
-            data: model.svg(),
+            data: svg::write_svg(drawing, width, height),
             width,
             height,
         }),
-        OutputFormat::Png => Ok(ApproximateResult::Raster {
-            format: OutputFormat::Png,
-            data: encode_png(&model.render_output())
-                .map_err(|err| ApproximateError::internal(err.to_string()))?,
-            width,
-            height,
-        }),
+        OutputFormat::Png => {
+            let rgb = raster::render_rgb(drawing, width, height).ok_or_else(|| {
+                ApproximateError::internal("could not allocate the output raster")
+            })?;
+            Ok(ApproximateResult::Raster {
+                format: OutputFormat::Png,
+                data: raster::encode_png(width, height, &rgb)
+                    .map_err(|err| ApproximateError::internal(err.to_string()))?,
+                width,
+                height,
+            })
+        }
     }
 }
 
@@ -479,14 +491,6 @@ mod tests {
         assert_eq!(first, second);
     }
 
-    #[test]
-    fn png_encoder_emits_png_header() {
-        let image = Buffer::new_from_color(4, 4, Color::new(10, 20, 30, 255));
-        let png = encode_png(&image).expect("png");
-
-        assert!(png.starts_with(&[0x89, b'P', b'N', b'G']));
-    }
-
     fn encoded_fixture(format: ImageFormat) -> Vec<u8> {
         let image = DynamicImage::ImageRgb8(fixture_image().to_rgb8());
         let mut out = Cursor::new(Vec::new());
@@ -659,6 +663,40 @@ mod tests {
             }
             other => panic!("unexpected result: {other:?}"),
         }
+    }
+
+    #[test]
+    fn svg_and_png_map_the_same_canvas_onto_the_same_size() {
+        let cancelled = AtomicBool::new(false);
+        let svg = approximate(
+            request(fixture_bytes(), OutputFormat::Svg),
+            None,
+            &cancelled,
+        )
+        .expect("svg render");
+        let png = approximate(
+            request(fixture_bytes(), OutputFormat::Png),
+            None,
+            &cancelled,
+        )
+        .expect("png render");
+
+        // The 12 x 8 fixture works at 8 x 5 and exports at 16 x 10.
+        let ApproximateResult::Svg { data, .. } = &svg else {
+            panic!("expected svg output");
+        };
+        assert!(data.starts_with(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"10\" \
+             viewBox=\"0 0 8 5\">"
+        ));
+        let ApproximateResult::Raster { data, .. } = &png else {
+            panic!("expected raster output");
+        };
+        let decoded = image::load_from_memory(data).expect("decode png");
+        assert_eq!(decoded.color(), image::ColorType::Rgb8);
+        assert_eq!((decoded.width(), decoded.height()), (16, 10));
+        assert_eq!((svg.width(), svg.height()), (16, 10));
+        assert_eq!((png.width(), png.height()), (16, 10));
     }
 
     #[test]

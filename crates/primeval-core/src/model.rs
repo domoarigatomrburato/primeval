@@ -1,3 +1,4 @@
+use crate::drawing::{Drawing, DrawnShape};
 use crate::error_grid::ErrorGrid;
 use crate::score;
 use crate::shapes::{Shape, ShapeKind};
@@ -34,11 +35,6 @@ impl Default for ModelOptions {
 }
 
 pub struct Model {
-    pub working_width: u32,
-    pub working_height: u32,
-    pub output_width: u32,
-    pub output_height: u32,
-    pub scale: f32,
     pub background: Color,
     pub target: Buffer,
     pub current: Buffer,
@@ -57,20 +53,9 @@ impl Model {
     }
 
     #[must_use]
-    pub fn new(target: Buffer, background: Color, output_size: u32, options: ModelOptions) -> Self {
+    pub fn new(target: Buffer, background: Color, options: ModelOptions) -> Self {
         let target_width = target.width();
         let target_height = target.height();
-        let aspect = target_width as f32 / target_height as f32;
-        let (output_width, output_height, scale) = if aspect >= 1.0 {
-            let width = output_size;
-            let height = ((output_size as f32) / aspect).round().max(1.0) as u32;
-            (width, height, output_size as f32 / target_width as f32)
-        } else {
-            let width = ((output_size as f32) * aspect).round().max(1.0) as u32;
-            let height = output_size;
-            (width, height, output_size as f32 / target_height as f32)
-        };
-
         let current = Buffer::new_from_color(target_width, target_height, background);
         let score = score::difference_full_raw(&target, &current);
         let worker_count = options.workers.max(1);
@@ -86,11 +71,6 @@ impl Model {
             .collect();
 
         Self {
-            working_width: target_width,
-            working_height: target_height,
-            output_width,
-            output_height,
-            scale,
             background,
             target,
             current,
@@ -179,109 +159,31 @@ impl Model {
         score::raw_score_to_normalized(self.score, self.current.width(), self.current.height())
     }
 
+    /// The committed shapes in paint order, as engine-independent geometry
+    /// on the working-resolution canvas.
     #[must_use]
-    pub fn render_output(&self) -> Buffer {
-        let mut output =
-            Buffer::new_from_color(self.output_width, self.output_height, self.background);
-        self.replay_history_into(&mut output);
-        output
-    }
-
-    fn replay_history_into(&self, output: &mut Buffer) {
-        let mut worker = WorkerCtx::new(
-            self.output_width as i32,
-            self.output_height as i32,
-            crate::rng::create_rng(1),
-        );
-
-        for committed in &self.history {
-            let lines = self.rasterize_output_shape(&committed.shape, &mut worker);
-            crate::score::draw_lines(output, committed.color, lines);
+    pub fn drawing(&self) -> Drawing {
+        Drawing {
+            width: self.target.width(),
+            height: self.target.height(),
+            background: self.background,
+            shapes: self
+                .history
+                .iter()
+                .map(|committed| DrawnShape {
+                    geometry: committed.shape.geometry(),
+                    color: committed.color,
+                })
+                .collect(),
         }
-    }
-
-    fn rasterize_output_shape<'a>(
-        &self,
-        shape: &Shape,
-        worker: &'a mut WorkerCtx<ChaCha8Rng>,
-    ) -> &'a [crate::scanline::Scanline] {
-        if self.scale > 1.0 {
-            let scale = f64::from(self.scale);
-            match shape {
-                Shape::Ellipse(ellipse) => {
-                    crate::raster::fill_rotated_ellipse_direct(
-                        &mut worker.lines,
-                        (f64::from(ellipse.x) + 0.5) * scale,
-                        (f64::from(ellipse.y) + 0.5) * scale,
-                        f64::from(ellipse.rx) * scale,
-                        f64::from(ellipse.ry) * scale,
-                        0.0,
-                        worker.width,
-                        worker.height,
-                    );
-                    return &worker.lines;
-                }
-                Shape::Circle(circle) => {
-                    crate::raster::fill_rotated_ellipse_direct(
-                        &mut worker.lines,
-                        (f64::from(circle.x) + 0.5) * scale,
-                        (f64::from(circle.y) + 0.5) * scale,
-                        f64::from(circle.r) * scale,
-                        f64::from(circle.r) * scale,
-                        0.0,
-                        worker.width,
-                        worker.height,
-                    );
-                    return &worker.lines;
-                }
-                _ => {}
-            }
-        }
-
-        shape.scaled(self.scale).rasterize(worker)
-    }
-
-    #[must_use]
-    pub fn svg(&self) -> String {
-        let mut lines = Vec::with_capacity(self.history.len() + 5);
-        lines.push(format!(
-            "<svg xmlns=\"http://www.w3.org/2000/svg\" version=\"1.1\" width=\"{}\" height=\"{}\">",
-            self.output_width, self.output_height
-        ));
-        lines.push(format!(
-            "<rect x=\"0\" y=\"0\" width=\"{}\" height=\"{}\" fill=\"#{:02x}{:02x}{:02x}\" />",
-            self.output_width,
-            self.output_height,
-            self.background.r,
-            self.background.g,
-            self.background.b
-        ));
-        lines.push(format!(
-            "<g transform=\"scale({}) translate(0.5 0.5)\">",
-            self.scale
-        ));
-        for committed in &self.history {
-            let attrs = format!(
-                "fill=\"#{:02x}{:02x}{:02x}\" fill-opacity=\"{}\"",
-                committed.color.r,
-                committed.color.g,
-                committed.color.b,
-                f64::from(committed.color.a) / 255.0
-            );
-            lines.push(committed.shape.to_svg(&attrs));
-        }
-        lines.push("</g>".to_string());
-        lines.push("</svg>".to_string());
-        lines.join("\n")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::raster::fill_rotated_ellipse_direct;
     use crate::score;
-    use crate::shapes::{Circle, Ellipse, Rectangle, Shape};
+    use crate::shapes::{Rectangle, Shape};
 
     #[test]
     fn search_params_keeps_quadratic_budget_near_default() {
@@ -290,125 +192,9 @@ mod tests {
     }
 
     #[test]
-    fn render_output_replays_scaled_history() {
-        let target = Buffer::new_from_color(8, 8, Color::new(255, 255, 255, 255));
-        let mut model = Model::new(
-            target,
-            Color::new(0, 0, 0, 255),
-            16,
-            ModelOptions::default(),
-        );
-
-        model.add(
-            Shape::Rectangle(Rectangle {
-                x1: 1,
-                y1: 1,
-                x2: 3,
-                y2: 3,
-            }),
-            255,
-        );
-
-        let rendered = model.render_output();
-        let mut expected =
-            Buffer::new_from_color(model.output_width, model.output_height, model.background);
-        let committed = &model.history[0];
-        let scaled = committed.shape.scaled(model.scale);
-        let mut worker = WorkerCtx::new(
-            model.output_width as i32,
-            model.output_height as i32,
-            crate::rng::create_rng(1),
-        );
-        let lines = scaled.rasterize(&mut worker).to_vec();
-        score::draw_lines(&mut expected, committed.color, &lines);
-
-        assert_eq!(rendered.pixels(), expected.pixels());
-    }
-
-    #[test]
-    fn render_output_replays_scaled_ellipse_with_antialiasing() {
-        let target = Buffer::new_from_color(8, 8, Color::new(255, 255, 255, 255));
-        let mut model = Model::new(
-            target,
-            Color::new(0, 0, 0, 255),
-            16,
-            ModelOptions::default(),
-        );
-
-        model.add(
-            Shape::Ellipse(Ellipse {
-                x: 3,
-                y: 4,
-                rx: 2,
-                ry: 1,
-            }),
-            255,
-        );
-
-        let rendered = model.render_output();
-        let mut expected =
-            Buffer::new_from_color(model.output_width, model.output_height, model.background);
-        let committed = &model.history[0];
-        let mut worker = WorkerCtx::new(
-            model.output_width as i32,
-            model.output_height as i32,
-            crate::rng::create_rng(1),
-        );
-        fill_rotated_ellipse_direct(
-            &mut worker.lines,
-            (3.0 + 0.5) * f64::from(model.scale),
-            (4.0 + 0.5) * f64::from(model.scale),
-            2.0 * f64::from(model.scale),
-            1.0 * f64::from(model.scale),
-            0.0,
-            model.output_width as i32,
-            model.output_height as i32,
-        );
-        score::draw_lines(&mut expected, committed.color, &worker.lines);
-
-        assert_eq!(rendered.pixels(), expected.pixels());
-    }
-
-    #[test]
-    fn render_output_replays_scaled_circle_with_antialiasing() {
-        let target = Buffer::new_from_color(8, 8, Color::new(255, 255, 255, 255));
-        let mut model = Model::new(
-            target,
-            Color::new(0, 0, 0, 255),
-            16,
-            ModelOptions::default(),
-        );
-
-        model.add(Shape::Circle(Circle { x: 3, y: 4, r: 2 }), 255);
-
-        let rendered = model.render_output();
-        let mut expected =
-            Buffer::new_from_color(model.output_width, model.output_height, model.background);
-        let committed = &model.history[0];
-        let mut worker = WorkerCtx::new(
-            model.output_width as i32,
-            model.output_height as i32,
-            crate::rng::create_rng(1),
-        );
-        fill_rotated_ellipse_direct(
-            &mut worker.lines,
-            (3.0 + 0.5) * f64::from(model.scale),
-            (4.0 + 0.5) * f64::from(model.scale),
-            2.0 * f64::from(model.scale),
-            2.0 * f64::from(model.scale),
-            0.0,
-            model.output_width as i32,
-            model.output_height as i32,
-        );
-        score::draw_lines(&mut expected, committed.color, &worker.lines);
-
-        assert_eq!(rendered.pixels(), expected.pixels());
-    }
-
-    #[test]
     fn add_score_matches_full_recomputation() {
         let target = Buffer::new_from_color(8, 8, Color::new(255, 255, 255, 255));
-        let mut model = Model::new(target, Color::new(0, 0, 0, 255), 8, ModelOptions::default());
+        let mut model = Model::new(target, Color::new(0, 0, 0, 255), ModelOptions::default());
 
         model.add(
             Shape::Rectangle(Rectangle {
@@ -432,7 +218,6 @@ mod tests {
         let mut model = Model::new(
             target,
             Color::new(0, 0, 0, 255),
-            8,
             ModelOptions {
                 seed: Some(7),
                 ..ModelOptions::default()
@@ -458,7 +243,6 @@ mod tests {
         let mut model = Model::new(
             target,
             Color::new(0, 0, 0, 255),
-            8,
             ModelOptions {
                 seed: Some(7),
                 grid_cols: 0,

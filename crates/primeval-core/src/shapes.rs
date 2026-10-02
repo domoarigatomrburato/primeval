@@ -1,3 +1,4 @@
+use crate::drawing::{Geometry, Point};
 use crate::scanline::Scanline;
 use crate::util::{degrees, radians, rotate_sc};
 use crate::worker::{SearchRound, WorkerCtx};
@@ -159,31 +160,24 @@ impl Shape {
         }
     }
 
+    /// The shape's geometry in continuous canvas coordinates, where pixel
+    /// `(i, j)` is the unit square `[i, i + 1) × [j, j + 1)`.
+    ///
+    /// This is the single place where the engine's pixel convention is
+    /// mapped onto output geometry. Each mapping follows the kind's
+    /// working-resolution rasterizer, so the geometry covers the pixels the
+    /// engine optimised.
     #[must_use]
-    pub fn scaled(&self, scale: f32) -> Self {
+    pub fn geometry(&self) -> Geometry {
         match self {
-            Self::Triangle(shape) => Self::Triangle(shape.scaled(scale)),
-            Self::Rectangle(shape) => Self::Rectangle(shape.scaled(scale)),
-            Self::Ellipse(shape) => Self::Ellipse(shape.scaled(scale)),
-            Self::Circle(shape) => Self::Circle(shape.scaled(scale)),
-            Self::RotatedRectangle(shape) => Self::RotatedRectangle(shape.scaled(scale)),
-            Self::Quadratic(shape) => Self::Quadratic(shape.scaled(scale)),
-            Self::RotatedEllipse(shape) => Self::RotatedEllipse(shape.scaled(scale)),
-            Self::Polygon(shape) => Self::Polygon(shape.scaled(scale)),
-        }
-    }
-
-    #[must_use]
-    pub fn to_svg(&self, attrs: &str) -> String {
-        match self {
-            Self::Triangle(shape) => shape.svg_element(attrs),
-            Self::Rectangle(shape) => shape.svg_element(attrs),
-            Self::Ellipse(shape) => shape.svg_element(attrs),
-            Self::Circle(shape) => shape.svg_element(attrs),
-            Self::RotatedRectangle(shape) => shape.svg_element(attrs),
-            Self::Quadratic(shape) => shape.svg_element(attrs),
-            Self::RotatedEllipse(shape) => shape.svg_element(attrs),
-            Self::Polygon(shape) => shape.svg_element(attrs),
+            Self::Triangle(shape) => shape.geometry(),
+            Self::Rectangle(shape) => shape.geometry(),
+            Self::Ellipse(shape) => ellipse_geometry(shape.x, shape.y, shape.rx, shape.ry),
+            Self::Circle(shape) => ellipse_geometry(shape.x, shape.y, shape.r, shape.r),
+            Self::RotatedRectangle(shape) => shape.geometry(),
+            Self::Quadratic(shape) => shape.geometry(),
+            Self::RotatedEllipse(shape) => shape.geometry(),
+            Self::Polygon(shape) => shape.geometry(),
         }
     }
 }
@@ -253,16 +247,14 @@ impl FromStr for ShapeKind {
 }
 
 impl Triangle {
-    #[must_use]
-    fn scaled(&self, scale: f32) -> Self {
-        Self {
-            x1: scale_i32(self.x1, scale),
-            y1: scale_i32(self.y1, scale),
-            x2: scale_i32(self.x2, scale),
-            y2: scale_i32(self.y2, scale),
-            x3: scale_i32(self.x3, scale),
-            y3: scale_i32(self.y3, scale),
-        }
+    /// Integer vertices are pixel centres (the rasterizer samples each row at
+    /// its integer `y`), so they map to `v + 0.5`.
+    fn geometry(&self) -> Geometry {
+        Geometry::Polygon(vec![
+            pixel_centre(self.x1, self.y1),
+            pixel_centre(self.x2, self.y2),
+            pixel_centre(self.x3, self.y3),
+        ])
     }
 
     fn random<R: Rng>(worker: &mut WorkerCtx<R>, round: &SearchRound<'_>) -> Self {
@@ -364,23 +356,17 @@ impl Triangle {
             }
         }
     }
-
-    fn svg_element(&self, attrs: &str) -> String {
-        format!(
-            "<polygon {} points=\"{},{} {},{} {},{}\" />",
-            attrs, self.x1, self.y1, self.x2, self.y2, self.x3, self.y3
-        )
-    }
 }
 
 impl Rectangle {
-    #[must_use]
-    fn scaled(&self, scale: f32) -> Self {
-        Self {
-            x1: scale_i32(self.x1, scale),
-            y1: scale_i32(self.y1, scale),
-            x2: scale_i32(self.x2, scale),
-            y2: scale_i32(self.y2, scale),
+    /// Inclusive pixel bounds `x1..=x2` cover `[x1, x2 + 1)`.
+    fn geometry(&self) -> Geometry {
+        let (x1, y1, x2, y2) = self.bounds();
+        Geometry::Rect {
+            x: f64::from(x1),
+            y: f64::from(y1),
+            width: f64::from(x2 - x1 + 1),
+            height: f64::from(y2 - y1 + 1),
         }
     }
 
@@ -433,31 +419,9 @@ impl Rectangle {
             }
         }
     }
-
-    fn svg_element(&self, attrs: &str) -> String {
-        let (x1, y1, x2, y2) = self.bounds();
-        format!(
-            "<rect {} x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" />",
-            attrs,
-            x1,
-            y1,
-            x2 - x1 + 1,
-            y2 - y1 + 1
-        )
-    }
 }
 
 impl Ellipse {
-    #[must_use]
-    fn scaled(&self, scale: f32) -> Self {
-        Self {
-            x: scale_i32(self.x, scale),
-            y: scale_i32(self.y, scale),
-            rx: scale_i32(self.rx, scale).max(1),
-            ry: scale_i32(self.ry, scale).max(1),
-        }
-    }
-
     fn random<R: Rng>(worker: &mut WorkerCtx<R>, round: &SearchRound<'_>) -> Self {
         let (x, y) = worker.sample_xy(round);
         Self {
@@ -490,25 +454,9 @@ impl Ellipse {
             }
         }
     }
-
-    fn svg_element(&self, attrs: &str) -> String {
-        format!(
-            "<ellipse {} cx=\"{}\" cy=\"{}\" rx=\"{}\" ry=\"{}\" />",
-            attrs, self.x, self.y, self.rx, self.ry
-        )
-    }
 }
 
 impl Circle {
-    #[must_use]
-    fn scaled(&self, scale: f32) -> Self {
-        Self {
-            x: scale_i32(self.x, scale),
-            y: scale_i32(self.y, scale),
-            r: scale_i32(self.r, scale).max(1),
-        }
-    }
-
     fn random<R: Rng>(worker: &mut WorkerCtx<R>, round: &SearchRound<'_>) -> Self {
         let (x, y) = worker.sample_xy(round);
         Self {
@@ -536,25 +484,32 @@ impl Circle {
             }
         }
     }
-
-    fn svg_element(&self, attrs: &str) -> String {
-        format!(
-            "<circle {} cx=\"{}\" cy=\"{}\" r=\"{}\" />",
-            attrs, self.x, self.y, self.r
-        )
-    }
 }
 
 impl RotatedRectangle {
-    #[must_use]
-    fn scaled(&self, scale: f32) -> Self {
-        Self {
-            x: scale_i32(self.x, scale),
-            y: scale_i32(self.y, scale),
-            sx: scale_i32(self.sx, scale).max(1),
-            sy: scale_i32(self.sy, scale).max(1),
-            angle: self.angle,
-        }
+    /// The rasterizer drops each sampled edge point into the pixel that
+    /// contains it, so `(x, y)` is already a continuous coordinate. The
+    /// corners are the exact rotated corners: the rasterizer truncates them
+    /// towards the centre and then covers every pixel its edges touch, which
+    /// the exact corners match more closely than the truncated ones.
+    fn geometry(&self) -> Geometry {
+        let half_x = f64::from(self.sx) / 2.0;
+        let half_y = f64::from(self.sy) / 2.0;
+        let (sin_a, cos_a) = radians(f64::from(self.angle)).sin_cos();
+        Geometry::Polygon(
+            [
+                (-half_x, -half_y),
+                (half_x, -half_y),
+                (half_x, half_y),
+                (-half_x, half_y),
+            ]
+            .into_iter()
+            .map(|(x, y)| {
+                let (rx, ry) = rotate_sc(x, y, sin_a, cos_a);
+                Point::new(rx + f64::from(self.x), ry + f64::from(self.y))
+            })
+            .collect(),
+        )
     }
 
     fn random<R: Rng>(worker: &mut WorkerCtx<R>, round: &SearchRound<'_>) -> Self {
@@ -657,30 +612,20 @@ impl RotatedRectangle {
             _ => self.angle += gaussian_sample(&mut worker.rng, ANGLE_SIGMA) as i32,
         }
     }
-
-    fn svg_element(&self, attrs: &str) -> String {
-        format!(
-            "<g transform=\"translate({} {}) rotate({}) scale({} {})\"><rect {} x=\"-0.5\" y=\"-0.5\" width=\"1\" height=\"1\" /></g>",
-            self.x, self.y, self.angle, self.sx, self.sy, attrs
-        )
-    }
 }
 
 impl Quadratic {
     const MUTATE_MARGIN: f64 = 16.0;
     const MAX_MUTATE_ATTEMPTS: u32 = 6;
 
-    #[must_use]
-    fn scaled(&self, scale: f32) -> Self {
-        let scale = f64::from(scale);
-        Self {
-            x1: self.x1 * scale,
-            y1: self.y1 * scale,
-            x2: self.x2 * scale,
-            y2: self.y2 * scale,
-            x3: self.x3 * scale,
-            y3: self.y3 * scale,
-            width: (self.width * scale).max(0.5),
+    /// The stroke rasterizer measures distances in continuous coordinates,
+    /// so the control points map unchanged.
+    fn geometry(&self) -> Geometry {
+        Geometry::Quadratic {
+            start: Point::new(self.x1, self.y1),
+            control: Point::new(self.x2, self.y2),
+            end: Point::new(self.x3, self.y3),
+            width: self.width,
         }
     }
 
@@ -924,26 +869,18 @@ impl Quadratic {
         }
         debug_assert!(self.is_valid());
     }
-
-    fn svg_element(&self, attrs: &str) -> String {
-        let attrs = attrs.replace("fill", "stroke");
-        format!(
-            "<path {} fill=\"none\" d=\"M {:.6} {:.6} Q {:.6} {:.6}, {:.6} {:.6}\" stroke-width=\"{:.6}\" />",
-            attrs, self.x1, self.y1, self.x2, self.y2, self.x3, self.y3, self.width
-        )
-    }
 }
 
 impl RotatedEllipse {
-    #[must_use]
-    fn scaled(&self, scale: f32) -> Self {
-        let scale = f64::from(scale);
-        Self {
-            x: self.x * scale,
-            y: self.y * scale,
-            rx: (self.rx * scale).max(1.0),
-            ry: (self.ry * scale).max(1.0),
-            angle: self.angle,
+    /// The rasterizer works in continuous coordinates, so the centre maps
+    /// unchanged.
+    fn geometry(&self) -> Geometry {
+        Geometry::Ellipse {
+            cx: self.x,
+            cy: self.y,
+            rx: self.rx,
+            ry: self.ry,
+            rotation: self.angle,
         }
     }
 
@@ -989,30 +926,17 @@ impl RotatedEllipse {
             _ => self.angle += gaussian_sample(&mut worker.rng, ANGLE_SIGMA),
         }
     }
-
-    fn svg_element(&self, attrs: &str) -> String {
-        format!(
-            "<g transform=\"translate({:.6} {:.6}) rotate({:.6}) scale({:.6} {:.6})\"><ellipse {} cx=\"0\" cy=\"0\" rx=\"1\" ry=\"1\" /></g>",
-            self.x, self.y, self.angle, self.rx, self.ry, attrs
-        )
-    }
 }
 
 impl Polygon {
-    #[must_use]
-    fn scaled(&self, scale: f32) -> Self {
-        let scale = f64::from(scale);
-        let mut x = self.x;
-        let mut y = self.y;
-        for i in 0..self.order {
-            x[i] *= scale;
-            y[i] *= scale;
-        }
-        Self {
-            order: self.order,
-            x,
-            y,
-        }
+    /// The rasterizer works in continuous coordinates, so vertices map
+    /// unchanged.
+    fn geometry(&self) -> Geometry {
+        Geometry::Polygon(
+            (0..self.order)
+                .map(|i| Point::new(self.x[i], self.y[i]))
+                .collect(),
+        )
     }
 
     fn random<R: Rng>(worker: &mut WorkerCtx<R>, round: &SearchRound<'_>, order: usize) -> Self {
@@ -1061,14 +985,6 @@ impl Polygon {
                 .clamp(-MARGIN, f64::from(worker.height - 1) + MARGIN);
         }
     }
-
-    fn svg_element(&self, attrs: &str) -> String {
-        let points = (0..self.order)
-            .map(|i| format!("{:.6},{:.6}", self.x[i], self.y[i]))
-            .collect::<Vec<_>>()
-            .join(" ");
-        format!("<polygon {} points=\"{}\" />", attrs, points)
-    }
 }
 
 fn gaussian_sample<R: Rng>(rng: &mut R, sigma: f64) -> f64 {
@@ -1076,8 +992,22 @@ fn gaussian_sample<R: Rng>(rng: &mut R, sigma: f64) -> f64 {
     sample * sigma
 }
 
-fn scale_i32(value: i32, scale: f32) -> i32 {
-    (f64::from(value) * f64::from(scale)).round() as i32
+/// The integer-centred ellipse rasterizer treats `(x, y)` as a pixel centre
+/// and keeps the pixels whose centres fall inside the radii.
+fn ellipse_geometry(x: i32, y: i32, rx: i32, ry: i32) -> Geometry {
+    let centre = pixel_centre(x, y);
+    Geometry::Ellipse {
+        cx: centre.x,
+        cy: centre.y,
+        rx: f64::from(rx),
+        ry: f64::from(ry),
+        rotation: 0.0,
+    }
+}
+
+/// Maps an integer pixel coordinate to the centre of that pixel.
+fn pixel_centre(x: i32, y: i32) -> Point {
+    Point::new(f64::from(x) + 0.5, f64::from(y) + 0.5)
 }
 
 fn rasterize_ellipse<R>(
@@ -1326,15 +1256,6 @@ mod tests {
     }
 
     #[test]
-    fn circle_svg_emits_circle_element() {
-        let shape = Shape::Circle(Circle { x: 10, y: 20, r: 7 });
-        assert_eq!(
-            shape.to_svg("fill='red'"),
-            "<circle fill='red' cx=\"10\" cy=\"20\" r=\"7\" />"
-        );
-    }
-
-    #[test]
     fn rotated_rectangle_validity_rejects_extreme_aspect_ratio() {
         let rect = RotatedRectangle {
             x: 10,
@@ -1520,3 +1441,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod geometry_tests;

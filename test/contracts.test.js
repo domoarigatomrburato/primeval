@@ -78,7 +78,7 @@ test("wrapper shape vocabulary mirrors Rust", () => {
 
 test("wrapper output vocabulary mirrors Rust", () => {
   const tsSource = readRepoFile("src", "index.ts");
-  const rustSource = readRepoFile("crates", "primeval-core", "src", "export.rs");
+  const rustSource = readRepoFile("crates", "primeval-render", "src", "output.rs");
 
   assert.deepEqual(
     parseStringArray(tsSource, "VALID_OUTPUTS"),

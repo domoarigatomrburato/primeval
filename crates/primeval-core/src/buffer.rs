@@ -101,27 +101,19 @@ impl Buffer {
         self.pixels.copy_from_slice(&other.pixels);
     }
 
-    /// Creates a buffer from an `image::RgbaImage`.
+    /// Creates a buffer from raw row-major RGBA bytes.
     ///
-    /// The resulting buffer has identical dimensions and pixel data.
+    /// Returns `None` unless `pixels.len()` is exactly `width * height * 4`.
     #[must_use]
-    pub fn from_image(img: &image::RgbaImage) -> Self {
-        let width = img.width();
-        let height = img.height();
-        let pixels = img.as_raw().clone();
-        debug_assert_eq!(pixels.len(), pixel_byte_len(width, height));
-        Self {
+    pub fn from_rgba(width: u32, height: u32, pixels: Vec<u8>) -> Option<Self> {
+        let len = (width as usize)
+            .checked_mul(height as usize)?
+            .checked_mul(4)?;
+        (pixels.len() == len).then_some(Self {
             width,
             height,
             pixels,
-        }
-    }
-
-    /// Converts this buffer to an `image::RgbaImage`.
-    #[must_use]
-    pub fn to_image(&self) -> image::RgbaImage {
-        image::RgbaImage::from_raw(self.width, self.height, self.pixels.clone())
-            .expect("pixel data length matches width * height * 4")
+        })
     }
 }
 
@@ -193,14 +185,18 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_through_image() {
-        let c = Color::new(10, 20, 30, 255);
-        let buf = Buffer::new_from_color(5, 5, c);
-        let img = buf.to_image();
-        let buf2 = Buffer::from_image(&img);
-        assert_eq!(buf.width(), buf2.width());
-        assert_eq!(buf.height(), buf2.height());
-        assert_eq!(buf.pixels(), buf2.pixels());
+    fn from_rgba_keeps_dimensions_and_pixels() {
+        let pixels: Vec<u8> = (0..24).collect();
+        let buf = Buffer::from_rgba(3, 2, pixels.clone()).expect("valid length");
+        assert_eq!((buf.width(), buf.height()), (3, 2));
+        assert_eq!(buf.pixels(), pixels.as_slice());
+    }
+
+    #[test]
+    fn from_rgba_rejects_wrong_length() {
+        assert!(Buffer::from_rgba(3, 2, vec![0; 23]).is_none());
+        assert!(Buffer::from_rgba(3, 2, vec![0; 25]).is_none());
+        assert!(Buffer::from_rgba(u32::MAX, u32::MAX, Vec::new()).is_none());
     }
 
     #[test]

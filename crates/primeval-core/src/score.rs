@@ -608,8 +608,9 @@ pub fn difference_full_raw(a: &Buffer, b: &Buffer) -> u64 {
 }
 
 /// Computes the normalized root-mean-square difference between two buffers.
+#[cfg(test)]
 #[must_use]
-pub fn difference_full(a: &Buffer, b: &Buffer) -> f64 {
+pub(crate) fn difference_full(a: &Buffer, b: &Buffer) -> f64 {
     raw_score_to_normalized(difference_full_raw(a, b), a.width(), a.height())
 }
 

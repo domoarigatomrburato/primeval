@@ -11,8 +11,10 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-image = { version = "0.25", default-features = false, features = ["png"] }
 rand = { version = "0.10", default-features = false }
 rand_chacha = "0.10"
 rand_distr = "0.6"
 rayon = "1.10"
+
+[dev-dependencies]
+tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
