@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import { bindingMetadataForPackage } from "../../scripts/generate-binding.mjs";
 import { readRootPackageInputs, requiredRootFiles } from "../../scripts/release-packages.mjs";
+import { npmCommand, packRootPackage } from "../helpers/pack.js";
 
 const repoRoot = process.cwd();
 const packageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
@@ -15,10 +16,6 @@ const currentTarget = findCurrentTarget();
 const currentBinaryPath = currentTarget
   ? path.join(repoRoot, currentTarget.localFile.replace(/^\.\//, ""))
   : null;
-
-function npmCommand() {
-  return process.platform === "win32" ? "npm.cmd" : "npm";
-}
 
 function detectCurrentLinuxLibc() {
   if (process.platform !== "linux") {
@@ -77,16 +74,6 @@ function run(command, args, options) {
   return result;
 }
 
-function packRootPackage() {
-  const result = run(npmCommand(), ["pack", "--json"], { cwd: repoRoot });
-  const jsonStart = result.stdout.lastIndexOf("\n[");
-  const summaryText = (
-    jsonStart === -1 ? result.stdout : result.stdout.slice(jsonStart + 1)
-  ).trim();
-  const [summary] = JSON.parse(summaryText);
-  return path.join(repoRoot, summary.filename);
-}
-
 function writeFile(filePath, content) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, content);
@@ -105,7 +92,7 @@ test("packed package can be installed and render in a consumer project", {
   let tarballPath;
 
   try {
-    tarballPath = packRootPackage();
+    tarballPath = packRootPackage(repoRoot);
 
     writeFile(
       path.join(tempDir, "package.json"),

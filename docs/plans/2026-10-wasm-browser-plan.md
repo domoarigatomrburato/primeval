@@ -1,6 +1,6 @@
 # Browser support through WebAssembly, and a demo on GitHub Pages
 
-Status: W0–W5 done (2026-10-02, PR #10) except W3b, the bundler fixture build; then the demo goes live once Pages is enabled. `AGENTS.md` already lists browsers in scope. Comes before the algorithm change (section 16 of `2026-10-audit-and-refactor-plan.md`); everything here except the engine itself carries over to a new engine.
+Status: W0–W5 done (2026-10-02, PR #10); Pages is enabled, so the demo goes live when PR #10 merges. `AGENTS.md` already lists browsers in scope. Comes before the algorithm change (section 16 of `2026-10-audit-and-refactor-plan.md`); everything here except the engine itself carries over to a new engine.
 
 ## Goal
 
@@ -86,9 +86,9 @@ Wasm is 1.5–1.9× slower than native per thread (quadratic the most, plausibly
 | W1 wasm crate | `binding-wasm`, the build script (nightly pin for the threaded build, stable for the other, link args, shared-memory check, name section stripped), seed from the binding, `AGENTS.md` direction updated, CI builds both and checks the shared memory. | Done. |
 | W2 browser runtime | Worker per call, module cache, build selection, thread pool, progress, cancellation, panic hook and channel, error mapping; tests in headless Chromium (Playwright, pinned) with and without cross-origin isolation, including a panic in a pool task and the native-equality tripwire. | Done. |
 | W3a packaging | Conditional exports, types, packed-install test for the browser entry, the in-repo pool, size budget, README "Browser" section, release `wasm` job. | Done. |
-| W3b bundler fixture | A Vite fixture build test (`vite` devDependency, download pending approval; webpack dropped), then the README states that Vite and the unbundled path are tested. | `npm run verify` builds the fixture and runs it in Chromium. |
+| W3b bundler fixture | A Vite 8 build of the packed package in Chromium, both builds (`test/browser/vite.test.js`; no Vite config needed; webpack dropped); README says what is tested. | Done. |
 | W4 live shapes | `onProgress` `shape`, in Rust render, binding, wasm and TypeScript, documented. | Done. |
-| W5 demo | `demo/`: drop an image, pick shape, count and alpha, watch it draw, compare with the original, download SVG/PNG; deployed to GitHub Pages by a workflow, with the COOP/COEP service worker. | Built and tested; live at `https://domoarigatomrburato.github.io/primeval/` once Pages is enabled and PR #10 merges, then linked from the README. |
+| W5 demo | `demo/`: drop an image, pick shape, count and alpha, watch it draw, compare with the original, download SVG/PNG; deployed to GitHub Pages by a workflow, with the COOP/COEP service worker. | Built and tested; live at `https://domoarigatomrburato.github.io/primeval/` once PR #10 merges, then linked from the README. |
 | Later | WASM fallback on Node where no native prebuild exists (StackBlitz/WebContainers, musl before REL-7); SIMD128 kernels; Firefox and WebKit in the browser tests (Playwright browsers not yet downloaded); `libm` everywhere for cross-platform identical output (engine redesign). | Separate decisions. |
 
 ## Risks

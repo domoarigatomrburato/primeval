@@ -278,7 +278,7 @@ Package notes:
 
 ## Browser
 
-The same package runs in the browser through WebAssembly, with the same `approximate()` and `toDataUri()`, the same options, defaults, error classes and codes, `onProgress`, and `AbortSignal`. Import it from `@aleburato/primeval` as on Node: the browser entry is the `browser` condition of the package's `exports`, which bundlers use when they build for the browser. Bundler builds (Vite, webpack) are not covered by the package's tests yet. Without a bundler, serve the package's files from the page's own origin (browsers start module workers only from the same origin) and map the name to `dist/browser.js` with an import map:
+The same package runs in the browser through WebAssembly, with the same `approximate()` and `toDataUri()`, the same options, defaults, error classes and codes, `onProgress`, and `AbortSignal`. Import it from `@aleburato/primeval` as on Node: the browser entry is the `browser` condition of the package's `exports`, which bundlers use when they build for the browser. The package's tests run it unbundled and in a Vite 8 build, which needs no Vite config: Vite bundles the workers and emits both `.wasm` files as assets, and the page still downloads only one. Other bundlers are not tested. Without a bundler, serve the package's files from the page's own origin (browsers start module workers only from the same origin) and map the name to `dist/browser.js` with an import map:
 
 ```html
 <script type="importmap">
