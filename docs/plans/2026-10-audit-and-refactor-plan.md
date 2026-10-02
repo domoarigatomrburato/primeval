@@ -60,14 +60,11 @@ The problems are concentrated at the edges: how binaries are built, how failures
 | # | ID | Finding | Severity | Status |
 | --- | --- | --- | --- | --- |
 | 1 | REL-1 | `target-cpu=native` leaks into release prebuilds. The Windows x64 DLL contains AVX-512 and the Linux arm64 addon contains SVE, so both crash with an illegal-instruction signal on common CPUs. On ARM the flag gives zero speedup. | Critical | Reproduced, measured |
-| 2 | RT-1 | `panic = "abort"` turns every Rust panic into the death of the host Node process. Switching to `unwind` costs nothing measurable. | Critical | Reproduced, measured |
-| 3 | RT-2, RT-4 | Panics reachable from ordinary input: a 1-pixel working side (e.g. a 2000×5 banner), a huge `outputSize`. (The multi-byte `background` panic, RT-3, is fixed.) | Critical | Reproduced |
-| 4 | REL-2 | Linux prebuilds require glibc ≥ 2.34 (no Debian 11, Ubuntu 20.04, Amazon Linux 2, RHEL 8). | High | Verified |
-| 5 | NODE-1, NODE-2 | Some errors are thrown synchronously and skip the error-class mapping; a throwing `onProgress` crashes the process. | High | Reproduced |
-| 6 | RT-5 | Memory is unbounded: a 258 KB PNG (9000×9000) peaks at 951 MB RSS. | High | Reproduced, measured |
-| 7 | ENG-1 | The NEON code inside safe public functions can read out of bounds. Their `// SAFETY:` comments (added in T1) say the invariant is assumed, not checked. | High | Verified |
-| 8 | ENG-2, ENG-3, ENG-4 | Quadratic strokes paint pixels twice (15.4% of shapes). Three engine rasterizers are coarser than the geometry they optimise. "Deterministic" seeds depend on the CPU core count. | Medium | Reproduced, verified |
-| 9 | PERF-* | No benchmarks exist. Polygon and rotated-ellipse take 51% of the total time and are rasterization-bound (10–32 ns/pixel versus 2–4 for rectangles). | Medium | Measured |
+| 2 | REL-2 | Linux prebuilds require glibc ≥ 2.34 (no Debian 11, Ubuntu 20.04, Amazon Linux 2, RHEL 8). | High | Verified |
+| 3 | NODE-1, NODE-2 | Some errors are thrown synchronously and skip the error-class mapping; a throwing `onProgress` crashes the process. | High | Reproduced |
+| 4 | ENG-1 | The NEON code inside safe public functions can read out of bounds. Their `// SAFETY:` comments (added in T1) say the invariant is assumed, not checked. | High | Verified |
+| 5 | ENG-2, ENG-3, ENG-4 | Quadratic strokes paint pixels twice (15.4% of shapes). Three engine rasterizers are coarser than the geometry they optimise. "Deterministic" seeds depend on the CPU core count. | Medium | Reproduced, verified |
+| 6 | PERF-* | No benchmarks exist. Polygon and rotated-ellipse take 51% of the total time and are rasterization-bound (10–32 ns/pixel versus 2–4 for rectangles). | Medium | Measured |
 
 **Carry-over:** of the 100 action items the audit identified, 65 carry over unchanged to a redesigned engine and 13 more partially (section 15, a snapshot taken at audit time). This argues for doing the transferable work first and capping the investment in performance tuning of the current engine.
 
@@ -182,69 +179,7 @@ The problems are concentrated at the edges: how binaries are built, how failures
 
 ## 3. Runtime robustness (RT)
 
-### RT-1: `panic = "abort"` kills the host process
-
-- **Severity / status:** Critical. Reproduced, measured. `next: yes`.
-- **Where:** `Cargo.toml` `[profile.release] panic = "abort"`, inherited by `napi build --release`.
-- **Evidence:** every panic in RT-2, RT-3 and RT-4 ends the Node process with exit code 134, even with a `process.on("uncaughtException")` handler installed.
-- **Cost of switching to `unwind`:** 5 interleaved runs of 9 shapes × 100 steps.
-
-  | Run order | abort | unwind |
-  | --- | --- | --- |
-  | abort first | 14.56 s | 15.29 s |
-  | abort first | 15.59 s | 15.85 s |
-  | abort first | 16.48 s | 17.69 s |
-  | unwind first | 17.16 s | 16.21 s |
-  | unwind first | 17.24 s | 16.88 s |
-
-  Whichever build runs first wins (thermal drift), so the difference is noise. The binary grows by 10% (1,038,448 to 1,143,984 bytes).
-- **Fix:**
-  1. Use a binding profile with `panic = "unwind"` (`[profile.release-napi] inherits = "release"`, `panic = "unwind"`, `napi build --profile release-napi`), or switch the release profile itself.
-  2. Wrap the native entry point in `std::panic::catch_unwind` and map a panic to an internal-error rejection. rayon propagates worker panics to the caller, so this catches them.
-  3. Keep the root-cause fixes in RT-2, RT-3 and RT-4. `unwind` is defense in depth, not a substitute.
-
-### RT-2: A 1-pixel working dimension panics
-
-- **Severity / status:** Critical. Reproduced. `next: partial`: rejecting tiny working sizes at the boundary carries over; the clamp fixes are specific to this engine.
-- **Where:**
-  - `shapes.rs:486` / `:490` (Ellipse `clamp(1, width - 1)` / `clamp(1, height - 1)`);
-  - `:536` (Circle);
-  - `:654` / `:656` (RotatedRectangle);
-  - `:982` / `:984` (RotatedEllipse).
-  - `Ord::clamp` and `f64::clamp` panic when `min > max`.
-- **Reachability:** `export::thumbnail` (`export.rs:128-139`) keeps 1×N inputs and squashes extreme aspect ratios to N×1 with `.max(1)`. A 2000×5 banner becomes 256×1. The default `any` shape samples the affected kinds.
-- **Evidence:** a 1000×1 PNG with `shape: any` gives `assertion failed: min <= max`, exit 134. `triangle`, `rectangle`, `quadratic`, `rotated-ellipse` and `polygon` survive 1000×1. `export.rs:191` has a test asserting the thumbnail clamps to 1 px, which is exactly the size that then crashes.
-- **Fix:**
-  - Validate working dimensions ≥ 2×2 in `primeval-render`, returning a `Validation` error, or upscale tiny inputs.
-  - Use `(dim - 1).max(1)` upper bounds in the mutations.
-  - Add a regression test per `ShapeKind` for 1×1, 1×N, N×1 and 2×2.
-
-### RT-4: Output-size overflows panic
-
-- **Severity / status:** High. Reproduced. `next: partial` (output caps carry over).
-- **Where:** `buffer.rs:160` `.expect("buffer pixel byte length must not overflow usize")`: `outputSize: 4294967295` with raster output panics on a `tokio-rt-worker` thread. (The GIF `u16` frame-size panic left with RM-1.)
-- **Fix:**
-  - Cap `output_size` in `validate_options` (e.g. ≤ 16384).
-  - Prefer `try_reserve` for large buffers.
-
-### RT-5: Unbounded memory and work
-
-- **Severity / status:** High. Reproduced, measured. `next: yes`.
-- **Evidence:**
-  - A 258,606-byte 9000×9000 PNG with `count: 1` and `resizeInput: 64` peaks at **951 MB RSS**.
-  - A reviewer probe with 600 steps at 2048 px peaked at 765 MB.
-  - A 30000×30000 PNG header bomb is rejected by `image`'s default 512 MiB allocation limit, so that part works.
-- **Causes:**
-  - `render::prepare` keeps the full decoded `DynamicImage` alive for the whole optimisation (`crates/primeval-render/src/lib.rs:363` onward).
-  - `average_background` (`export.rs:173-174`) makes full-resolution RGBA copies.
-  - `thumbnail` returns `to_rgba8()` copies (`export.rs:131`), and `Buffer::from_image` clones again (`buffer.rs:111`).
-  - Nothing caps `count`, `resizeInput` or `outputSize`.
-- **Fix:**
-  - Decode with `image::ImageReader` and explicit `image::Limits` (`max_image_width`, `max_image_height`, `max_alloc`).
-  - Compute the background from the thumbnail.
-  - `drop` the full image right after taking the thumbnail.
-  - Take `RgbaImage` by value (`into_raw`).
-  - Add upper bounds in `validate_options`, document them, and test them at every layer.
+All RT items landed in T3: release builds unwind and the binding maps panics to `INTERNAL`; inputs below 2×2 are rejected and thumbnails keep at least 2 px per side; `count` (1..=100000), `resizeInput` (2..=2048) and `outputSize` (2..=8192) are bounded in Rust; decoding uses `ImageReader` limits (16384 px per side, 512 MiB) and frees the full image before the search (9000×9000 PNG: 646 MB → 322 MB peak RSS).
 
 ---
 
@@ -273,23 +208,6 @@ The problems are concentrated at the edges: how binaries are built, how failures
 - **Evidence:** `onProgress() { throw new Error("boom") }` ends the process with `Error: boom at 1`, exit 1. With an `uncaughtException` handler the render still resolves.
 - **Fix:** catch inside the wrapper. On error, cancel the task and reject the promise with that error as `cause`.
 
-### NODE-3: Numbers wrap at the napi boundary
-
-- **Severity / status:** High. Reproduced. `next: yes`.
-- **Where:**
-  - `binding/src/binding.rs:83-92` take `count`, `resizeInput` and `outputSize` as `Option<u32>`, and `seed` as `Option<i64>`.
-  - TypeScript checks only `Number.isInteger` and the lower bound.
-- **Evidence:**
-  - `count: 2**32 + 1` resolves with `total: 1`.
-  - `count: 2**32` gives "count must be at least 1".
-  - `outputSize: 2**32 + 16` renders at 16 px.
-  - Seeds 1e19, 1e20 and 1e300 produce identical output (they saturate).
-  - CLI `--count 4294967297` exits 0 after one shape.
-  - CLI `--seed 99999999999999999999` reports "seed must be at least 0".
-- **Fix:**
-  - Accept `f64` (or `BigInt` for `seed`) in the binding and range-check in Rust, so one layer owns the rule.
-  - Restrict `seed` to `Number.MAX_SAFE_INTEGER` or accept `bigint`.
-
 ### NODE-4: Abort is not guaranteed
 
 - **Severity / status:** Medium–High. Reproduced. `next: yes`.
@@ -302,28 +220,6 @@ The problems are concentrated at the edges: how binaries are built, how failures
   - Reject immediately when `signal.aborted`.
   - On settle, reject with `AbortError` (`cause: signal.reason`) if the signal fired.
   - Check the flag before and after decoding and before encoding.
-
-### NODE-5: CPU-bound work runs on tokio worker threads
-
-- **Severity / status:** Medium. Verified, and probed by a reviewer. `next: yes`.
-- **Where:** `binding/src/binding.rs:141` `env.spawn_future_with_callback(async move { ... approximate(...) ... })`. The future never awaits; panics show thread `tokio-rt-worker`.
-- **Evidence:** 16 concurrent renders on 8 cores. The first 8 report progress at 91–166 ms and the rest only at 1215–1848 ms; the event loop p99 is 19.5 ms; peak RSS is 109 MB. The CPU is not oversubscribed (rayon's pool is shared), but queued work is invisible and anything else on the runtime is starved.
-- **Fix:**
-  - Use `tokio::task::spawn_blocking` (or a dedicated pool) with an optional documented concurrency limit.
-  - Do not use napi `AsyncTask`, which runs on the libuv pool and would block `fs`/`crypto`.
-
-### NODE-6: Error objects carry little information
-
-- **Severity / status:** Medium. Reproduced. `next: yes`.
-- **Where:** `mapNativeError` (`src/index.ts:248-266`) parses a `[Name] message` prefix and builds new errors.
-- **Evidence:**
-  - No `code` and no `cause`; error objects have `keys: ['name']`, and the stack starts at `mapNativeError`.
-  - A message containing a newline (e.g. a path `a\nb.png`) is not matched and leaks as a plain `Error`.
-  - `PrimevalError` (`:76`) is not exported.
-- **Fix:**
-  - Throw napi errors with a status/code (e.g. `Error::new("ValidationError", msg)`, readable as `err.code`) and map on `code`.
-  - Always set `cause`.
-  - Export the base class and add an `InternalError` for panics and encoder failures.
 
 ### NODE-7: Vocabulary drift between layers
 
@@ -349,12 +245,6 @@ The problems are concentrated at the edges: how binaries are built, how failures
   - `dist/cli.d.ts` and `dist/native-binding.d.ts` ship as noise.
   - No source maps or declaration maps.
   - The exports map is correct (`types` before `import`).
-
-### NODE-9: The cancellation registry is global
-
-- **Severity / status:** Low. Verified. `next: yes`.
-- **Where:** `binding.rs:15-16`, a global `Mutex<HashMap<u32, Arc<AtomicBool>>>` keyed by a wrapping `AtomicU32`.
-- **Fix:** a `#[napi]` class holding `Arc<AtomicBool>` with a `cancel()` method. Cleanup is currently correct and tested, so this is simplification, not a bug fix.
 
 ### NODE-10: Loader detail
 
@@ -396,6 +286,7 @@ CLI-1 to CLI-4 landed with RM-7. Deliberate choices: stdout output is SVG only (
 
 - **Impact:**
   - Energy assumes each pixel is blended once, but `draw_lines` blends duplicates twice. The score stored by `Model::add` (`model.rs:177-191`) drifts away from `difference_full_raw`.
+  - A duplicated pixel is subtracted twice from the fused energy's running total, which underflowed in debug builds on tiny canvases. T3 made the total wrap (exact modulo 2^64 as long as the true sum is non-negative, as release builds already behaved); the double count itself remains until this fix.
   - This affects reported scores and frame selection, and `compute_color` double-weights those pixels.
   - In debug builds `total -=` can transiently underflow.
   - The test `add_score_matches_full_recomputation` covers only Rectangle.
@@ -589,7 +480,6 @@ Takeaways:
 
 | ID | Severity | Status | `next` | Finding | Fix |
 | --- | --- | --- | --- | --- | --- |
-| API-2 | Medium | Verified | yes | Errors are stringly typed: `Model::step` returns `Result<u64, String>` (`model.rs:114`, and that error cannot happen); `FromStr` uses `Err = String` (`shapes.rs:238`, `export.rs:50`); encoders return `Box<dyn Error>`, which is not `Send + Sync` (`export.rs:64`, `:78`, `:98`); render's `ApproximateError` (`lib.rs:144-148`) has no `source()` and turns image errors into strings. | One typed error per crate with `std::error::Error` + `source`, `#[non_exhaustive]`, keeping `io::ErrorKind`. |
 | API-6 | Low | Verified | partial | `ShapeKind` keeps parallel name tables (`shapes.rs:194-254`: `variants()`, `FromStr`, display). | One `const` table. |
 | API-7 | Low | Measured | partial | 186 public items lack docs (`-W missing_docs`). Some docs are wrong: `difference_full_raw` claims a normalised RMS but returns a raw `u64`; `raster.rs:8` and `:172` mention a "tiny-skia pipeline" that does not exist; `raster.rs:177` says "non-zero winding" while the code uses even-odd. | `#![warn(missing_docs)]` on the public surface and fix the wrong docs. Broken links, module docs and the rustdoc gate landed in T1. |
 | API-8 | Medium | Measured | yes | Not publishable: `cargo publish --dry-run` warns "manifest has no description" for core and **fails** for render (path dependency without `version`). `rust-version`, `readme`, `keywords`, `categories` and `documentation` are missing. `binding` lacks `publish = false`. Crate versions (0.1.0) are not aligned with npm. | Decide whether the crates are public. If yes, add the metadata, versioned path deps and version alignment (REL-6); if not, `publish = false` everywhere. |
@@ -684,14 +574,11 @@ Done. GIF/JPG output, GIF input, path input, `repeat` and the Rust-only knobs ar
 
 ### T3: Runtime robustness
 
-- [ ] RT-1 `panic = "unwind"` + `catch_unwind`, mapped to `InternalError`
-- [ ] RT-2, RT-4 Root-cause fixes plus regression tests at the Rust and Node layers
-- [ ] RT-5 `ImageReader` + `Limits`, option caps, drop the full image early, fewer copies (PERF-10)
-- [ ] API-2, NODE-6 Typed errors with codes and causes across layers
-- [ ] NODE-1, NODE-2, NODE-3, NODE-4 Async-only errors, safe progress, numeric ranges owned by Rust, reliable abort
-- [ ] NODE-5 `spawn_blocking`
-- [ ] NODE-7 One vocabulary
-- [ ] NODE-8, NODE-9, NODE-10 Typings, cancellation handle, loader detail
+Landed: RT-1, RT-2, RT-4, RT-5, API-2, NODE-3, NODE-5, NODE-6, NODE-9.
+
+- [ ] NODE-1, NODE-2, NODE-4 Async-only errors, safe progress, reliable abort
+- [ ] NODE-7 One vocabulary (Node camelCase, CLI flag names, from the typed option identifier)
+- [ ] NODE-8, NODE-10 Typings, loader detail
 - [ ] TEST-1, TEST-2, TEST-3, TEST-5, TEST-6
 
 ### T4: Portable native builds and release
