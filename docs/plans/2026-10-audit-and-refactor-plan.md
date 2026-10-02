@@ -246,8 +246,7 @@ All TOOL items landed in T1. Follow-ups:
 
 | ID | Severity | Status | `next` | Finding | Fix |
 | --- | --- | --- | --- | --- | --- |
-| DOC-4 | Low | Verified | yes | The Benchmarks section cannot be reproduced (the script was removed in `e24492d`). | Replace with the PERF-0 script and its output, or remove the section. |
-| DOC-6 | Low | Partly done | yes | The copyrighted originals (SpongeBob artwork, a Michael Kenna photograph) and their gallery images are removed; only the public-domain Mona Lisa and American Gothic remain, which also form the benchmark corpus (PERF-0). | Add replacement photographs (public-domain, CC0 or the maintainer's own) and regenerate the gallery. |
+| DOC-6 | Low | Partly done | yes | The copyrighted originals and their images are removed and the gallery is regenerated; only the public-domain Mona Lisa and American Gothic remain, which also form the benchmark corpus (PERF-0). | Add replacement photographs (public-domain, CC0 or the maintainer's own) to `docs/readme/originals/` and run the gallery example (`CONTRIBUTING.md`). |
 
 ---
 
@@ -330,7 +329,8 @@ Done except the deferred items. Full PERF-0 runner, 8 threads, total search time
 Continuous: each ticket updates the README for the behaviour it changes. This ticket is the final pass.
 
 - [x] API-6, API-7, DOC-2 (Deploying section, with PERF-11's batch-throughput note), DOC-3, DOC-7 (metadata and badges; GitHub topics are the maintainer's), and DOC-6's removal of the copyrighted images
-- [ ] Gallery generator and regenerated images (they predate the T2–T6 engine and output changes), DOC-4 Benchmarks from the PERF-0 runner, replacement photographs (DOC-6)
+- [x] Gallery generator (`examples/gallery.rs`) and every image regenerated from the final engine; DOC-4 Benchmarks from the PERF-0 runner
+- [ ] Replacement photographs (DOC-6), the maintainer's
 
 ---
 
