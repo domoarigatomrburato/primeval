@@ -329,7 +329,6 @@ The problems are concentrated at the edges: how binaries are built, how failures
 
 - **Severity / status:** Medium. Reproduced. `next: yes`.
 - **Evidence:**
-  - Rust `parse_alpha_str` accepts `"auto"`, but CLI `--alpha auto` gives "alpha must be an integer" (goes away with API-4).
   - The same rule is spelled three ways: "resize_input must be at least 1" (Rust), "resizeInput ..." (TypeScript) and "resize-input ..." (CLI).
   - The seed message says "positive integer" although 0 is accepted.
   - `shape: null` is accepted at runtime although the type forbids it.
@@ -433,20 +432,19 @@ CLI-1 to CLI-4 landed with RM-7. Deliberate choices: stdout output is SVG only (
   - Exactly 16 rounds as independent tasks, each with an RNG derived from `(seed, step, round)`, e.g. ChaCha `set_stream`. The output is then independent of thread count, and the load balances better (PERF-9).
   - Document the guarantee as "same seed, same version, same platform".
 
-### ENG-5 to ENG-15: Smaller correctness items
+### Smaller correctness items (ENG-6 to ENG-17)
 
 | ID | Severity | Status | `next` | Where | Problem | Fix |
 | --- | --- | --- | --- | --- | --- | --- |
-| ENG-5 | Low–Med | Verified | no | `score.rs:53` | `0x101 * 255 / alpha` divides by zero for `alpha == 0` through the public `Model::add(shape, 0)`; `alpha as u8` (around `:87`) truncates values above 255. | Typed alpha (API-4); restrict visibility. |
 | ENG-6 | Low | Verified | no | `score.rs:58-76` | `compute_color` ignores `line.alpha` (coverage), so anti-aliased edges and quadratic pixels are fitted as fully covered and the colour comes out under-saturated. This matches Go; the quality impact is unmeasured. | Weighted least squares: `s* = Σw(t−(1−w)c) / Σw²` with `w = (alpha/255)·(ma/65535)`. |
 | ENG-7 | Low | Verified | no | `scanline.rs:57-66` | `clamp_line` turns lines entirely outside the image into one-pixel lines at the border; `w = 0` panics. Unreachable from render (callers clip first), reachable from the public API. | Return `None` when `x2 < 0 \|\| x1 >= w`. |
 | ENG-8 | Low | Verified | no | `shapes.rs:600-606` | RotatedRectangle starts `rect_max` at 0, so rows whose edges are all at negative x emit a stray (0..0) pixel. Inherited from Go. | Start at `i32::MIN` / `i32::MAX`. |
 | ENG-9 | Low | Verified | no | `shapes.rs:983-984` | RotatedEllipse clamps `ry` to `width - 1`; Ellipse uses the height. | Clamp to `height - 1`. |
 | ENG-10 | Low | Reported | no | `error_grid.rs:80-97`, `:141-144`, `:172-173` | Biased sampling only covers `cell_w × cell_h` per cell, but the last row/column absorbs the remainder, which is then reached only by the 20% uniform samples. | Sample within each cell's real bounds. |
 | ENG-11 | Low | Verified | no | `model.rs:67` | A zero dimension gives a NaN or infinite aspect ratio, `random_range(0..0)` panics, and the score becomes NaN. Public API only. | Validate in the constructor. |
-| ENG-13 | Low | Verified | no | `shapes.rs:100-101`, `raster.rs:244`, `score.rs:129`, `state.rs:16` | Public fields with unchecked invariants: `Polygon.order > 4` or `0` panics; `partial_cmp().unwrap()` panics on NaN vertices; `Scanline.alpha > 0xFFFF` overflows `M - sa*ma/M`; `State.cached_energy` is public and mutable. | Restrict visibility (API-1); use `total_cmp`. |
 | ENG-14 | Info | Verified | no | `score.rs` blend | The blend arithmetic is exactly at the overflow bound (`v < M(M+1)`, `div_by_m` exact). Full anti-aliased coverage sums to 65532, not 65535, so "fully covered" pixels are never exactly opaque. | Document the bound, add a `debug_assert`, normalise coverage. |
 | ENG-15 | Nit | Verified | partial | `primeval-render/src/input.rs` (`thumbnail`), `error_grid.rs:37` | `max_size * height / width` and `(cols * rows) as usize` are computed in `u32`. Unreachable with decode limits. | Compute in `u64`. |
+| ENG-17 | Low | Verified | no | `shapes.rs` (`RotatedRectangle::mutate`) | Mutation never enforces the rotated rectangle's aspect-ratio limit: Go's `Mutate` loops until `Valid()`, but here `is_valid` was only called by its own test (deleted in T2 as dead code). Quality impact unmeasured. | Restore the validity check with bounded repair, as Quadratic does, or document the divergence. |
 
 ---
 
@@ -591,14 +589,10 @@ Takeaways:
 
 | ID | Severity | Status | `next` | Finding | Fix |
 | --- | --- | --- | --- | --- | --- |
-| API-1 | Medium | Verified | partial | `crates/primeval-core/src/lib.rs:7-20` makes every module public. That exposes `WorkerCtx` (with public `lines`, `rng`, `rect_*`, `scratch_vertices`), `SearchRound`, `State`, `hill_climb`, `raster::*`, profiling hooks (`worker.rs:93-139`), and mutable `Model.target` / `Model.current` while `score` is private. Because everything is public, the workspace's `unreachable_pub` / `dead_code = "deny"` lints cannot find dead items. | Expose a small surface (shape types, `Color`, `ShapeKind`, a `Model` facade or an engine trait, the committed-shape IR); make the rest `pub(crate)`; `#[non_exhaustive]` on public enums and option structs. |
 | API-2 | Medium | Verified | yes | Errors are stringly typed: `Model::step` returns `Result<u64, String>` (`model.rs:114`, and that error cannot happen); `FromStr` uses `Err = String` (`shapes.rs:238`, `export.rs:50`); encoders return `Box<dyn Error>`, which is not `Send + Sync` (`export.rs:64`, `:78`, `:98`); render's `ApproximateError` (`lib.rs:144-148`) has no `source()` and turns image errors into strings. | One typed error per crate with `std::error::Error` + `source`, `#[non_exhaustive]`, keeping `io::ErrorKind`. |
-| API-4 | Low | Verified | yes | Alpha is a magic number: `alpha: i32` with 0 meaning auto (`model.rs:114`, `state.rs:14-15`), sent as a number from TypeScript, stringified (`src/index.ts` around `:290`) and re-parsed in Rust. | An `Alpha::{Auto, Fixed(u8)}` enum end to end; `alpha?: "auto" \| number` in TypeScript. |
 | API-6 | Low | Verified | partial | `ShapeKind` keeps parallel name tables (`shapes.rs:194-254`: `variants()`, `FromStr`, display). | One `const` table. |
 | API-7 | Low | Measured | partial | 186 public items lack docs (`-W missing_docs`). Some docs are wrong: `difference_full_raw` claims a normalised RMS but returns a raw `u64`; `raster.rs:8` and `:172` mention a "tiny-skia pipeline" that does not exist; `raster.rs:177` says "non-zero winding" while the code uses even-odd. | `#![warn(missing_docs)]` on the public surface and fix the wrong docs. Broken links, module docs and the rustdoc gate landed in T1. |
 | API-8 | Medium | Measured | yes | Not publishable: `cargo publish --dry-run` warns "manifest has no description" for core and **fails** for render (path dependency without `version`). `rust-version`, `readme`, `keywords`, `categories` and `documentation` are missing. `binding` lacks `publish = false`. Crate versions (0.1.0) are not aligned with npm. | Decide whether the crates are public. If yes, add the metadata, versioned path deps and version alignment (REL-6); if not, `publish = false` everywhere. |
-| API-9 | Medium | Verified | yes | Render facade ergonomics: `RenderOptions` and `ApproximateError` are not `#[non_exhaustive]`; `ApproximateResult::Raster { format }` can hold `Svg`; `approximate(req, Option<&dyn Fn(ProgressInfo)>, &AtomicBool)` is positional and takes `Fn` rather than `FnMut`, forcing `Arc<Mutex<_>>` in callers; `ShapeKind` and `Color` appear in the API but are not re-exported (the binding imports `primeval_core::shapes::ShapeKind`); the binding helper parsers (`parse_alpha_str`, `parse_alpha_u32`, `parse_background_str`, `parse_seed_i64`) are public and return `String` errors. | A builder or options struct with `progress: Option<&mut dyn FnMut>` and a `CancellationToken`; re-export the types used in the API; move binding helpers behind `pub(crate)` or into the binding. |
-| API-10 | Low | Verified | yes | The binding merges defaults itself (`binding.rs:211-257`, `unwrap_or(defaults.x)`). This complies with `AGENTS.md`, since the defaults come from Rust, but every new surface would have to repeat it. | `RenderOptions::merge(partial)` in render. |
 
 ---
 
@@ -686,11 +680,7 @@ Done. Every TOOL item plus REL-3 and REL-4 landed; section 9 lists the follow-up
 
 ### T2: Simplification and the engine boundary
 
-Removals before hardening, so no effort goes into code that is about to disappear.
-
-- [ ] API-1 Restrict core visibility; `#[non_exhaustive]`
-- [ ] API-4 Typed alpha end to end
-- [ ] API-9, API-10 Render facade ergonomics, `merge`
+Done. GIF/JPG output, GIF input, path input, `repeat` and the Rust-only knobs are gone; WebP input, the opaque RGB contract, the CLI redesign (with CLI-1 to CLI-4), dead-code removal, the `Drawing` engine boundary (API-3), the small core surface, typed alpha and the render facade ergonomics landed. `Model::step` still returns `Result<_, String>`: that goes with API-2 in T3.
 
 ### T3: Runtime robustness
 
@@ -723,7 +713,7 @@ Required in any case, because the current engine becomes the reference and basel
 - [ ] ENG-2 Quadratic duplicates (+ PERF-7)
 - [ ] ENG-3 Triangle, rotated-rectangle and quadratic rasterizers sample at pixel centres; tighten the geometry test bounds
 - [ ] ENG-4 Determinism independent of thread count (+ PERF-9)
-- [ ] ENG-5 to ENG-15
+- [ ] ENG-6 to ENG-17
 - [ ] TEST-4 Property tests for rasterizers and scoring
 
 ### T6: Performance, gated by benchmarks
