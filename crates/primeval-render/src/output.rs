@@ -6,11 +6,14 @@ use std::str::FromStr;
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OutputFormat {
+    /// An SVG document.
     Svg,
+    /// An opaque RGB PNG image.
     Png,
 }
 
 impl OutputFormat {
+    /// The public name, `"svg"` or `"png"`; [`FromStr`] parses it back.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -19,11 +22,13 @@ impl OutputFormat {
         }
     }
 
+    /// The usual file extension, without the dot.
     #[must_use]
     pub const fn extension(self) -> &'static str {
         self.as_str()
     }
 
+    /// The MIME type: `image/svg+xml` or `image/png`.
     #[must_use]
     pub const fn mime_type(self) -> &'static str {
         match self {

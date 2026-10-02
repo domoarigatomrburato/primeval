@@ -8,6 +8,8 @@
 //! ([`ModelOptions`], [`ShapeKind`], [`Alpha`]), the pixel and colour types it
 //! takes ([`Buffer`], [`Color`]), and the [`Drawing`] it produces.
 
+#![warn(missing_docs)]
+
 mod alpha;
 #[cfg(feature = "bench")]
 mod benches;

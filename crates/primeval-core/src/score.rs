@@ -265,6 +265,8 @@ fn assert_sums_match(sums: Option<&PrefixSums>, width: u32, height: u32) {
 /// which its energy subtracts; see [`fit`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Fit {
+    /// The fitted colour with the requested alpha, or the all-zero
+    /// [`Color`] if no covered pixel had weight.
     pub(crate) color: Color,
     /// The squared channel differences between the target and the canvas
     /// over every in-bounds pixel of every line, a pixel counted once per
@@ -534,6 +536,8 @@ mod scalar {
         (target_sums, current_sums)
     }
 
+    /// The sum of squared channel differences between two buffers of the
+    /// same size, the raw score.
     #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
     pub(super) fn difference_full_raw(a: &Buffer, b: &Buffer) -> u64 {
         difference_full_raw_pixels(a.pixels(), b.pixels())
@@ -981,6 +985,9 @@ fn assert_same_dimensions(target: &Buffer, current: &Buffer) {
     );
 }
 
+/// Copies `src` into `dst` with `c` blended along `lines`, pixel by pixel:
+/// the reference the fused [`energy`] is tested against. `dst` must have
+/// `src`'s dimensions.
 #[cfg(test)]
 pub(crate) fn copy_and_draw_lines(dst: &mut Buffer, src: &Buffer, c: Color, lines: &[Scanline]) {
     let [sr, sg, sb, sa] = c.to_premultiplied_rgba();
@@ -1055,13 +1062,18 @@ pub(crate) fn difference_full_raw(a: &Buffer, b: &Buffer) -> u64 {
     }
 }
 
-/// Computes the normalized root-mean-square difference between two buffers.
+/// The normalised RGB RMSE between two buffers, from `0.0` to `1.0`: the
+/// [`difference_full_raw`] passed through [`raw_score_to_normalized`].
 #[cfg(test)]
 #[must_use]
 pub(crate) fn difference_full(a: &Buffer, b: &Buffer) -> f64 {
     raw_score_to_normalized(difference_full_raw(a, b), a.width(), a.height())
 }
 
+/// The raw score `score` of `before` updated to `after`, which differ only
+/// on `lines`: each covered pixel's old error is subtracted and its new
+/// error added, per line, in wrapping arithmetic. The pixel-reading
+/// reference for [`energy`].
 #[cfg(test)]
 #[must_use]
 pub(crate) fn difference_partial_raw(
@@ -1098,6 +1110,7 @@ pub(crate) fn difference_partial_raw(
     total
 }
 
+/// [`difference_partial_raw`] on normalised scores.
 #[cfg(test)]
 #[must_use]
 pub(crate) fn difference_partial(
@@ -1115,15 +1128,16 @@ pub(crate) fn difference_partial(
 /// The raw score after drawing `lines` with `fit`, which [`fit`] computed
 /// for the same buffers and lines.
 ///
-/// Fused replacement for `copy_and_draw_lines` + `difference_partial`:
-/// `score` minus the old error of the covered pixels, from `fit.before`,
-/// plus their error after blending, computed on the fly (no write to any
-/// intermediate buffer).
+/// It equals `copy_and_draw_lines` followed by `difference_partial_raw`
+/// (the test references) without writing any buffer: `score` minus the old
+/// error of the covered pixels, from `fit.before`, plus their error after
+/// blending, computed on the fly.
 ///
 /// The running total uses wrapping arithmetic: a scanline set that covers a
 /// pixel twice (the quadratic stroke, ENG-2) subtracts that pixel's old
-/// difference twice and can dip below zero part-way through a small canvas.
-/// Wrapping keeps debug builds from panicking and matches release builds.
+/// difference twice, so on a small canvas `score - fit.before` can be
+/// negative before the new errors are added. Wrapping keeps debug builds
+/// from panicking and matches release builds.
 ///
 /// # Panics
 ///
@@ -1181,6 +1195,7 @@ pub(crate) fn energy_from_lines_raw(
     energy(target, current, lines, Fit { color, before }, score)
 }
 
+/// [`energy_from_lines_raw`] on normalised scores.
 #[cfg(test)]
 #[must_use]
 pub(crate) fn energy_from_lines(

@@ -16,16 +16,93 @@ const ANGLE_SIGMA: f64 = 32.0;
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShapeKind {
+    /// A concrete family chosen at random for each candidate.
     Any,
+    /// Triangles.
     Triangle,
+    /// Axis-aligned rectangles.
     Rectangle,
+    /// Axis-aligned ellipses.
     Ellipse,
+    /// Circles.
     Circle,
+    /// Rectangles rotated about their centre.
     RotatedRectangle,
+    /// Stroked quadratic Bézier curves.
     Quadratic,
+    /// Ellipses rotated about their centre.
     RotatedEllipse,
+    /// Quadrilaterals, whose edges may cross.
     Polygon,
 }
+
+/// The one table of shape names: every [`ShapeKind`] with its public name, in
+/// declaration order, so `NAMES[kind as usize]` is `kind`'s row. `as_str`,
+/// `FromStr`, [`ShapeKind::REQUIREMENT`] and the concrete-kind list all derive
+/// from it.
+const NAMES: [(ShapeKind, &str); 9] = [
+    (ShapeKind::Any, "any"),
+    (ShapeKind::Triangle, "triangle"),
+    (ShapeKind::Rectangle, "rectangle"),
+    (ShapeKind::Ellipse, "ellipse"),
+    (ShapeKind::Circle, "circle"),
+    (ShapeKind::RotatedRectangle, "rotated-rectangle"),
+    (ShapeKind::Quadratic, "quadratic"),
+    (ShapeKind::RotatedEllipse, "rotated-ellipse"),
+    (ShapeKind::Polygon, "polygon"),
+];
+
+/// The concrete kinds: every row of [`NAMES`] after [`ShapeKind::Any`].
+const CONCRETE_KINDS: [ShapeKind; NAMES.len() - 1] = {
+    let mut kinds = [ShapeKind::Any; NAMES.len() - 1];
+    let mut index = 0;
+    while index < kinds.len() {
+        kinds[index] = NAMES[index + 1].0;
+        index += 1;
+    }
+    kinds
+};
+
+const REQUIREMENT_PREFIX: &str = "must be one of: ";
+const REQUIREMENT_SEPARATOR: &str = ", ";
+
+const REQUIREMENT_LEN: usize = {
+    let mut len = REQUIREMENT_PREFIX.len() + REQUIREMENT_SEPARATOR.len() * (NAMES.len() - 1);
+    let mut index = 0;
+    while index < NAMES.len() {
+        // The table is in declaration order; `as_str` indexes it by variant.
+        assert!(NAMES[index].0 as usize == index);
+        len += NAMES[index].1.len();
+        index += 1;
+    }
+    len
+};
+
+/// `REQUIREMENT_PREFIX` followed by the names in [`NAMES`], joined by
+/// `REQUIREMENT_SEPARATOR`.
+const REQUIREMENT_BYTES: [u8; REQUIREMENT_LEN] = {
+    const fn append(bytes: &mut [u8; REQUIREMENT_LEN], at: usize, part: &str) -> usize {
+        let part = part.as_bytes();
+        let mut index = 0;
+        while index < part.len() {
+            bytes[at + index] = part[index];
+            index += 1;
+        }
+        at + part.len()
+    }
+
+    let mut bytes = [0; REQUIREMENT_LEN];
+    let mut at = append(&mut bytes, 0, REQUIREMENT_PREFIX);
+    let mut index = 0;
+    while index < NAMES.len() {
+        if index > 0 {
+            at = append(&mut bytes, at, REQUIREMENT_SEPARATOR);
+        }
+        at = append(&mut bytes, at, NAMES[index].1);
+        index += 1;
+    }
+    bytes
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Shape {
@@ -194,54 +271,37 @@ impl Shape {
 }
 
 impl ShapeKind {
+    /// What the `shape` option accepts, phrased to follow the option name:
+    /// `"must be one of: any, triangle, ..."`, listing every public name.
+    pub const REQUIREMENT: &'static str = match std::str::from_utf8(&REQUIREMENT_BYTES) {
+        Ok(requirement) => requirement,
+        Err(_) => panic!("shape names are UTF-8"),
+    };
+
+    /// The public name: `"any"`, `"triangle"`, `"rotated-rectangle"`, ...
+    /// [`FromStr`] parses it back.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
-        match self {
-            ShapeKind::Any => "any",
-            ShapeKind::Triangle => "triangle",
-            ShapeKind::Rectangle => "rectangle",
-            ShapeKind::Ellipse => "ellipse",
-            ShapeKind::Circle => "circle",
-            ShapeKind::RotatedRectangle => "rotated-rectangle",
-            ShapeKind::Quadratic => "quadratic",
-            ShapeKind::RotatedEllipse => "rotated-ellipse",
-            ShapeKind::Polygon => "polygon",
-        }
+        NAMES[self as usize].1
     }
 
+    /// Every kind except [`ShapeKind::Any`], in declaration order.
     pub(crate) const fn all_kinds() -> &'static [ShapeKind] {
-        &[
-            ShapeKind::Triangle,
-            ShapeKind::Rectangle,
-            ShapeKind::Ellipse,
-            ShapeKind::Circle,
-            ShapeKind::RotatedRectangle,
-            ShapeKind::Quadratic,
-            ShapeKind::RotatedEllipse,
-            ShapeKind::Polygon,
-        ]
+        &CONCRETE_KINDS
     }
 }
 
 impl FromStr for ShapeKind {
     type Err = ParseError;
 
+    /// Parses a public name (see [`ShapeKind::as_str`]); anything else is an
+    /// error whose message is `"shape {REQUIREMENT}"`.
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "any" => Ok(Self::Any),
-            "triangle" => Ok(Self::Triangle),
-            "rectangle" => Ok(Self::Rectangle),
-            "ellipse" => Ok(Self::Ellipse),
-            "circle" => Ok(Self::Circle),
-            "rotated-rectangle" => Ok(Self::RotatedRectangle),
-            "quadratic" => Ok(Self::Quadratic),
-            "rotated-ellipse" => Ok(Self::RotatedEllipse),
-            "polygon" => Ok(Self::Polygon),
-            _ => Err(ParseError::new(
-                "shape must be one of: any, triangle, rectangle, ellipse, circle, \
-                 rotated-rectangle, quadratic, rotated-ellipse, polygon",
-            )),
-        }
+        NAMES
+            .iter()
+            .find(|(_, name)| *name == value)
+            .map(|&(kind, _)| kind)
+            .ok_or_else(|| ParseError::new(format!("shape {}", Self::REQUIREMENT)))
     }
 }
 
@@ -1133,6 +1193,26 @@ mod tests {
             assert_eq!(kind.as_str(), value);
             assert_eq!(value.parse::<ShapeKind>().expect("shape kind"), kind);
         }
+    }
+
+    #[test]
+    fn shape_kind_requirement_lists_every_name_once() {
+        assert_eq!(
+            ShapeKind::REQUIREMENT,
+            "must be one of: any, triangle, rectangle, ellipse, circle, \
+             rotated-rectangle, quadratic, rotated-ellipse, polygon"
+        );
+        let listed: Vec<&str> = ShapeKind::REQUIREMENT
+            .strip_prefix("must be one of: ")
+            .expect("a list requirement")
+            .split(", ")
+            .collect();
+        let kinds: Vec<ShapeKind> = listed
+            .iter()
+            .map(|name| name.parse().expect(name))
+            .collect();
+        assert_eq!(kinds[0], ShapeKind::Any);
+        assert_eq!(&kinds[1..], ShapeKind::all_kinds());
     }
 
     #[test]

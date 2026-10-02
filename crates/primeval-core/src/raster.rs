@@ -17,8 +17,8 @@ pub(crate) struct StrokeScratch {
     rows: Vec<(i32, i32)>,
 }
 
-/// Rasterises a stroked quadratic Bézier directly into `worker.lines`,
-/// bypassing the tiny-skia pixmap pipeline entirely.
+/// Rasterises a stroked quadratic Bézier directly into `worker.lines` as
+/// anti-aliased scanlines.
 ///
 /// The curve from `(x1,y1)` through control point `(cx,cy)` to `(x2,y2)` is
 /// adaptively subdivided via de Casteljau (flatness tolerance 0.5 px) into
@@ -455,8 +455,7 @@ fn emit_row(
     runs.finish(ix_max);
 }
 
-/// Fills a closed polygon directly into `lines`, bypassing the tiny-skia
-/// pixmap pipeline.
+/// Fills a closed polygon directly into `lines` as anti-aliased scanlines.
 ///
 /// Uses scanline intersection with 4× sub-pixel vertical antialiasing.
 /// Each polygon edge is intersected at 4 sub-rows per pixel row, the sorted

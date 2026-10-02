@@ -13,11 +13,14 @@ use crate::Color;
 /// A point in continuous canvas coordinates.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Point {
+    /// Horizontal position, growing to the right.
     pub x: f64,
+    /// Vertical position, growing downwards.
     pub y: f64,
 }
 
 impl Point {
+    /// The point `(x, y)`.
     #[must_use]
     pub const fn new(x: f64, y: f64) -> Self {
         Self { x, y }
@@ -29,27 +32,45 @@ impl Point {
 pub enum Geometry {
     /// Axis-aligned filled rectangle.
     Rect {
+        /// Left edge.
         x: f64,
+        /// Top edge.
         y: f64,
+        /// Width.
         width: f64,
+        /// Height.
         height: f64,
     },
     /// Filled ellipse centred at `(cx, cy)`, rotated clockwise by `rotation`
     /// degrees (the SVG `rotate()` direction in a y-down canvas).
     Ellipse {
+        /// Horizontal position of the centre.
         cx: f64,
+        /// Vertical position of the centre.
         cy: f64,
+        /// Radius along the ellipse's own x axis, before rotation.
         rx: f64,
+        /// Radius along the ellipse's own y axis, before rotation.
         ry: f64,
+        /// Clockwise rotation in degrees.
         rotation: f64,
     },
-    /// Closed filled polygon (non-zero fill rule).
+    /// Closed filled polygon through the vertices in order.
+    ///
+    /// The SVG and PNG writers fill it with the non-zero rule and the engine
+    /// rasterises it with the even-odd rule. The engine's polygons have at
+    /// most four vertices, so no point is enclosed twice and both rules
+    /// give the same fill.
     Polygon(Vec<Point>),
     /// Stroked quadratic Bézier curve with butt caps.
     Quadratic {
+        /// Where the curve starts.
         start: Point,
+        /// The control point, which the curve bends towards.
         control: Point,
+        /// Where the curve ends.
         end: Point,
+        /// Stroke width.
         width: f64,
     },
 }
@@ -57,7 +78,9 @@ pub enum Geometry {
 /// One committed shape: its geometry and its colour. `color.a` is the opacity.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DrawnShape {
+    /// Where the shape is painted.
     pub geometry: Geometry,
+    /// The shape's colour; `a` is its opacity.
     pub color: Color,
 }
 

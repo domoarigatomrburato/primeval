@@ -40,6 +40,8 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+#![warn(missing_docs)]
+
 #[cfg(feature = "bench")]
 mod benches;
 mod error;
@@ -69,7 +71,8 @@ pub const COUNT_RANGE: RangeInclusive<u32> = 1..=100_000;
 
 /// Accepted values of [`RenderOptions::resize_input`]. The engine needs at
 /// least 2 pixels per side; the cap bounds the working buffers (a 2048 x
-/// 2048 canvas is 16 MiB per buffer) and the per-step cost.
+/// 2048 canvas is 12 MiB per RGB buffer plus 128 MiB of per-row prefix
+/// sums) and the per-step cost.
 pub const RESIZE_INPUT_RANGE: RangeInclusive<u32> = 2..=2048;
 
 /// Accepted values of [`RenderOptions::output_size`]. The cap bounds the PNG
@@ -136,8 +139,8 @@ pub struct RenderOptions {
     /// Working resolution used during optimization, within
     /// [`RESIZE_INPUT_RANGE`].
     pub resize_input: u32,
-    /// Maximum dimension of the final output replay, within
-    /// [`OUTPUT_SIZE_RANGE`].
+    /// Length of the output's longer side, within [`OUTPUT_SIZE_RANGE`]; the
+    /// other side keeps the working canvas's aspect ratio.
     pub output_size: u32,
 }
 
@@ -186,12 +189,20 @@ impl RenderOptions {
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PartialRenderOptions {
+    /// [`RenderOptions::count`], if set.
     pub count: Option<u32>,
+    /// [`RenderOptions::shape`], if set.
     pub shape: Option<ShapeKind>,
+    /// [`RenderOptions::alpha`], if set.
     pub alpha: Option<Alpha>,
+    /// [`RenderOptions::seed`], if set. `None` keeps the base value, so a
+    /// partial cannot clear a seed.
     pub seed: Option<u64>,
+    /// [`RenderOptions::background`], if set.
     pub background: Option<BackgroundOption>,
+    /// [`RenderOptions::resize_input`], if set.
     pub resize_input: Option<u32>,
+    /// [`RenderOptions::output_size`], if set.
     pub output_size: Option<u32>,
 }
 
@@ -243,7 +254,9 @@ impl PartialRenderOptions {
 pub struct ApproximateRequest {
     /// Encoded image bytes in JPEG, PNG, or WebP format.
     pub input: Vec<u8>,
+    /// The format to encode the result in.
     pub output: OutputFormat,
+    /// The search and output settings.
     pub render: RenderOptions,
 }
 
@@ -251,8 +264,13 @@ pub struct ApproximateRequest {
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ProgressInfo {
+    /// The step just completed, from `1` to `total`.
     pub step: u32,
+    /// The number of steps the render runs, [`RenderOptions::count`].
     pub total: u32,
+    /// The difference between the canvas and the working-resolution target
+    /// after this step: the RMSE over the RGB channels divided by 255, from
+    /// `0.0` (identical) to `1.0`.
     pub score: f64,
 }
 
@@ -333,19 +351,26 @@ impl<'a> Execution<'a> {
 pub enum ApproximateResult {
     /// SVG output as UTF-8 text.
     Svg {
+        /// The SVG document.
         data: String,
+        /// The document's width in pixels.
         width: u32,
+        /// The document's height in pixels.
         height: u32,
     },
     /// Encoded PNG output.
     Png {
+        /// The PNG file.
         data: Vec<u8>,
+        /// The image's width in pixels.
         width: u32,
+        /// The image's height in pixels.
         height: u32,
     },
 }
 
 impl ApproximateResult {
+    /// The format of the encoded output.
     #[must_use]
     pub const fn format(&self) -> OutputFormat {
         match self {
@@ -354,11 +379,13 @@ impl ApproximateResult {
         }
     }
 
+    /// The output's MIME type; see [`OutputFormat::mime_type`].
     #[must_use]
     pub const fn mime_type(&self) -> &'static str {
         self.format().mime_type()
     }
 
+    /// The output's width in pixels.
     #[must_use]
     pub const fn width(&self) -> u32 {
         match self {
@@ -366,6 +393,7 @@ impl ApproximateResult {
         }
     }
 
+    /// The output's height in pixels.
     #[must_use]
     pub const fn height(&self) -> u32 {
         match self {

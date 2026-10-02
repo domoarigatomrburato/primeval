@@ -8,9 +8,10 @@
 
 use crate::buffer::{BYTES_PER_PIXEL, Buffer};
 
-/// The longest span whose sums [`PrefixSums::span`] can return: the channel prefixes wrap in `u32`, so the difference of two of
-/// them is exact while the span's true sum, at most `255` per pixel, stays
-/// below `2^32`.
+/// The longest span, in pixels, whose sums [`PrefixSums::span`] can return:
+/// the channel prefixes wrap in `u32`, so the difference of two of them is
+/// exact while the span's true sum, at most `255` per pixel, stays below
+/// `2^32`.
 pub(crate) const MAX_CHANNEL_SPAN: usize = (u32::MAX / 255) as usize;
 
 /// Per-row prefix sums of a target and a canvas of the same size.
@@ -40,8 +41,12 @@ struct Entry {
 /// the canvas, and their summed squared difference.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SpanSums {
+    /// The R, G and B sums of the target.
     pub(crate) target: [u64; 3],
+    /// The R, G and B sums of the canvas.
     pub(crate) current: [u64; 3],
+    /// The squared channel differences between the target and the canvas,
+    /// summed over RGB and the span's pixels.
     pub(crate) error: u64,
 }
 

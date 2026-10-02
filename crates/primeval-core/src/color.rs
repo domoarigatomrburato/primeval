@@ -3,9 +3,13 @@
 /// Fields are non-premultiplied (straight alpha), matching Go's `color.NRGBA`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Color {
+    /// Red.
     pub r: u8,
+    /// Green.
     pub g: u8,
+    /// Blue.
     pub b: u8,
+    /// Alpha: `0` is transparent, `255` opaque.
     pub a: u8,
 }
 

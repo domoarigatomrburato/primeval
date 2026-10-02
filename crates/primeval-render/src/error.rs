@@ -1,5 +1,6 @@
 //! The render error type and the option identifiers it names.
 
+use primeval_core::ShapeKind;
 use std::error::Error;
 use std::fmt;
 
@@ -56,10 +57,7 @@ impl RenderOption {
         match self {
             Self::Output => "must be one of: svg, png",
             Self::Count => "must be an integer from 1 to 100000",
-            Self::Shape => {
-                "must be one of: any, triangle, rectangle, ellipse, circle, \
-                 rotated-rectangle, quadratic, rotated-ellipse, polygon"
-            }
+            Self::Shape => ShapeKind::REQUIREMENT,
             Self::Alpha => "must be auto or an integer 1..255",
             Self::Seed => {
                 "must be an integer from 0 to 2^64 - 1 \
