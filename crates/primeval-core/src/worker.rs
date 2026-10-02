@@ -9,7 +9,7 @@ use crate::alpha::Alpha;
 use crate::buffer::Buffer;
 use crate::error_grid::ErrorGrid;
 use crate::optimize::hill_climb;
-use crate::raster::StrokeScratch;
+use crate::raster::{RowScratch, StrokeScratch};
 use crate::scanline::Scanline;
 use crate::score;
 use crate::shapes::{Shape, ShapeKind};
@@ -34,6 +34,9 @@ pub(crate) struct WorkerCtx<R> {
     pub(crate) lines: Vec<Scanline>,
     /// Reusable storage for stroking quadratic curves.
     pub(crate) stroke: StrokeScratch,
+    /// Reusable per-row storage for the anti-aliased polygon and
+    /// rotated-ellipse fills.
+    pub(crate) rows: RowScratch,
     /// The RNG of the search round this context is running.
     pub(crate) rng: R,
     /// Running count of energy evaluations performed by this worker.
@@ -63,6 +66,7 @@ impl<R: Rng> WorkerCtx<R> {
             height,
             lines: Vec::with_capacity(4096),
             stroke: StrokeScratch::default(),
+            rows: RowScratch::default(),
             rng,
             evaluations: 0,
         }

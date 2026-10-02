@@ -341,15 +341,131 @@ fn coverage_to_alpha(covered: u32, sub_rows: usize) -> u32 {
     ((u64::from(covered) * 0xFFFF / full) as u32).min(0xFFFF)
 }
 
-/// Fills a closed polygon directly into `worker.lines`, bypassing the
-/// tiny-skia pixmap pipeline.
+/// Reusable per-row storage for the anti-aliased fills, kept in each worker
+/// so that rasterizing a row neither allocates nor zeroes a fixed array.
+#[derive(Default)]
+pub(crate) struct RowScratch {
+    /// A polygon row's edge crossings: their x and their sub-row.
+    hits: Vec<(f64, usize)>,
+    /// A row's spans `(left, right)`, one or more per covered sub-row.
+    spans: Vec<(f64, f64)>,
+    /// The sorted, distinct columns of the pixels that hold a span end.
+    edges: Vec<i32>,
+}
+
+/// The alpha of pixel column `px` under the sub-row `spans`: the summed
+/// horizontal overlap of each span with the pixel.
+#[inline]
+fn pixel_alpha(spans: &[(f64, f64)], px: i32, sub_rows: usize) -> u32 {
+    let px_left = f64::from(px);
+    let px_right = px_left + 1.0;
+    let mut covered = 0;
+    for &(left, right) in spans {
+        let overlap_l = left.max(px_left);
+        let overlap_r = right.min(px_right);
+        if overlap_r > overlap_l {
+            covered += sub_row_coverage(overlap_r - overlap_l);
+        }
+    }
+    coverage_to_alpha(covered, sub_rows)
+}
+
+/// Builds one row's scanlines as maximal runs of equal non-zero alpha.
+struct RowRuns<'a> {
+    lines: &'a mut Vec<Scanline>,
+    y: i32,
+    start: i32,
+    alpha: u32,
+}
+
+impl RowRuns<'_> {
+    /// Gives the pixels from `x` up to the next call the coverage `alpha`.
+    #[inline]
+    fn set(&mut self, x: i32, alpha: u32) {
+        if alpha != self.alpha {
+            self.finish(x - 1);
+            self.start = x;
+            self.alpha = alpha;
+        }
+    }
+
+    /// Emits the open run, which ends at column `x2`.
+    #[inline]
+    fn finish(&mut self, x2: i32) {
+        if self.alpha > 0 {
+            self.lines.push(Scanline {
+                y: self.y,
+                x1: self.start,
+                x2,
+                alpha: self.alpha,
+            });
+        }
+    }
+}
+
+/// Emits row `y` of an anti-aliased fill over columns `ix_min..=ix_max`
+/// from the row's sub-row `spans`, as maximal runs of equal non-zero alpha.
+///
+/// Only a pixel that holds a span end (the column `floor` of the end) can be
+/// partly overlapped by that span; every other pixel lies wholly inside or
+/// wholly outside each span. Between two such edge pixels the set of spans
+/// covering a pixel therefore cannot change, so each gap is evaluated once
+/// and emitted as one run, and the interior of a shape costs nothing per
+/// pixel. The output equals evaluating [`pixel_alpha`] for every pixel.
+fn emit_row(
+    lines: &mut Vec<Scanline>,
+    edges: &mut Vec<i32>,
+    spans: &[(f64, f64)],
+    y: i32,
+    ix_min: i32,
+    ix_max: i32,
+    sub_rows: usize,
+) {
+    edges.clear();
+    for &(left, right) in spans {
+        edges.push(left.floor() as i32);
+        edges.push(right.floor() as i32);
+    }
+    edges.sort_unstable();
+    edges.dedup();
+
+    let mut runs = RowRuns {
+        lines,
+        y,
+        start: ix_min,
+        alpha: 0,
+    };
+    let mut px = ix_min;
+    for &edge in edges.iter() {
+        if edge < px {
+            continue;
+        }
+        if edge > ix_max {
+            break;
+        }
+        if px < edge {
+            runs.set(px, pixel_alpha(spans, px, sub_rows));
+        }
+        runs.set(edge, pixel_alpha(spans, edge, sub_rows));
+        px = edge + 1;
+    }
+    if px <= ix_max {
+        runs.set(px, pixel_alpha(spans, px, sub_rows));
+    }
+    runs.finish(ix_max);
+}
+
+/// Fills a closed polygon directly into `lines`, bypassing the tiny-skia
+/// pixmap pipeline.
 ///
 /// Uses scanline intersection with 4× sub-pixel vertical antialiasing.
-/// Each polygon edge is intersected at 4 sub-rows per pixel row, and the
-/// coverage for each pixel is the fraction of sub-rows where the pixel is
-/// inside the polygon (non-zero winding rule).
+/// Each polygon edge is intersected at 4 sub-rows per pixel row, the sorted
+/// crossings of each sub-row are paired into spans (even-odd rule), and the
+/// coverage of each pixel is the summed horizontal overlap of those spans
+/// with it.
 pub(crate) fn fill_polygon_direct(
     lines: &mut Vec<Scanline>,
+    scratch: &mut RowScratch,
     vertices: &[(f64, f64)],
     w: i32,
     h: i32,
@@ -372,14 +488,11 @@ pub(crate) fn fill_polygon_direct(
     let iy_max = (y_max.ceil() as i32).min(h);
 
     const NUM_AA: usize = 4;
+    let RowScratch { hits, spans, edges } = scratch;
 
     for iy in iy_min..iy_max {
-        // Collect x intersections for each sub-row.
-        // For a quadrilateral (n=4), each sub-row produces at most 4 intersections.
-        // We pack all sub-row intersections into one array and track sub-row ownership.
-        let mut x_hits: [(f64, usize); 64] = [(0.0, 0); 64];
-        let mut num_hits = 0;
-
+        // Collect the x crossings of every sub-row, tagged with the sub-row.
+        hits.clear();
         for s in 0..NUM_AA {
             let y_sub = iy as f64 + (s as f64 + 0.5) / NUM_AA as f64;
 
@@ -392,21 +505,18 @@ pub(crate) fn fill_polygon_direct(
                 }
                 let t = (y_sub - y0) / (y1 - y0);
                 let x = x0 + t * (x1 - x0);
-                if num_hits < 64 {
-                    x_hits[num_hits] = (x, s);
-                    num_hits += 1;
-                }
+                hits.push((x, s));
             }
         }
 
-        if num_hits == 0 {
+        if hits.is_empty() {
             continue;
         }
 
         // Determine the pixel x range touched by any intersection.
         let mut x_min_f = f64::MAX;
         let mut x_max_f = f64::MIN;
-        for &(x, _) in &x_hits[..num_hits] {
+        for &(x, _) in hits.iter() {
             x_min_f = x_min_f.min(x);
             x_max_f = x_max_f.max(x);
         }
@@ -416,73 +526,17 @@ pub(crate) fn fill_polygon_direct(
             continue;
         }
 
-        // Sort all intersections within each sub-row.
-        // Since we packed them together, sort the full array and process per sub-row.
-        x_hits[..num_hits].sort_unstable_by(|a, b| a.1.cmp(&b.1).then(a.0.total_cmp(&b.0)));
-
-        // Build per-sub-row span pairs.
-        // For each sub-row, pair consecutive intersections (even-odd).
-        let mut spans: [(f64, f64, usize); 32] = [(0.0, 0.0, 0); 32];
-        let mut num_spans = 0;
-        let mut idx = 0;
-        while idx < num_hits {
-            let sub = x_hits[idx].1;
-            let start = idx;
-            while idx < num_hits && x_hits[idx].1 == sub {
-                idx += 1;
-            }
-            let sub_hits = &x_hits[start..idx];
-            for pair in sub_hits.chunks(2) {
-                if pair.len() == 2 && num_spans < 32 {
-                    spans[num_spans] = (pair[0].0, pair[1].0, sub);
-                    num_spans += 1;
-                }
+        // Sort the crossings by sub-row, then by x, and pair consecutive
+        // crossings of each sub-row into spans.
+        hits.sort_unstable_by(|a, b| a.1.cmp(&b.1).then(a.0.total_cmp(&b.0)));
+        spans.clear();
+        for sub_row in hits.chunk_by(|a, b| a.1 == b.1) {
+            for [left, right] in sub_row.as_chunks::<2>().0 {
+                spans.push((left.0, right.0));
             }
         }
 
-        // For each pixel column in the range, count how many sub-rows include it.
-        // This is the inner hot loop — keep it tight.
-        let mut run_start = ix_min;
-        let mut run_alpha: u32 = 0;
-
-        for px in ix_min..=ix_max {
-            let px_left = px as f64;
-            let px_right = px_left + 1.0;
-            let mut covered: u32 = 0;
-
-            for &(sl, sr, _) in &spans[..num_spans] {
-                // How much of this pixel is inside this span?
-                let overlap_l = sl.max(px_left);
-                let overlap_r = sr.min(px_right);
-                if overlap_r > overlap_l {
-                    covered += sub_row_coverage(overlap_r - overlap_l);
-                }
-            }
-            let alpha = coverage_to_alpha(covered, NUM_AA);
-
-            if alpha != run_alpha || px == ix_min {
-                // Flush previous run if it had coverage.
-                if run_alpha > 0 && px > run_start {
-                    lines.push(Scanline {
-                        y: iy,
-                        x1: run_start,
-                        x2: px - 1,
-                        alpha: run_alpha,
-                    });
-                }
-                run_start = px;
-                run_alpha = alpha;
-            }
-        }
-        // Flush last run.
-        if run_alpha > 0 {
-            lines.push(Scanline {
-                y: iy,
-                x1: run_start,
-                x2: ix_max,
-                alpha: run_alpha,
-            });
-        }
+        emit_row(lines, edges, spans, iy, ix_min, ix_max, NUM_AA);
     }
 }
 
@@ -494,6 +548,7 @@ pub(crate) fn fill_polygon_direct(
 /// into a 16-bit alpha value.
 pub(crate) fn fill_rotated_ellipse_direct(
     lines: &mut Vec<Scanline>,
+    scratch: &mut RowScratch,
     cx: f64,
     cy: f64,
     rx: f64,
@@ -518,13 +573,14 @@ pub(crate) fn fill_rotated_ellipse_direct(
     let half_height = ((rx * sin_t).powi(2) + (ry * cos_t).powi(2)).sqrt();
     let iy_min = ((cy - half_height - 1.0).floor() as i32).max(0);
     let iy_max = ((cy + half_height + 1.0).ceil() as i32).min(h - 1);
+    let RowScratch { spans, edges, .. } = scratch;
 
     for iy in iy_min..=iy_max {
-        let mut spans = [None; NUM_AA];
+        spans.clear();
         let mut row_x_min = f64::MAX;
         let mut row_x_max = f64::MIN;
 
-        for (sub, span) in spans.iter_mut().enumerate() {
+        for sub in 0..NUM_AA {
             let y_sub = iy as f64 + (sub as f64 + 0.5) / NUM_AA as f64;
             let dy = y_sub - cy;
             let quadratic_b = coeff_b * dy;
@@ -539,12 +595,12 @@ pub(crate) fn fill_rotated_ellipse_direct(
             let x2 = cx + (-quadratic_b + root) / (2.0 * coeff_a);
             let left = x1.min(x2);
             let right = x1.max(x2);
-            *span = Some((left, right));
+            spans.push((left, right));
             row_x_min = row_x_min.min(left);
             row_x_max = row_x_max.max(right);
         }
 
-        if row_x_min == f64::MAX {
+        if spans.is_empty() {
             continue;
         }
 
@@ -554,49 +610,7 @@ pub(crate) fn fill_rotated_ellipse_direct(
             continue;
         }
 
-        let mut run_start = ix_min;
-        let mut run_alpha = 0;
-
-        for px in ix_min..=ix_max {
-            let pixel_left = px as f64;
-            let pixel_right = pixel_left + 1.0;
-            let mut covered = 0_u32;
-
-            for &(span_left, span_right) in spans.iter().flatten() {
-                let overlap_left = span_left.max(pixel_left);
-                let overlap_right = span_right.min(pixel_right);
-                if overlap_right > overlap_left {
-                    covered += sub_row_coverage(overlap_right - overlap_left);
-                }
-            }
-
-            let alpha = coverage_to_alpha(covered, NUM_AA);
-            if px == ix_min {
-                run_alpha = alpha;
-                continue;
-            }
-            if alpha != run_alpha {
-                if run_alpha > 0 {
-                    lines.push(Scanline {
-                        y: iy,
-                        x1: run_start,
-                        x2: px - 1,
-                        alpha: run_alpha,
-                    });
-                }
-                run_start = px;
-                run_alpha = alpha;
-            }
-        }
-
-        if run_alpha > 0 {
-            lines.push(Scanline {
-                y: iy,
-                x1: run_start,
-                x2: ix_max,
-                alpha: run_alpha,
-            });
-        }
+        emit_row(lines, edges, spans, iy, ix_min, ix_max, NUM_AA);
     }
 }
 
@@ -608,7 +622,7 @@ mod tests {
     use crate::score;
     use crate::shapes::{Ellipse, Shape};
     use crate::worker::WorkerCtx;
-    use rand::SeedableRng;
+    use rand::{RngExt, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
     fn render_mask(lines: &[Scanline], width: u32, height: u32) -> Buffer {
@@ -689,7 +703,17 @@ mod tests {
         .to_vec();
 
         let mut actual = Vec::new();
-        fill_rotated_ellipse_direct(&mut actual, 32.0, 32.0, 12.0, 8.0, 0.0, 64, 64);
+        fill_rotated_ellipse_direct(
+            &mut actual,
+            &mut RowScratch::default(),
+            32.0,
+            32.0,
+            12.0,
+            8.0,
+            0.0,
+            64,
+            64,
+        );
 
         let expected_mask = render_mask(&expected, 64, 64);
         let actual_mask = render_mask(&actual, 64, 64);
@@ -710,6 +734,7 @@ mod tests {
 
         fill_rotated_ellipse_direct(
             &mut vertical,
+            &mut RowScratch::default(),
             24.0,
             24.0,
             10.0,
@@ -718,7 +743,17 @@ mod tests {
             48,
             48,
         );
-        fill_rotated_ellipse_direct(&mut swapped, 24.0, 24.0, 6.0, 10.0, 0.0, 48, 48);
+        fill_rotated_ellipse_direct(
+            &mut swapped,
+            &mut RowScratch::default(),
+            24.0,
+            24.0,
+            6.0,
+            10.0,
+            0.0,
+            48,
+            48,
+        );
 
         let vertical_mask = render_mask(&vertical, 48, 48);
         let swapped_mask = render_mask(&swapped, 48, 48);
@@ -738,7 +773,7 @@ mod tests {
     fn fill_polygon_direct_gives_fully_covered_pixels_full_alpha() {
         let mut lines = Vec::new();
         let square = [(2.0, 2.0), (12.0, 2.0), (12.0, 12.0), (2.0, 12.0)];
-        fill_polygon_direct(&mut lines, &square, 16, 16);
+        fill_polygon_direct(&mut lines, &mut RowScratch::default(), &square, 16, 16);
 
         assert_eq!(alpha_at(&lines, 7, 7), Some(0xFFFF));
         assert_eq!(alpha_at(&lines, 2, 2), Some(0xFFFF));
@@ -751,7 +786,7 @@ mod tests {
         let mut lines = Vec::new();
         // Columns 2 and 11 are half covered; rows are fully covered.
         let rect = [(2.5, 2.0), (11.5, 2.0), (11.5, 12.0), (2.5, 12.0)];
-        fill_polygon_direct(&mut lines, &rect, 16, 16);
+        fill_polygon_direct(&mut lines, &mut RowScratch::default(), &rect, 16, 16);
 
         assert_eq!(alpha_at(&lines, 2, 7), Some(0xFFFF / 2));
         assert_eq!(alpha_at(&lines, 7, 7), Some(0xFFFF));
@@ -761,15 +796,189 @@ mod tests {
     #[test]
     fn fill_rotated_ellipse_direct_gives_fully_covered_pixels_full_alpha() {
         let mut lines = Vec::new();
-        fill_rotated_ellipse_direct(&mut lines, 16.0, 16.0, 10.0, 6.0, 0.7, 32, 32);
+        fill_rotated_ellipse_direct(
+            &mut lines,
+            &mut RowScratch::default(),
+            16.0,
+            16.0,
+            10.0,
+            6.0,
+            0.7,
+            32,
+            32,
+        );
 
         assert_eq!(alpha_at(&lines, 16, 16), Some(0xFFFF));
+    }
+
+    /// The anti-aliased fill of a `w`×`h` canvas computed pixel by pixel:
+    /// every pixel sums the overlap of each sub-row span returned by
+    /// `sub_row_spans(y_sub)`, and each row is emitted as maximal runs of
+    /// equal non-zero alpha. The reference the fast rasterizers must match.
+    fn reference_fill(
+        w: i32,
+        h: i32,
+        sub_row_spans: impl Fn(f64) -> Vec<(f64, f64)>,
+    ) -> Vec<Scanline> {
+        const NUM_AA: usize = 4;
+        let mut lines = Vec::new();
+        for y in 0..h {
+            let spans: Vec<_> = (0..NUM_AA)
+                .flat_map(|s| sub_row_spans(f64::from(y) + (s as f64 + 0.5) / NUM_AA as f64))
+                .collect();
+            let alphas: Vec<u32> = (0..w)
+                .map(|x| {
+                    let (left, right) = (f64::from(x), f64::from(x) + 1.0);
+                    let covered = spans
+                        .iter()
+                        .map(|&(l, r)| {
+                            let (lo, hi) = (l.max(left), r.min(right));
+                            if hi > lo {
+                                sub_row_coverage(hi - lo)
+                            } else {
+                                0
+                            }
+                        })
+                        .sum();
+                    coverage_to_alpha(covered, NUM_AA)
+                })
+                .collect();
+            let mut x = 0;
+            while x < w {
+                let alpha = alphas[x as usize];
+                let mut end = x;
+                while end + 1 < w && alphas[(end + 1) as usize] == alpha {
+                    end += 1;
+                }
+                if alpha > 0 {
+                    lines.push(Scanline {
+                        y,
+                        x1: x,
+                        x2: end,
+                        alpha,
+                    });
+                }
+                x = end + 1;
+            }
+        }
+        lines
+    }
+
+    /// The even-odd spans of the horizontal line at `y_sub` inside the
+    /// polygon `vertices`, intersected as [`fill_polygon_direct`] does.
+    fn polygon_sub_row_spans(vertices: &[(f64, f64)], y_sub: f64) -> Vec<(f64, f64)> {
+        let n = vertices.len();
+        let mut hits: Vec<f64> = (0..n)
+            .filter_map(|i| {
+                let (x0, y0) = vertices[i];
+                let (x1, y1) = vertices[(i + 1) % n];
+                let (y_lo, y_hi) = if y0 < y1 { (y0, y1) } else { (y1, y0) };
+                (y_sub >= y_lo && y_sub < y_hi).then(|| x0 + (y_sub - y0) / (y1 - y0) * (x1 - x0))
+            })
+            .collect();
+        hits.sort_unstable_by(f64::total_cmp);
+        hits.as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&[left, right]| (left, right))
+            .collect()
+    }
+
+    /// The span of the horizontal line at `y_sub` inside a rotated ellipse,
+    /// solved as [`fill_rotated_ellipse_direct`] does.
+    fn ellipse_sub_row_spans(
+        (cx, cy, rx, ry, angle): (f64, f64, f64, f64, f64),
+        y_sub: f64,
+    ) -> Vec<(f64, f64)> {
+        let (sin_t, cos_t) = angle.sin_cos();
+        let inv_rx2 = 1.0 / (rx * rx);
+        let inv_ry2 = 1.0 / (ry * ry);
+        let a = cos_t * cos_t * inv_rx2 + sin_t * sin_t * inv_ry2;
+        let b = 2.0 * cos_t * sin_t * (inv_rx2 - inv_ry2) * (y_sub - cy);
+        let c =
+            (sin_t * sin_t * inv_rx2 + cos_t * cos_t * inv_ry2) * (y_sub - cy) * (y_sub - cy) - 1.0;
+        let discriminant = b * b - 4.0 * a * c;
+        if discriminant < 0.0 {
+            return Vec::new();
+        }
+        let root = discriminant.sqrt();
+        let x1 = cx + (-b - root) / (2.0 * a);
+        let x2 = cx + (-b + root) / (2.0 * a);
+        vec![(x1.min(x2), x1.max(x2))]
+    }
+
+    /// A coordinate in `lo..hi`, snapped to a whole or half pixel a third of
+    /// the time so that span ends land exactly on pixel boundaries.
+    fn coordinate(rng: &mut ChaCha8Rng, lo: f64, hi: f64) -> f64 {
+        let value = rng.random_range(lo..hi);
+        if rng.random_range(0..3) == 0 {
+            (value * 2.0).round() / 2.0
+        } else {
+            value
+        }
+    }
+
+    #[test]
+    fn fill_polygon_direct_matches_per_pixel_coverage() {
+        let mut rng = ChaCha8Rng::seed_from_u64(0x5EED_0005);
+        let mut scratch = RowScratch::default();
+        let mut lines = Vec::new();
+        let (w, h) = (40, 32);
+        for case in 0..400 {
+            let order = rng.random_range(3..=4);
+            let vertices: Vec<_> = (0..order)
+                .map(|_| {
+                    (
+                        coordinate(&mut rng, -8.0, 48.0),
+                        coordinate(&mut rng, -8.0, 40.0),
+                    )
+                })
+                .collect();
+            fill_polygon_direct(&mut lines, &mut scratch, &vertices, w, h);
+            let expected = reference_fill(w, h, |y| polygon_sub_row_spans(&vertices, y));
+            assert_eq!(lines, expected, "case {case}: {vertices:?}");
+        }
+    }
+
+    #[test]
+    fn fill_rotated_ellipse_direct_matches_per_pixel_coverage() {
+        let mut rng = ChaCha8Rng::seed_from_u64(0x5EED_0006);
+        let mut scratch = RowScratch::default();
+        let mut lines = Vec::new();
+        let (w, h) = (40, 32);
+        for case in 0..400 {
+            let ellipse = (
+                coordinate(&mut rng, -8.0, 48.0),
+                coordinate(&mut rng, -8.0, 40.0),
+                coordinate(&mut rng, 0.5, 30.0),
+                coordinate(&mut rng, 0.5, 30.0),
+                if rng.random_range(0..4) == 0 {
+                    0.0
+                } else {
+                    rng.random_range(0.0..std::f64::consts::TAU)
+                },
+            );
+            let (cx, cy, rx, ry, angle) = ellipse;
+            fill_rotated_ellipse_direct(&mut lines, &mut scratch, cx, cy, rx, ry, angle, w, h);
+            let expected = reference_fill(w, h, |y| ellipse_sub_row_spans(ellipse, y));
+            assert_eq!(lines, expected, "case {case}: {ellipse:?}");
+        }
     }
 
     #[test]
     fn fill_rotated_ellipse_direct_bounds_checking() {
         let mut lines = Vec::new();
-        fill_rotated_ellipse_direct(&mut lines, -4.0, 3.0, 9.0, 5.0, 0.4, 16, 12);
+        fill_rotated_ellipse_direct(
+            &mut lines,
+            &mut RowScratch::default(),
+            -4.0,
+            3.0,
+            9.0,
+            5.0,
+            0.4,
+            16,
+            12,
+        );
 
         assert!(!lines.is_empty());
         assert!(lines.iter().all(|line| line.y >= 0 && line.y < 12));

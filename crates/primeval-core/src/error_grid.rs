@@ -112,15 +112,21 @@ impl ErrorGrid {
 
                     let i_start = (y as usize * img_w as usize + x_start as usize) * 4;
                     let i_end = i_start + (x_end - x_start) as usize * 4;
-                    let mut i = i_start;
-                    while i < i_end {
-                        let dr = i32::from(t_pix[i]) - i32::from(c_pix[i]);
-                        let dg = i32::from(t_pix[i + 1]) - i32::from(c_pix[i + 1]);
-                        let db = i32::from(t_pix[i + 2]) - i32::from(c_pix[i + 2]);
-                        self.errors[err_row_base + col_idx as usize] +=
-                            f64::from(dr * dr + dg * dg + db * db);
-                        i += 4;
-                    }
+                    // Sum the cell's part of this row in integers, which is
+                    // exact, and convert once.
+                    let row_error: u64 = t_pix[i_start..i_end]
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .zip(c_pix[i_start..i_end].as_chunks::<4>().0)
+                        .map(|(t, c)| {
+                            let dr = i32::from(t[0]) - i32::from(c[0]);
+                            let dg = i32::from(t[1]) - i32::from(c[1]);
+                            let db = i32::from(t[2]) - i32::from(c[2]);
+                            (dr * dr + dg * dg + db * db) as u64
+                        })
+                        .sum();
+                    self.errors[err_row_base + col_idx as usize] += row_error as f64;
                 }
             }
         }
@@ -210,7 +216,7 @@ impl ErrorGrid {
 mod tests {
     use super::*;
     use crate::Color;
-    use rand::SeedableRng;
+    use rand::{RngExt, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
     fn test_rng() -> ChaCha8Rng {
@@ -273,6 +279,44 @@ mod tests {
         assert_eq!(g.rows, 1);
         assert_eq!(g.errors.len(), 1);
         assert_eq!(g.cdf.len(), 1);
+    }
+
+    #[test]
+    fn compute_sums_each_cells_rgb_error_exactly() {
+        let mut rng = ChaCha8Rng::seed_from_u64(0x5EED_0010);
+        for _ in 0..40 {
+            let (w, h) = (rng.random_range(2..40), rng.random_range(2..40));
+            let (cols, rows) = (rng.random_range(1..12), rng.random_range(1..12));
+            let mut random_buffer = || {
+                let pixels = (0..w * h * 4).map(|_| rng.random::<u8>()).collect();
+                Buffer::from_rgba(w, h, pixels).expect("valid buffer")
+            };
+            let (target, current) = (random_buffer(), random_buffer());
+            let mut g = ErrorGrid::new(w, h, cols, rows);
+            g.compute(&target, &current);
+
+            // Each pixel's error, added to the cell `cell_span` assigns it.
+            let mut expected = vec![0.0; g.errors.len()];
+            for row in 0..g.rows {
+                let (y0, y1) = cell_span(row, g.cell_h, g.rows, h);
+                for col in 0..g.cols {
+                    let (x0, x1) = cell_span(col, g.cell_w, g.cols, w);
+                    for (y, x) in (y0..y1).flat_map(|y| (x0..x1).map(move |x| (y, x))) {
+                        let i = target.pix_offset(x as i32, y as i32);
+                        let error: i32 = (0..3)
+                            .map(|c| {
+                                i32::from(target.pixels()[i + c])
+                                    - i32::from(current.pixels()[i + c])
+                            })
+                            .map(|d| d * d)
+                            .sum();
+                        expected[(row * g.cols + col) as usize] += f64::from(error);
+                    }
+                }
+            }
+            assert_eq!(g.errors, expected, "{w}x{h} image, {cols}x{rows} grid");
+            assert_eq!(g.total(), expected.iter().sum::<f64>());
+        }
     }
 
     #[test]

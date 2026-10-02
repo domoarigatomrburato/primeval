@@ -847,6 +847,7 @@ impl RotatedEllipse {
     fn rasterize<'a, R>(&self, worker: &'a mut WorkerCtx<R>) -> &'a [Scanline] {
         crate::raster::fill_rotated_ellipse_direct(
             &mut worker.lines,
+            &mut worker.rows,
             self.x,
             self.y,
             self.rx,
@@ -912,6 +913,7 @@ impl Polygon {
         ];
         crate::raster::fill_polygon_direct(
             &mut worker.lines,
+            &mut worker.rows,
             &vertices[..self.order],
             worker.width,
             worker.height,

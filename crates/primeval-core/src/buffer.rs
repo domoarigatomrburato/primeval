@@ -38,11 +38,7 @@ impl Buffer {
     #[must_use]
     pub(crate) fn new_from_color(width: u32, height: u32, color: crate::Color) -> Self {
         let len = pixel_byte_len(width, height);
-        let mut pixels = Vec::with_capacity(len);
-        let pixel = [color.r, color.g, color.b, color.a];
-        for _ in 0..len / 4 {
-            pixels.extend_from_slice(&pixel);
-        }
+        let pixels = [color.r, color.g, color.b, color.a].repeat(len / 4);
         Self::from_parts(width, height, pixels)
     }
 
