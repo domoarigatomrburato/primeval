@@ -4,13 +4,31 @@ use crate::scanline::Scanline;
 use crate::worker::WorkerCtx;
 use rand::Rng;
 
+/// Reusable storage for [`stroke_quadratic_direct`], kept in each worker so
+/// stroking a curve does not allocate.
+#[derive(Default)]
+pub(crate) struct StrokeScratch {
+    /// The flattened curve.
+    points: Vec<(f64, f64)>,
+    /// The coverage of the curve's bounding box, row by row; all zeros
+    /// between calls, since emitting a row zeroes it again.
+    grid: Vec<u32>,
+    /// The leftmost and rightmost covered column of each bounding-box row.
+    rows: Vec<(i32, i32)>,
+}
+
 /// Rasterises a stroked quadratic Bézier directly into `worker.lines`,
 /// bypassing the tiny-skia pixmap pipeline entirely.
 ///
 /// The curve from `(x1,y1)` through control point `(cx,cy)` to `(x2,y2)` is
-/// adaptively subdivided via de Casteljau (flatness tolerance 0.5 px) and each
-/// flat segment is rasterised with distance-based antialiased coverage using
-/// the given stroke `half_width`.
+/// adaptively subdivided via de Casteljau (flatness tolerance 0.5 px) into
+/// flat segments. Each segment covers the pixels whose centres lie within
+/// its span along its major axis, half-open so that consecutive segments
+/// share none, and within `half_width + 0.5` of its line across it. A pixel
+/// at perpendicular distance `d` from the line gets coverage
+/// `clamp(half_width + 0.5 - d, 0, 1)`; where segments meet at an angle, a
+/// pixel two segments reach keeps the larger coverage. Each row then emits
+/// runs of equal coverage, so no pixel appears twice.
 pub(crate) fn stroke_quadratic_direct<R: Rng>(
     worker: &mut WorkerCtx<R>,
     x1: f64,
@@ -21,27 +39,33 @@ pub(crate) fn stroke_quadratic_direct<R: Rng>(
     y2: f64,
     half_width: f64,
 ) -> &[Scanline] {
-    let w = worker.width;
-    let h = worker.height;
+    let scratch = &mut worker.stroke;
+    scratch.points.clear();
+    scratch.points.push((x1, y1));
+    flatten_quadratic(&mut scratch.points, x1, y1, cx, cy, x2, y2);
     worker.lines.clear();
-    subdivide_and_stroke(&mut worker.lines, x1, y1, cx, cy, x2, y2, half_width, w, h);
+    stroke_polyline(
+        &mut worker.lines,
+        scratch,
+        half_width,
+        worker.width,
+        worker.height,
+    );
     &worker.lines
 }
 
-/// Recursively subdivides the quadratic Bézier until it is flat (distance from
-/// control point to chord < 0.5 px), then rasterises each flat segment as a
-/// stroked line with the given half-width.
-fn subdivide_and_stroke(
-    lines: &mut Vec<Scanline>,
+/// Appends the end points of the flat pieces of a quadratic Bézier to
+/// `points`, which already ends at its start `(x1, y1)`. A piece is flat when
+/// its control point lies within 0.5 px of its chord. Points that coincide
+/// with the previous one are dropped, so every segment has a direction.
+fn flatten_quadratic(
+    points: &mut Vec<(f64, f64)>,
     x1: f64,
     y1: f64,
     cx: f64,
     cy: f64,
     x2: f64,
     y2: f64,
-    half_width: f64,
-    w: i32,
-    h: i32,
 ) {
     let chord_dx = x2 - x1;
     let chord_dy = y2 - y1;
@@ -56,7 +80,10 @@ fn subdivide_and_stroke(
     };
 
     if flat {
-        stroke_segment(lines, x1, y1, x2, y2, half_width, w, h);
+        let &(last_x, last_y) = points.last().expect("points start at the curve's start");
+        if (x2 - last_x).hypot(y2 - last_y) > 1e-9 {
+            points.push((x2, y2));
+        }
     } else {
         let mx12 = (x1 + cx) * 0.5;
         let my12 = (y1 + cy) * 0.5;
@@ -64,84 +91,231 @@ fn subdivide_and_stroke(
         let my23 = (cy + y2) * 0.5;
         let mx = (mx12 + mx23) * 0.5;
         let my = (my12 + my23) * 0.5;
-        subdivide_and_stroke(lines, x1, y1, mx12, my12, mx, my, half_width, w, h);
-        subdivide_and_stroke(lines, mx, my, mx23, my23, x2, y2, half_width, w, h);
+        flatten_quadratic(points, x1, y1, mx12, my12, mx, my);
+        flatten_quadratic(points, mx, my, mx23, my23, x2, y2);
     }
 }
 
-/// Antialiased stroked segment rasteriser.
-///
-/// For each integer step along the dominant axis, pixels perpendicular to the
-/// line are emitted with alpha based on their distance from the centre line.
-/// Coverage is `clamp(half_width + 0.5 - perpendicular_distance, 0, 1)`,
-/// giving a smooth antialiased stroke of the specified width.
-fn stroke_segment(
+/// The pixels of a stroked polyline's bounding box, clipped to the canvas,
+/// and the coverage written into them.
+struct CoverageGrid<'a> {
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    stride: usize,
+    cells: &'a mut [u32],
+    rows: &'a mut [(i32, i32)],
+}
+
+impl CoverageGrid<'_> {
+    /// Raises the coverage of pixel `(x, y)`, inside the grid, to `alpha`.
+    #[inline]
+    fn raise(&mut self, x: i32, y: i32, alpha: u32) {
+        let index = (y - self.y0) as usize * self.stride + (x - self.x0) as usize;
+        let cell = &mut self.cells[index];
+        *cell = (*cell).max(alpha);
+    }
+
+    /// Records that row `y` has coverage from column `lo` to `hi`.
+    #[inline]
+    fn extend_row(&mut self, y: i32, lo: i32, hi: i32) {
+        let (row_lo, row_hi) = &mut self.rows[(y - self.y0) as usize];
+        *row_lo = (*row_lo).min(lo);
+        *row_hi = (*row_hi).max(hi);
+    }
+}
+
+/// Strokes the polyline in `scratch.points` with the given half-width into
+/// `lines`, sampling every pixel of a `w`×`h` canvas at its centre.
+fn stroke_polyline(
     lines: &mut Vec<Scanline>,
-    x0: f64,
-    y0: f64,
-    x1: f64,
-    y1: f64,
+    scratch: &mut StrokeScratch,
     half_width: f64,
     w: i32,
     h: i32,
 ) {
-    let steep = (y1 - y0).abs() > (x1 - x0).abs();
-    let (mut ax, mut ay, mut bx, mut by) = if steep {
-        (y0, x0, y1, x1)
-    } else {
-        (x0, y0, x1, y1)
-    };
-    if ax > bx {
-        std::mem::swap(&mut ax, &mut bx);
-        std::mem::swap(&mut ay, &mut by);
-    }
-    let dx = bx - ax;
-    if dx < 1e-9 {
+    let StrokeScratch { points, grid, rows } = scratch;
+    if points.len() < 2 {
         return;
     }
-    let gradient = (by - ay) / dx;
+    // Coverage is positive strictly within this distance of a line.
+    let reach = half_width + 0.5;
+    // A covered centre lies within `reach` of its segment's line, at most
+    // `reach · √2` from the segment along the minor axis.
+    let margin = reach * std::f64::consts::SQRT_2 + 1.0;
+    let (x_min, y_min, x_max, y_max) = points.iter().fold(
+        (
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+        ),
+        |(x0, y0, x1, y1), &(x, y)| (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+    );
+    let x0 = ((x_min - margin).floor() as i32).max(0);
+    let y0 = ((y_min - margin).floor() as i32).max(0);
+    let x1 = ((x_max + margin).ceil() as i32).min(w - 1);
+    let y1 = ((y_max + margin).ceil() as i32).min(h - 1);
+    if x0 > x1 || y0 > y1 {
+        return;
+    }
+    let stride = (x1 - x0 + 1) as usize;
+    let height = (y1 - y0 + 1) as usize;
+    if grid.len() < stride * height {
+        grid.resize(stride * height, 0);
+    }
+    rows.clear();
+    rows.resize(height, (i32::MAX, i32::MIN));
+    let mut coverage = CoverageGrid {
+        x0,
+        y0,
+        x1,
+        y1,
+        stride,
+        cells: grid,
+        rows,
+    };
 
-    // cos(θ) converts vertical pixel distance to perpendicular distance.
-    let seg_len = (dx * dx + (by - ay) * (by - ay)).sqrt();
-    let cos_theta = dx / seg_len;
+    for pair in points.windows(2) {
+        stroke_segment(&mut coverage, pair[0], pair[1], reach);
+    }
 
-    // How many pixels from the centre we need to check on each side.
-    // The antialiased fringe extends half_width + 0.5 perpendicular pixels,
-    // which maps to (half_width + 0.5) / cos_theta vertical pixels.
-    let band = ((half_width + 0.5) / cos_theta).ceil() as i32 + 1;
-
-    let xi_start = ax.ceil() as i32;
-    let xi_end = bx.floor() as i32;
-    let mut yf = ay + gradient * (ax.ceil() - ax);
-
-    for xi in xi_start..=xi_end {
-        let yi_center = yf.floor() as i32;
-
-        for dy in -band..=band {
-            let yi = yi_center + dy;
-            // Vertical distance from pixel centre to the line centre.
-            let vert_dist = ((yi as f64) + 0.5 - yf).abs();
-            // Perpendicular distance to the line.
-            let perp_dist = vert_dist * cos_theta;
-            // Coverage: 1.0 inside the stroke, linear falloff at edges.
-            let coverage = half_width + 0.5 - perp_dist;
-            if coverage <= 0.0 {
-                continue;
-            }
-            let alpha = (coverage.min(1.0) * 65535.0) as u32;
-
-            let (sx, sy) = if steep { (yi, xi) } else { (xi, yi) };
-            if sx >= 0 && sx < w && sy >= 0 && sy < h {
-                lines.push(Scanline {
-                    y: sy,
-                    x1: sx,
-                    x2: sx,
-                    alpha,
-                });
+    let CoverageGrid { cells, rows, .. } = coverage;
+    for (row, (&(lo, hi), y)) in rows.iter().zip(y0..).enumerate() {
+        if lo > hi {
+            continue;
+        }
+        let base = row * stride;
+        let cells = &mut cells[base + (lo - x0) as usize..=base + (hi - x0) as usize];
+        let mut run_start = lo;
+        let mut run_alpha = std::mem::take(&mut cells[0]);
+        for (x, cell) in (lo + 1..).zip(&mut cells[1..]) {
+            let alpha = std::mem::take(cell);
+            if alpha != run_alpha {
+                if run_alpha > 0 {
+                    lines.push(Scanline {
+                        y,
+                        x1: run_start,
+                        x2: x - 1,
+                        alpha: run_alpha,
+                    });
+                }
+                run_start = x;
+                run_alpha = alpha;
             }
         }
+        if run_alpha > 0 {
+            lines.push(Scanline {
+                y,
+                x1: run_start,
+                x2: hi,
+                alpha: run_alpha,
+            });
+        }
+    }
+}
 
-        yf += gradient;
+/// Covers the pixels of one flat segment from `a` to `b`: those whose
+/// centres lie in `[min, max)` of the segment's span along its major axis
+/// and within `reach` of its line. Pixels off the grid are off the canvas.
+fn stroke_segment(grid: &mut CoverageGrid<'_>, a: (f64, f64), b: (f64, f64), reach: f64) {
+    let steep = (b.1 - a.1).abs() > (b.0 - a.0).abs();
+    // Major and minor coordinates, and the grid's bounds along each.
+    let (a_major, a_minor, b_major, b_minor) = if steep {
+        (a.1, a.0, b.1, b.0)
+    } else {
+        (a.0, a.1, b.0, b.1)
+    };
+    let (major_lo, major_hi, minor_lo, minor_hi) = if steep {
+        (grid.y0, grid.y1, grid.x0, grid.x1)
+    } else {
+        (grid.x0, grid.x1, grid.y0, grid.y1)
+    };
+    let gradient = (b_minor - a_minor) / (b_major - a_major);
+    // cos(θ) converts a distance along the minor axis to a perpendicular one.
+    let cos_theta = 1.0 / gradient.mul_add(gradient, 1.0).sqrt();
+    let half_band = reach / cos_theta;
+    // Major indices `i` whose centre `i + 0.5` is in `[min, max)`.
+    let first = ((a_major.min(b_major) - 0.5).ceil() as i32).max(major_lo);
+    let end = ((a_major.max(b_major) - 0.5).ceil() as i32).min(major_hi + 1);
+    for i in first..end {
+        let centre = f64::from(i) + 0.5;
+        let minor = gradient.mul_add(centre - a_major, a_minor);
+        // Minor indices whose centre is within `half_band` of the line.
+        let lo = ((minor - half_band - 0.5).ceil() as i32).max(minor_lo);
+        let hi = ((minor + half_band - 0.5).floor() as i32).min(minor_hi);
+        if lo > hi {
+            continue;
+        }
+        for j in lo..=hi {
+            let distance = (f64::from(j) + 0.5 - minor).abs() * cos_theta;
+            let alpha = ((reach - distance).clamp(0.0, 1.0) * 65535.0) as u32;
+            if steep {
+                grid.raise(j, i, alpha);
+            } else {
+                grid.raise(i, j, alpha);
+                grid.extend_row(j, i, i);
+            }
+        }
+        if steep {
+            grid.extend_row(i, lo, hi);
+        }
+    }
+}
+
+/// The span `(left, right)` of the horizontal line at `y` inside the convex
+/// polygon `vertices`, or `None` if the line misses it.
+pub(crate) fn convex_row_span(vertices: &[(f64, f64)], y: f64) -> Option<(f64, f64)> {
+    let mut left = f64::INFINITY;
+    let mut right = f64::NEG_INFINITY;
+    for (i, &(x0, y0)) in vertices.iter().enumerate() {
+        let (x1, y1) = vertices[(i + 1) % vertices.len()];
+        if y < y0.min(y1) || y > y0.max(y1) {
+            continue;
+        }
+        let (a, b) = if y0 == y1 {
+            (x0.min(x1), x0.max(x1))
+        } else {
+            let x = x0 + (y - y0) * (x1 - x0) / (y1 - y0);
+            (x, x)
+        };
+        left = left.min(a);
+        right = right.max(b);
+    }
+    (left <= right).then_some((left, right))
+}
+
+/// Fills the pixels of a `w`×`h` canvas whose centres lie inside the convex
+/// polygon `vertices`, one fully opaque scanline per row.
+pub(crate) fn fill_convex_at_pixel_centres(
+    lines: &mut Vec<Scanline>,
+    vertices: &[(f64, f64)],
+    w: i32,
+    h: i32,
+) {
+    let (y_min, y_max) = vertices
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &(_, y)| {
+            (lo.min(y), hi.max(y))
+        });
+    // Row `iy` is sampled at its centre `iy + 0.5`.
+    let iy_min = ((y_min - 0.5).ceil() as i32).max(0);
+    let iy_max = ((y_max - 0.5).floor() as i32).min(h - 1);
+    for iy in iy_min..=iy_max {
+        let Some((left, right)) = convex_row_span(vertices, f64::from(iy) + 0.5) else {
+            continue;
+        };
+        let x1 = ((left - 0.5).ceil() as i32).max(0);
+        let x2 = ((right - 0.5).floor() as i32).min(w - 1);
+        if x1 <= x2 {
+            lines.push(Scanline {
+                y: iy,
+                x1,
+                x2,
+                alpha: 0xFFFF,
+            });
+        }
     }
 }
 
@@ -469,15 +643,37 @@ mod tests {
     }
 
     #[test]
-    fn stroke_quadratic_direct_single_pixel_spans() {
-        // All emitted spans must be single-pixel (x1 == x2) for correct
-        // blending in energy_from_lines when alpha varies per pixel.
+    fn stroke_quadratic_direct_merges_equal_coverage_into_runs() {
         let mut worker = WorkerCtx::new(64, 64, ChaCha8Rng::seed_from_u64(5));
-        let lines = stroke_quadratic_direct(&mut worker, 10.0, 10.0, 32.0, 5.0, 55.0, 10.0, 0.25);
-        assert!(
-            lines.iter().all(|l| l.x1 == l.x2),
-            "stroke must emit single-pixel spans; got multi-pixel span: {lines:?}"
-        );
+        // A straight horizontal stroke 3 px wide centred on row 10's centres:
+        // rows 9 to 11 are fully covered between the butt caps at x = 5 and
+        // x = 55, and rows 8 and 12 sit exactly at the coverage reach.
+        let lines = stroke_quadratic_direct(&mut worker, 5.0, 10.5, 30.0, 10.5, 55.0, 10.5, 1.5);
+        let row = |y| Scanline {
+            y,
+            x1: 5,
+            x2: 54,
+            alpha: 0xFFFF,
+        };
+        assert_eq!(lines, &[row(9), row(10), row(11)]);
+    }
+
+    #[test]
+    fn stroke_quadratic_direct_samples_pixel_centres() {
+        let mut worker = WorkerCtx::new(16, 16, ChaCha8Rng::seed_from_u64(6));
+        // A vertical stroke along x = 4.5 from y = 2 to y = 12, 0.5 px wide:
+        // column 4's centres lie on it, columns 3 and 5 are a pixel away,
+        // beyond the 0.75 px reach.
+        let lines = stroke_quadratic_direct(&mut worker, 4.5, 2.0, 4.5, 7.0, 4.5, 12.0, 0.25);
+        let expected: Vec<_> = (2..12)
+            .map(|y| Scanline {
+                y,
+                x1: 4,
+                x2: 4,
+                alpha: 0xBFFF,
+            })
+            .collect();
+        assert_eq!(lines, expected);
     }
 
     #[test]

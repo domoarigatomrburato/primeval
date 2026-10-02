@@ -243,14 +243,7 @@ mod tests {
         use rand::{RngExt, SeedableRng};
 
         let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0xadd);
-        // TODO(ENG-2): include Quadratic once the T5 slice that fixes ENG-2
-        // (with PERF-7) stops quadratic strokes painting pixels twice; until
-        // then its incremental score legitimately differs from a recount.
-        let kinds = ShapeKind::all_kinds()
-            .iter()
-            .copied()
-            .filter(|&kind| kind != ShapeKind::Quadratic);
-        for (index, kind) in kinds.enumerate() {
+        for (index, &kind) in ShapeKind::all_kinds().iter().enumerate() {
             for (width, height) in [(2, 2), (23, 17), (40, 9)] {
                 let mut pixels = vec![0_u8; (width * height * 4) as usize];
                 rng.fill(&mut pixels[..]);

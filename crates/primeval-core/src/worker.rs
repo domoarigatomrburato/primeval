@@ -9,6 +9,7 @@ use crate::alpha::Alpha;
 use crate::buffer::Buffer;
 use crate::error_grid::ErrorGrid;
 use crate::optimize::hill_climb;
+use crate::raster::StrokeScratch;
 use crate::scanline::Scanline;
 use crate::score;
 use crate::shapes::{Shape, ShapeKind};
@@ -31,10 +32,8 @@ pub(crate) struct WorkerCtx<R> {
     pub(crate) height: i32,
     /// Reusable storage for rasterized scanlines.
     pub(crate) lines: Vec<Scanline>,
-    /// Reusable storage for per-scanline min bounds during rectangle tracking.
-    pub(crate) rect_min: Vec<i32>,
-    /// Reusable storage for per-scanline max bounds during rectangle tracking.
-    pub(crate) rect_max: Vec<i32>,
+    /// Reusable storage for stroking quadratic curves.
+    pub(crate) stroke: StrokeScratch,
     /// The RNG of the search round this context is running.
     pub(crate) rng: R,
     /// Running count of energy evaluations performed by this worker.
@@ -59,13 +58,11 @@ pub(crate) struct SearchRound<'a> {
 impl<R: Rng> WorkerCtx<R> {
     #[must_use]
     pub(crate) fn new(width: i32, height: i32, rng: R) -> Self {
-        let edge_capacity = (width + 2 * height) as usize;
         Self {
             width,
             height,
             lines: Vec::with_capacity(4096),
-            rect_min: Vec::with_capacity(edge_capacity),
-            rect_max: Vec::with_capacity(edge_capacity),
+            stroke: StrokeScratch::default(),
             rng,
             evaluations: 0,
         }
@@ -284,8 +281,6 @@ mod tests {
         assert_eq!(w.height, 60);
         assert_eq!(w.evaluations, 0);
         assert!(w.lines.capacity() >= 4096);
-        assert!(w.rect_min.capacity() >= (80 + 2 * 60) as usize);
-        assert!(w.rect_max.capacity() >= (80 + 2 * 60) as usize);
     }
 
     #[test]

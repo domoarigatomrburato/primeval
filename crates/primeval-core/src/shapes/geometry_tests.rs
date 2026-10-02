@@ -216,45 +216,20 @@ const SHAPES_PER_KIND: usize = 200;
 /// Engine and geometry masks can only disagree along the anti-aliased
 /// boundary, so the mismatch count grows with the perimeter, not the area;
 /// normalising by the perimeter makes one bound fit small and large shapes.
-/// For kinds whose rasterizer samples the shape exactly, a correct mapping
-/// stays below 0.06 and a half-pixel offset costs at least 0.16, so 0.1
-/// separates them. Three rasterizers are coarser than their geometry, and
-/// their bounds sit about 10% above the measured value:
-/// - `Triangle` (0.456): rows are filled between truncated edge crossings
-///   (about one extra pixel on the left of every row) and the lower half is
-///   sampled one row early, so it is drawn one row lower.
-/// - `RotatedRectangle` (0.265): corners are truncated towards the centre,
-///   then every pixel an edge touches is filled, which fattens the shape.
-/// - `Quadratic` (0.157): each flat segment is sampled at the left edge of
-///   its columns (or the top edge of its rows, when steep) instead of at the
-///   pixel centre, a half-pixel shift along the segment's major axis.
-fn bound(kind: ShapeKind) -> f64 {
-    match kind {
-        ShapeKind::Triangle => 0.5,
-        ShapeKind::RotatedRectangle => 0.29,
-        ShapeKind::Quadratic => 0.175,
-        _ => 0.1,
-    }
-}
+/// Every rasterizer samples its shape at pixel centres, so a correct mapping
+/// stays at or below 0.07 (`Quadratic`, whose joins between flat segments
+/// are approximate) and a half-pixel offset costs at least 0.16.
+const BOUND: f64 = 0.1;
 
 const HALF_PIXEL_SHIFTS: [(f64, f64); 4] = [(0.5, 0.0), (-0.5, 0.0), (0.0, 0.5), (0.0, -0.5)];
-
-/// Half-pixel offsets the coarse rasterizers cannot tell apart from the
-/// mapping: their own bias is about as large (see [`bound`]).
-const UNDETECTABLE_SHIFTS: [(ShapeKind, f64, f64); 3] = [
-    (ShapeKind::Triangle, -0.5, 0.0),
-    (ShapeKind::Triangle, 0.0, 0.5),
-    (ShapeKind::Quadratic, 0.5, 0.0),
-];
 
 #[test]
 fn geometry_covers_the_pixels_the_engine_rasterizes() {
     for kind in KINDS {
         let measured = mismatch_per_perimeter(kind, 0.0, 0.0);
         assert!(
-            measured <= bound(kind),
-            "{kind:?}: {measured:.3} mismatched pixels per unit of perimeter, bound {}",
-            bound(kind)
+            measured <= BOUND,
+            "{kind:?}: {measured:.3} mismatched pixels per unit of perimeter, bound {BOUND}"
         );
     }
 }
@@ -263,14 +238,10 @@ fn geometry_covers_the_pixels_the_engine_rasterizes() {
 fn half_pixel_offsets_exceed_the_bound() {
     for kind in KINDS {
         for (dx, dy) in HALF_PIXEL_SHIFTS {
-            if UNDETECTABLE_SHIFTS.contains(&(kind, dx, dy)) {
-                continue;
-            }
             let measured = mismatch_per_perimeter(kind, dx, dy);
             assert!(
-                measured > bound(kind),
-                "{kind:?} shifted by ({dx}, {dy}): {measured:.3} is within bound {}",
-                bound(kind)
+                measured > BOUND,
+                "{kind:?} shifted by ({dx}, {dy}): {measured:.3} is within bound {BOUND}"
             );
         }
     }

@@ -72,6 +72,12 @@ pub(crate) struct Circle {
     pub(crate) r: i32,
 }
 
+/// A rectangle of `sx` × `sy` rotated by `angle` degrees about `(x, y)`.
+///
+/// Unlike Go's `primitive`, it intentionally has no aspect-ratio limit:
+/// enforcing Go's limit (long side at most 5 × the short side) measurably
+/// hurt quality, for example the synthetic-texture rotated-rectangle score
+/// got 44% worse at 100 steps and 20% worse at 200.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RotatedRectangle {
     pub(crate) x: i32,
@@ -309,12 +315,8 @@ impl Triangle {
     fn rasterize<'a, R>(&self, worker: &'a mut WorkerCtx<R>) -> &'a [Scanline] {
         worker.lines.clear();
         rasterize_triangle(
-            self.x1,
-            self.y1,
-            self.x2,
-            self.y2,
-            self.x3,
-            self.y3,
+            [(self.x1, self.y1), (self.x2, self.y2), (self.x3, self.y3)],
+            worker.height,
             &mut worker.lines,
         );
         crate::scanline::crop_scanlines(&mut worker.lines, worker.width, worker.height);
@@ -480,29 +482,32 @@ impl Circle {
 }
 
 impl RotatedRectangle {
-    /// The rasterizer drops each sampled edge point into the pixel that
-    /// contains it, so `(x, y)` is already a continuous coordinate. The
-    /// corners are the exact rotated corners: the rasterizer truncates them
-    /// towards the centre and then covers every pixel its edges touch, which
-    /// the exact corners match more closely than the truncated ones.
+    /// `(x, y)` is a continuous coordinate, and the rasterizer fills the
+    /// pixels whose centres lie inside the exact rotated corners.
     fn geometry(&self) -> Geometry {
+        Geometry::Polygon(
+            self.corners()
+                .into_iter()
+                .map(|(x, y)| Point::new(x, y))
+                .collect(),
+        )
+    }
+
+    /// The exact corners, rotated by `angle` degrees about `(x, y)`.
+    fn corners(&self) -> [(f64, f64); 4] {
         let half_x = f64::from(self.sx) / 2.0;
         let half_y = f64::from(self.sy) / 2.0;
         let (sin_a, cos_a) = radians(f64::from(self.angle)).sin_cos();
-        Geometry::Polygon(
-            [
-                (-half_x, -half_y),
-                (half_x, -half_y),
-                (half_x, half_y),
-                (-half_x, half_y),
-            ]
-            .into_iter()
-            .map(|(x, y)| {
-                let (rx, ry) = rotate_sc(x, y, sin_a, cos_a);
-                Point::new(rx + f64::from(self.x), ry + f64::from(self.y))
-            })
-            .collect(),
-        )
+        [
+            (-half_x, -half_y),
+            (half_x, -half_y),
+            (half_x, half_y),
+            (-half_x, half_y),
+        ]
+        .map(|(x, y)| {
+            let (rx, ry) = rotate_sc(x, y, sin_a, cos_a);
+            (rx + f64::from(self.x), ry + f64::from(self.y))
+        })
     }
 
     fn random<R: Rng>(worker: &mut WorkerCtx<R>, round: &SearchRound<'_>) -> Self {
@@ -519,65 +524,13 @@ impl RotatedRectangle {
     }
 
     fn rasterize<'a, R>(&self, worker: &'a mut WorkerCtx<R>) -> &'a [Scanline] {
-        let sx = self.sx as f64;
-        let sy = self.sy as f64;
-        let angle = radians(self.angle as f64);
-        let (sin_a, cos_a) = angle.sin_cos();
-        let (rx1, ry1) = rotate_sc(-sx / 2.0, -sy / 2.0, sin_a, cos_a);
-        let (rx2, ry2) = rotate_sc(sx / 2.0, -sy / 2.0, sin_a, cos_a);
-        let (rx3, ry3) = rotate_sc(sx / 2.0, sy / 2.0, sin_a, cos_a);
-        let (rx4, ry4) = rotate_sc(-sx / 2.0, sy / 2.0, sin_a, cos_a);
-        let x1 = rx1 as i32 + self.x;
-        let y1 = ry1 as i32 + self.y;
-        let x2 = rx2 as i32 + self.x;
-        let y2 = ry2 as i32 + self.y;
-        let x3 = rx3 as i32 + self.x;
-        let y3 = ry3 as i32 + self.y;
-        let x4 = rx4 as i32 + self.x;
-        let y4 = ry4 as i32 + self.y;
-
-        let min_y = y1.min(y2).min(y3).min(y4);
-        let max_y = y1.max(y2).max(y3).max(y4);
-        let n = (max_y - min_y + 1).max(0) as usize;
-        worker.rect_min.clear();
-        worker.rect_min.resize(n, worker.width);
-        worker.rect_max.clear();
-        worker.rect_max.resize(n, 0);
-
-        let xs = [x1, x2, x3, x4, x1];
-        let ys = [y1, y2, y3, y4, y1];
-        for i in 0..4 {
-            let x = xs[i] as f64;
-            let y = ys[i] as f64;
-            let dx = (xs[i + 1] - xs[i]) as f64;
-            let dy = (ys[i + 1] - ys[i]) as f64;
-            let count = (((dx * dx + dy * dy).sqrt()) as i32 * 2).max(2) as usize;
-            for j in 0..count {
-                let t = j as f64 / (count - 1) as f64;
-                let xi = (x + dx * t) as i32;
-                let yi = (y + dy * t) as i32 - min_y;
-                worker.rect_min[yi as usize] = worker.rect_min[yi as usize].min(xi);
-                worker.rect_max[yi as usize] = worker.rect_max[yi as usize].max(xi);
-            }
-        }
-
         worker.lines.clear();
-        for i in 0..n {
-            let y = min_y + i as i32;
-            if y < 0 || y >= worker.height {
-                continue;
-            }
-            let x1 = worker.rect_min[i].max(0);
-            let x2 = worker.rect_max[i].min(worker.width - 1);
-            if x2 >= x1 {
-                worker.lines.push(Scanline {
-                    y,
-                    x1,
-                    x2,
-                    alpha: 0xFFFF,
-                });
-            }
-        }
+        crate::raster::fill_convex_at_pixel_centres(
+            &mut worker.lines,
+            &self.corners(),
+            worker.width,
+            worker.height,
+        );
         &worker.lines
     }
 
@@ -907,7 +860,7 @@ impl RotatedEllipse {
                 self.rx = (self.rx + gaussian_sample(&mut worker.rng, POSITION_SIGMA))
                     .clamp(1.0, f64::from(worker.width - 1));
                 self.ry = (self.ry + gaussian_sample(&mut worker.rng, POSITION_SIGMA))
-                    .clamp(1.0, f64::from(worker.width - 1));
+                    .clamp(1.0, f64::from(worker.height - 1));
             }
             _ => self.angle += gaussian_sample(&mut worker.rng, ANGLE_SIGMA),
         }
@@ -1034,93 +987,86 @@ fn rasterize_ellipse<R>(
     &worker.lines
 }
 
-fn rasterize_triangle(
-    mut x1: i32,
-    mut y1: i32,
-    mut x2: i32,
-    mut y2: i32,
-    mut x3: i32,
-    mut y3: i32,
-    lines: &mut Vec<Scanline>,
-) {
-    if y1 > y3 {
-        std::mem::swap(&mut x1, &mut x3);
-        std::mem::swap(&mut y1, &mut y3);
-    }
-    if y1 > y2 {
-        std::mem::swap(&mut x1, &mut x2);
-        std::mem::swap(&mut y1, &mut y2);
-    }
-    if y2 > y3 {
-        std::mem::swap(&mut x2, &mut x3);
-        std::mem::swap(&mut y2, &mut y3);
-    }
-    if y2 == y3 {
-        rasterize_triangle_bottom(x1, y1, x2, y2, x3, y3, lines);
+/// Fills a triangle whose integer vertices are pixel centres.
+///
+/// Each row is sampled at its pixel centres: row `y` covers the pixels whose
+/// centres lie inside the triangle. The edge crossings are exact rationals,
+/// so the rounding is exact too. A centre exactly on an edge belongs to the
+/// triangle only on its left or top edges (the usual top-left rule), so a
+/// pixel cut in half by an edge is counted on one side, not both. Only rows
+/// inside `0..height` are emitted; columns are left for the caller to crop.
+fn rasterize_triangle(mut vertices: [(i32, i32); 3], height: i32, lines: &mut Vec<Scanline>) {
+    vertices.sort_unstable_by_key(|&(_, y)| y);
+    let [top, middle, bottom] = vertices;
+    let (start, end) = (top.1.max(0), bottom.1.min(height));
+    if start >= end {
+        // Off the canvas, or collinear vertices on one row (which
+        // `Triangle::is_valid` rejects).
         return;
     }
-    if y1 == y2 {
-        rasterize_triangle_top(x1, y1, x2, y2, x3, y3, lines);
-        return;
-    }
-    let x4 = x1 + (((y2 - y1) as f64 / (y3 - y1) as f64) * (x3 - x1) as f64) as i32;
-    rasterize_triangle_bottom(x1, y1, x2, y2, x4, y2, lines);
-    rasterize_triangle_top(x2, y2, x4, y2, x3, y3, lines);
-}
-
-fn rasterize_triangle_bottom(
-    x1: i32,
-    y1: i32,
-    x2: i32,
-    y2: i32,
-    x3: i32,
-    y3: i32,
-    lines: &mut Vec<Scanline>,
-) {
-    let s1 = (x2 - x1) as f64 / (y2 - y1) as f64;
-    let s2 = (x3 - x1) as f64 / (y3 - y1) as f64;
-    let (mut ax, mut bx) = (x1 as f64, x1 as f64);
-    for y in y1..=y2 {
-        let (mut a, mut b) = (ax as i32, bx as i32);
-        ax += s1;
-        bx += s2;
-        if a > b {
-            std::mem::swap(&mut a, &mut b);
+    let mut long = EdgeWalker::new(top, bottom, start);
+    let upper = top.1 < middle.1 && start <= middle.1;
+    let mut short = if upper {
+        EdgeWalker::new(top, middle, start)
+    } else {
+        EdgeWalker::new(middle, bottom, start)
+    };
+    for y in start..end {
+        if upper && y == middle.1 + 1 {
+            short = EdgeWalker::new(middle, bottom, y);
         }
-        lines.push(Scanline {
-            y,
-            x1: a,
-            x2: b,
-            alpha: 0xFFFF,
-        });
+        // Left crossings round up; a centre exactly on the right edge is out.
+        let x1 = long.first.min(short.first) as i32;
+        let x2 = (long.first.max(short.first) - 1) as i32;
+        if x1 <= x2 {
+            lines.push(Scanline {
+                y,
+                x1,
+                x2,
+                alpha: 0xFFFF,
+            });
+        }
+        long.step();
+        short.step();
     }
 }
 
-fn rasterize_triangle_top(
-    x1: i32,
-    y1: i32,
-    x2: i32,
-    y2: i32,
-    x3: i32,
-    y3: i32,
-    lines: &mut Vec<Scanline>,
-) {
-    let s1 = (x3 - x1) as f64 / (y3 - y1) as f64;
-    let s2 = (x3 - x2) as f64 / (y3 - y2) as f64;
-    let (mut ax, mut bx) = (x3 as f64, x3 as f64);
-    for y in (y1 + 1..=y3).rev() {
-        ax -= s1;
-        bx -= s2;
-        let (mut a, mut b) = (ax as i32, bx as i32);
-        if a > b {
-            std::mem::swap(&mut a, &mut b);
+/// Walks the edge from `a` to `b` (with `a.1 < b.1`) row by row, tracking
+/// the first column at or right of its crossing exactly: the crossing is
+/// `numerator / dy`, and `first · dy - numerator` stays in `0..dy`.
+struct EdgeWalker {
+    first: i64,
+    excess: i64,
+    dy: i64,
+    step_quotient: i64,
+    step_remainder: i64,
+}
+
+impl EdgeWalker {
+    fn new(a: (i32, i32), b: (i32, i32), y: i32) -> Self {
+        let dy = i64::from(b.1 - a.1);
+        let dx = i64::from(b.0 - a.0);
+        let numerator = i64::from(a.0) * dy + i64::from(y - a.1) * dx;
+        // The crossing's ceiling, from an exact floor division.
+        let first = -(-numerator).div_euclid(dy);
+        Self {
+            first,
+            excess: first * dy - numerator,
+            dy,
+            step_quotient: dx.div_euclid(dy),
+            step_remainder: dx.rem_euclid(dy),
         }
-        lines.push(Scanline {
-            y,
-            x1: a,
-            x2: b,
-            alpha: 0xFFFF,
-        });
+    }
+
+    /// Moves to the next row, where the numerator grows by `dx`.
+    #[inline]
+    fn step(&mut self) {
+        self.first += self.step_quotient;
+        self.excess -= self.step_remainder;
+        if self.excess < 0 {
+            self.first += 1;
+            self.excess += self.dy;
+        }
     }
 }
 
@@ -1209,6 +1155,31 @@ mod tests {
                     alpha: 0xFFFF
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn triangle_rasterize_fills_pixel_centres_by_the_top_left_rule() {
+        let (mut worker, _) = round(8, 8);
+        let shape = Shape::Triangle(Triangle {
+            x1: 0,
+            y1: 0,
+            x2: 4,
+            y2: 0,
+            x3: 0,
+            y3: 4,
+        });
+        // Centres on the top and left edges are inside, centres on the
+        // hypotenuse (`x + y == 4`) are not.
+        let line = |y, x2| Scanline {
+            y,
+            x1: 0,
+            x2,
+            alpha: 0xFFFF,
+        };
+        assert_eq!(
+            shape.rasterize(&mut worker),
+            &[line(0, 3), line(1, 2), line(2, 1), line(3, 0)]
         );
     }
 
@@ -1419,6 +1390,89 @@ mod tests {
             q.is_valid(),
             "sub-pixel quadratic should be valid with f64 precision"
         );
+    }
+
+    /// Checks every rasterizer's output contract on `lines`: each scanline
+    /// lies inside the canvas with `x1 <= x2` and alpha `<= 0xFFFF`, and no
+    /// pixel is emitted twice (energy, colour and drawing blend each line
+    /// once, so a repeated pixel would be weighted twice).
+    fn assert_lines_well_formed(lines: &[Scanline], width: i32, height: i32, context: &str) {
+        let mut seen = vec![false; (width * height) as usize];
+        for line in lines {
+            assert!(
+                (0..height).contains(&line.y)
+                    && 0 <= line.x1
+                    && line.x1 <= line.x2
+                    && line.x2 < width
+                    && line.alpha <= 0xFFFF,
+                "{context}: malformed {line:?} on {width}x{height}"
+            );
+            for x in line.x1..=line.x2 {
+                let i = (line.y * width + x) as usize;
+                assert!(
+                    !seen[i],
+                    "{context}: pixel ({x}, {}) emitted twice on {width}x{height}",
+                    line.y
+                );
+                seen[i] = true;
+            }
+        }
+    }
+
+    #[test]
+    fn every_rasterizer_emits_each_pixel_at_most_once_and_in_bounds() {
+        for (index, (width, height)) in [(2, 2), (3, 7), (64, 48), (257, 255)]
+            .into_iter()
+            .enumerate()
+        {
+            let (mut worker, round) = make_test_round(width, height, 100 + index as u64);
+            for &kind in ShapeKind::all_kinds() {
+                for sample in 0..150 {
+                    let mut shape = Shape::random(kind, &mut worker, &round);
+                    for step in 0..4 {
+                        let context = format!("{kind:?} sample {sample} step {step}");
+                        let lines = shape.rasterize(&mut worker).to_vec();
+                        assert_lines_well_formed(&lines, width as i32, height as i32, &context);
+                        shape.mutate(&mut worker);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rotated_rectangle_left_of_the_canvas_emits_nothing() {
+        let (mut worker, _) = round(16, 16);
+        let shape = Shape::RotatedRectangle(RotatedRectangle {
+            x: -20,
+            y: 8,
+            sx: 6,
+            sy: 4,
+            angle: 30,
+        });
+        assert_eq!(shape.rasterize(&mut worker), &[]);
+    }
+
+    #[test]
+    fn rotated_ellipse_mutate_clamps_ry_to_the_height() {
+        let (mut worker, _) = round(64, 8);
+        let mut shape = Shape::RotatedEllipse(RotatedEllipse {
+            x: 32.0,
+            y: 4.0,
+            rx: 10.0,
+            ry: 3.0,
+            angle: 0.0,
+        });
+        for _ in 0..200 {
+            shape.mutate(&mut worker);
+            let Shape::RotatedEllipse(ellipse) = &shape else {
+                panic!("expected a rotated ellipse");
+            };
+            assert!(
+                (1.0..=63.0).contains(&ellipse.rx) && (1.0..=7.0).contains(&ellipse.ry),
+                "{ellipse:?}"
+            );
+        }
     }
 }
 
