@@ -46,6 +46,17 @@ npm run build && npm run build:wasm && npm run build:node
 npm run test:browser
 ```
 
+## Demo
+
+`demo/` is the browser demo published on GitHub Pages: plain HTML, CSS and ES modules, with no build step. `npm run demo:build` assembles it into `site/` with the package's browser files and the sample images; `npm run demo` builds and serves it on `http://127.0.0.1:8417/`:
+
+```bash
+npm run build && npm run build:wasm
+npm run demo
+```
+
+The server sends no COOP/COEP headers, as on Pages, so the demo's service worker (`demo/coi-sw.js`) isolates the page after one reload. `npm run demo -- --isolated` sends the headers from the server instead. The demo's tests are part of `npm run test:browser`.
+
 ## Project Rules
 
 - Treat Rust as the source of truth for render defaults and validation semantics.
@@ -64,7 +75,7 @@ npm ci
 npm run verify
 ```
 
-`npm run verify` includes `npm run lint`, which runs Biome over `src/`, `scripts/`, and `test/` to check formatting, import order, and lint rules. Run `npm run format` to apply formatting, import order, and safe lint fixes.
+`npm run verify` includes `npm run lint`, which runs Biome over `src/`, `scripts/`, `test/`, and `demo/` to check formatting, import order, and lint rules. Run `npm run format` to apply formatting, import order, and safe lint fixes.
 
 ## Benchmarks
 

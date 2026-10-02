@@ -74,6 +74,8 @@
     "generate:binding": "node scripts/generate-binding.mjs",
     "prepare:package": "npm run build && npm run generate:binding",
     "build:wasm": "node scripts/build-wasm.mjs",
+    "demo:build": "node scripts/demo.mjs build",
+    "demo": "node scripts/demo.mjs serve",
     "build:node": "napi build -p primeval-node --release --platform --no-js --dts binding.d.ts --output-dir . && npm run generate:binding",
     "check:napi-targets": "node scripts/napi-targets.mjs check-package",
     "bump:version": "node scripts/napi-targets.mjs bump-version",

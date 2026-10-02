@@ -14,8 +14,9 @@ Main components:
 - `src/index.ts`: single-source TypeScript wrapper for the npm package; `src/errors.ts` holds its error classes and the mapping from native error codes; `src/native-binding.ts` is the native boundary shim
 - `src/browser.ts`: browser entry (the `browser` condition of `exports`), run by `src/browser-runtime.ts` in one Web Worker per call (`src/worker-single.ts` or `src/worker-threaded.ts`, which also runs the rayon pool workers; shared logic in `src/worker-common.ts`); `src/types.ts`, `src/request.ts` and `src/data-uri.ts` are shared with `src/index.ts`, and `tsconfig.browser.json` builds the browser files without Node types
 - `src/cli.ts`: Node CLI entrypoint distributed via npm package `bin`
-- `scripts/`: binding-loader generation, `napi.targets` tooling, and the wasm build (`build-wasm.mjs`, the single source of the nightly pin, threaded flags, output layout and the gzip size budget per `.wasm`)
-- `test/`: Node/package tests; `test/tooling/`: packaging, loader, and release-metadata tests; `test/browser/`: the browser entry in headless Chromium (Playwright)
+- `scripts/`: binding-loader generation, `napi.targets` tooling, the wasm build (`build-wasm.mjs`, the single source of the nightly pin, threaded flags, output layout and the gzip size budget per `.wasm`), and the demo site (`demo.mjs`: `npm run demo:build` assembles `site/`, `npm run demo` also serves it)
+- `test/`: Node/package tests; `test/tooling/`: packaging, loader, and release-metadata tests; `test/browser/`: the browser entry in headless Chromium (Playwright), and the demo
+- `demo/`: the browser demo, plain HTML, CSS and ES modules with no build step, deployed to GitHub Pages by `.github/workflows/pages.yml`; `demo/coi-sw.js` is its cross-origin isolation service worker
 - `docs/readme/`: source images (`originals/`, also the test fixtures) and alpha comparisons used by the README
 - `docs/images/` and `docs/gallery.md`: progression gallery and thumbnails
 - `docs/plans/`: active planning docs; keep this directory small and current. Plans can be large: read the contents and the sections for the item you are working on, not the whole file.
@@ -25,6 +26,7 @@ Generated output (gitignored; never edit by hand):
 - `dist/`, produced by `npm run build`
 - root `binding.js`, `binding.d.ts`, and `primeval-node.*.node`, produced by `npm run build:node`
 - `wasm/` (`wasm/single/`, `wasm/threaded/`), produced by `npm run build:wasm`
+- `site/`, the demo site, produced by `npm run demo:build`
 
 ## Repo Direction
 

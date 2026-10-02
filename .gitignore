@@ -2,6 +2,7 @@
 /*.svg
 /dist/
 /output/
+/site/
 /target/
 /wasm/
 
