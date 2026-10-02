@@ -3,10 +3,11 @@ import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 
 // Keep the generated binding boundary here so the public wrapper can stay focused
-// on type checks and error mapping.
+// on type checks and error mapping. test/types/native-binding.ts checks these
+// types against the generated binding.d.ts.
 export interface NativeApproximateResult {
   format: string;
-  data: Buffer | Uint8Array;
+  data: Buffer;
   mimeType: string;
   width: number;
   height: number;
@@ -28,11 +29,9 @@ export interface NativeHandle {
   task: NativeTask;
 }
 
-/**
- * Stable codes the binding sets as `err.code`, from Rust's
- * `ApproximateError::code`.
- */
-export type NativeErrorCode = "INVALID_OPTION" | "INVALID_IMAGE" | "ABORTED" | "INTERNAL";
+// Native errors carry `code` from Rust's `ApproximateError::code` and, for
+// `INVALID_OPTION`, `option` (the Node name) and `requirement`; see
+// `mapNativeError`.
 
 export interface NativeRenderOptions {
   count?: number;
@@ -45,7 +44,7 @@ export interface NativeRenderOptions {
 }
 
 export interface NativeExecutionOptions {
-  onProgress?: (error: Error | null, info: NativeProgressInfo | null) => void;
+  onProgress?: (error: Error | null, info: NativeProgressInfo) => void;
 }
 
 export interface NativeApproximateRequest {

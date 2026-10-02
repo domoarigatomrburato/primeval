@@ -11,6 +11,7 @@ import {
   AbortError,
   approximate,
   type ExecutionOptions,
+  type OptionName,
   type OutputFormat,
   type RenderOptions,
   type Shape,
@@ -37,6 +38,21 @@ const VALID_SHAPES = [
   "rotated-ellipse",
   "polygon",
 ] as const;
+
+/**
+ * The flag for each option the library names in a `ValidationError`. This is
+ * the only place that maps option names to CLI spelling.
+ */
+const OPTION_FLAGS: Readonly<Record<OptionName, string>> = {
+  output: "--output",
+  count: "--count",
+  shape: "--shape",
+  alpha: "--alpha",
+  seed: "--seed",
+  background: "--background",
+  resizeInput: "--resize-input",
+  outputSize: "--output-size",
+};
 
 /** An error whose message is meant for the user, printed without a stack trace. */
 class CliError extends Error {
@@ -87,9 +103,9 @@ function usage(): string {
 // Only the syntax is checked here; Rust owns the ranges. A value too large to
 // be exact as a number is far outside every numeric range, so Rust rejects it
 // instead of seeing a wrapped value.
-function parseInteger(name: string, value: string): number {
+function parseInteger(option: OptionName, value: string): number {
   if (!/^\d+$/.test(value)) {
-    throw usageError(`${name} must be an integer`);
+    throw usageError(`${OPTION_FLAGS[option]} must be an integer`);
   }
   return Number(value);
 }
@@ -97,7 +113,7 @@ function parseInteger(name: string, value: string): number {
 // Seeds use the full u64 range, so they are passed exactly as a bigint.
 function parseSeed(value: string): bigint {
   if (!/^\d+$/.test(value)) {
-    throw usageError("seed must be an integer");
+    throw usageError(`${OPTION_FLAGS.seed} must be an integer`);
   }
   return BigInt(value);
 }
@@ -108,7 +124,7 @@ function parseAlpha(raw: string): "auto" | number {
   }
   const alpha = /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
   if (!(alpha >= 1 && alpha <= 255)) {
-    throw usageError("alpha must be auto or an integer 1..255");
+    throw usageError(`${OPTION_FLAGS.alpha} must be auto or an integer 1..255`);
   }
   return alpha;
 }
@@ -318,7 +334,7 @@ async function main(): Promise<number> {
   const format = outputPath === STDIO ? "svg" : formatFromExtension(outputPath);
 
   if (values.shape !== undefined && !(VALID_SHAPES as readonly string[]).includes(values.shape)) {
-    throw usageError(`shape must be one of: ${VALID_SHAPES.join(", ")}`);
+    throw usageError(`${OPTION_FLAGS.shape} must be one of: ${VALID_SHAPES.join(", ")}`);
   }
   const render: RenderOptions = {
     ...(values.count === undefined ? {} : { count: parseInteger("count", values.count) }),
@@ -327,10 +343,10 @@ async function main(): Promise<number> {
     ...(values.background === undefined ? {} : { background: values.background }),
     ...(values["resize-input"] === undefined
       ? {}
-      : { resizeInput: parseInteger("resize-input", values["resize-input"]) }),
+      : { resizeInput: parseInteger("resizeInput", values["resize-input"]) }),
     ...(values["output-size"] === undefined
       ? {}
-      : { outputSize: parseInteger("output-size", values["output-size"]) }),
+      : { outputSize: parseInteger("outputSize", values["output-size"]) }),
     ...(values.seed === undefined ? {} : { seed: parseSeed(values.seed) }),
   };
 
@@ -389,6 +405,12 @@ main().then(
         process.stderr.write("Run 'primeval --help' for usage.\n");
       }
       process.exitCode = error.exitCode;
+      return;
+    }
+    // Invalid options are reported with the flag that set them.
+    if (error instanceof ValidationError && error.option !== undefined) {
+      process.stderr.write(`${OPTION_FLAGS[error.option]} ${error.requirement}\n`);
+      process.exitCode = EXIT_RUNTIME;
       return;
     }
     // Library errors and filesystem errors (with a known `code`) are user-facing.

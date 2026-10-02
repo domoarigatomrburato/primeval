@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 import {
   AbortError,
   approximate,
@@ -100,52 +104,98 @@ test("validation rejects missing input before native loading", () => {
   );
 });
 
-test("approximate rejects non-function progress callbacks with ValidationError", () => {
-  assert.throws(
-    () =>
-      approximate(
-        /** @type {any} */ ({
-          input: Buffer.from([0]),
-          output: "svg",
-          render: { count: 2, resizeInput: 8, outputSize: 16, seed: 7 },
-          execution: { onProgress: 123 },
-        }),
-      ),
+test("approximate rejects non-function progress callbacks with ValidationError", async () => {
+  await assert.rejects(
+    approximate(
+      /** @type {any} */ ({
+        input: Buffer.from([0]),
+        output: "svg",
+        render: { count: 2, resizeInput: 8, outputSize: 16, seed: 7 },
+        execution: { onProgress: 123 },
+      }),
+    ),
     (err) =>
-      err instanceof ValidationError && err.message === "execution.onProgress must be a function",
+      err instanceof ValidationError &&
+      err.option === undefined &&
+      err.message === "execution.onProgress must be a function",
   );
 });
 
-test("approximate rejects invalid abort signals with ValidationError", () => {
-  assert.throws(
-    () =>
-      approximate(
-        /** @type {any} */ ({
-          input: Buffer.from([0]),
-          output: "svg",
-          render: { count: 1, resizeInput: 8, outputSize: 16, seed: 7 },
-          execution: { signal: {} },
-        }),
-      ),
+test("approximate rejects invalid abort signals with ValidationError", async () => {
+  await assert.rejects(
+    approximate(
+      /** @type {any} */ ({
+        input: Buffer.from([0]),
+        output: "svg",
+        render: { count: 1, resizeInput: 8, outputSize: 16, seed: 7 },
+        execution: { signal: {} },
+      }),
+    ),
     (err) =>
       err instanceof ValidationError && err.message === "execution.signal must be an AbortSignal",
   );
 });
 
-test("approximate rejects alpha outside auto and 1..255 with ValidationError", () => {
+test("approximate rejects a missing request with ValidationError", async () => {
+  for (const request of [undefined, null, "photo.jpg"]) {
+    await assert.rejects(
+      approximate(/** @type {any} */ (request)),
+      (err) => err instanceof ValidationError && err.message === "request must be an object",
+    );
+  }
+});
+
+test("approximate rejects alpha outside auto and 1..255 with ValidationError", async () => {
   for (const alpha of [0, 256, -1, 1.5, 2 ** 32 + 128, Number.NaN, true]) {
-    assert.throws(
-      () =>
-        approximate(
-          /** @type {any} */ ({
-            input: Buffer.from([0]),
-            output: "svg",
-            render: { alpha },
-          }),
-        ),
+    await assert.rejects(
+      approximate(
+        /** @type {any} */ ({
+          input: Buffer.from([0]),
+          output: "svg",
+          render: { alpha },
+        }),
+      ),
       (err) =>
-        err instanceof ValidationError && err.message === "alpha must be auto or an integer 1..255",
+        err instanceof ValidationError &&
+        err.option === "alpha" &&
+        err.message === "alpha must be auto or an integer 1..255",
       String(alpha),
     );
   }
+});
+
+test("native invalid-option errors carry the option and requirement", () => {
+  const cause = Object.assign(nativeError("INVALID_OPTION", "resizeInput must be 2"), {
+    option: "resizeInput",
+    requirement: "must be 2",
+  });
+
+  const mapped = mapNativeError(cause);
+
+  assert.ok(mapped instanceof ValidationError);
+  assert.equal(mapped.option, "resizeInput");
+  assert.equal(mapped.requirement, "must be 2");
+});
+
+test("a native load failure rejects with InternalError", async (t) => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "primeval-load-failure-"));
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  fs.cpSync(path.join(process.cwd(), "dist"), path.join(tmp, "dist"), { recursive: true });
+  fs.writeFileSync(path.join(tmp, "package.json"), '{ "type": "commonjs" }\n');
+  fs.writeFileSync(path.join(tmp, "dist", "package.json"), '{ "type": "module" }\n');
+  fs.writeFileSync(path.join(tmp, "binding.js"), 'throw new Error("no native addon");\n');
+  const isolated = await import(pathToFileURL(path.join(tmp, "dist", "index.js")).href);
+
+  let promise;
+  assert.doesNotThrow(() => {
+    promise = isolated.approximate({ input: Buffer.from([0]), output: "svg" });
+  });
+  await assert.rejects(
+    promise,
+    (err) =>
+      err instanceof isolated.InternalError &&
+      err.code === "INTERNAL" &&
+      err.message === "no native addon" &&
+      err.cause instanceof Error,
+  );
 });

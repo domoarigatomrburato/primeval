@@ -256,7 +256,8 @@ pub struct ProgressInfo {
 
 /// A cheap-to-clone handle that cancels a running [`approximate`] call.
 ///
-/// Clones share the same flag. The render checks it before every step.
+/// Clones share the same flag. The render checks it before and after
+/// decoding, before every step, and before encoding.
 #[derive(Clone, Debug, Default)]
 pub struct CancellationToken(Arc<AtomicBool>);
 
@@ -312,6 +313,15 @@ impl<'a> Execution<'a> {
 
     fn is_cancelled(&self) -> bool {
         self.cancel.is_some_and(CancellationToken::is_cancelled)
+    }
+
+    /// [`ApproximateError::Aborted`] once the token is cancelled.
+    fn check_cancelled(&self) -> Result<(), ApproximateError> {
+        if self.is_cancelled() {
+            Err(ApproximateError::Aborted)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -392,8 +402,10 @@ pub fn approximate(
     } = request;
     validate_options(&render)?;
 
+    execution.check_cancelled()?;
     let image = decode_input(&input)?;
     drop(input);
+    execution.check_cancelled()?;
     let (working, background) = prepare_target(image, render.background, render.resize_input);
     let (width, height) = working.dimensions();
     let target = Buffer::from_rgba(width, height, working.into_raw())
@@ -404,9 +416,7 @@ pub fn approximate(
     let mut model = Model::new(target, background, options);
 
     for step in 0..render.count {
-        if execution.is_cancelled() {
-            return Err(ApproximateError::Aborted);
-        }
+        execution.check_cancelled()?;
 
         model.step(render.shape, render.alpha);
 
@@ -419,6 +429,7 @@ pub fn approximate(
         }
     }
 
+    execution.check_cancelled()?;
     encode_output(&model.drawing(), render.output_size, output)
 }
 
@@ -848,6 +859,39 @@ mod tests {
 
         assert!(matches!(result, Err(ApproximateError::Aborted)));
         assert!(fired.is_empty());
+    }
+
+    #[test]
+    fn cancelled_token_aborts_before_decoding() {
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let result = approximate(
+            request(vec![0, 1, 2, 3], OutputFormat::Svg),
+            Execution::new().cancellation(&token),
+        );
+
+        assert!(matches!(result, Err(ApproximateError::Aborted)));
+    }
+
+    #[test]
+    fn cancellation_after_the_last_step_aborts_before_encoding() {
+        let token = CancellationToken::new();
+        let canceller = token.clone();
+        let mut on_progress = |info: ProgressInfo| {
+            if info.step == info.total {
+                canceller.cancel();
+            }
+        };
+
+        let result = approximate(
+            request(fixture_bytes(), OutputFormat::Png),
+            Execution::new()
+                .progress(&mut on_progress)
+                .cancellation(&token),
+        );
+
+        assert!(matches!(result, Err(ApproximateError::Aborted)));
     }
 
     #[test]

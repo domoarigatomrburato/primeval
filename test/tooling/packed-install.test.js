@@ -143,6 +143,20 @@ test("packed package can be installed and render in a consumer project", {
     run(npmCommand(), ["install", "./local-platform"], { cwd: tempDir });
     run(npmCommand(), ["install", tarballPath], { cwd: tempDir });
 
+    const installedDist = path.join(tempDir, "node_modules", "@aleburato", "primeval", "dist");
+    const shipped = fs.readdirSync(installedDist);
+    assert.ok(!shipped.includes("cli.d.ts"), "dist/cli.d.ts must not ship");
+    assert.ok(!shipped.includes("native-binding.d.ts"), "dist/native-binding.d.ts must not ship");
+    for (const file of shipped.filter((name) => name.endsWith(".d.ts"))) {
+      const source = fs.readFileSync(path.join(installedDist, file), "utf8");
+      for (const [, specifier] of source.matchAll(/from "(\.\/[^"]+)\.js"/g)) {
+        assert.ok(
+          shipped.includes(`${specifier.slice(2)}.d.ts`),
+          `${file} imports ${specifier}.js, whose declarations are not shipped`,
+        );
+      }
+    }
+
     const fixturePath = path.join(repoRoot, "docs", "readme", "originals", "monalisa.jpg");
     const smokeScript = [
       'import { readFile } from "node:fs/promises";',

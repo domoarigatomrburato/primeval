@@ -145,21 +145,34 @@ test("cli rejects extra positional arguments", () => {
 test("cli rejects invalid numeric options as usage errors", () => {
   const result = runCli([fixturePath, "-o", "-", "--count", "abc"]);
 
-  assertUsageError(result, /^count must be an integer\n/);
+  assertUsageError(result, /^--count must be an integer\n/);
+
+  for (const flag of ["--resize-input", "--output-size", "--seed"]) {
+    assertUsageError(
+      runCli([fixturePath, "-o", "-", flag, "1.5"]),
+      new RegExp(`^${flag} must be an integer\n`),
+    );
+  }
 });
 
 test("cli rejects an unknown shape as a usage error", () => {
   const result = runCli([fixturePath, "-o", "-", "--shape", "hexagon"]);
 
-  assertUsageError(result, /^shape must be one of: any, triangle, .*, polygon\n/);
+  assertUsageError(result, /^--shape must be one of: any, triangle, .*, polygon\n/);
 });
 
 test("cli passes out-of-range numbers to Rust instead of wrapping them", () => {
   const count = runCli([fixturePath, "-o", "-", ...RENDER_ARGS, "--count", "4294967297"]);
-  assertRuntimeError(count, /^count must be an integer from 1 to 100000\n$/);
+  assertRuntimeError(count, /^--count must be an integer from 1 to 100000\n$/);
 
   const seed = runCli([fixturePath, "-o", "-", ...RENDER_ARGS, "--seed", "99999999999999999999"]);
-  assertRuntimeError(seed, /^seed must be an integer from 0 to 2\^64 - 1/);
+  assertRuntimeError(seed, /^--seed must be an integer from 0 to 2\^64 - 1/);
+
+  const resize = runCli([fixturePath, "-o", "-", ...RENDER_ARGS, "--resize-input", "4096"]);
+  assertRuntimeError(resize, /^--resize-input must be an integer from 2 to 2048\n$/);
+
+  const outputSize = runCli([fixturePath, "-o", "-", ...RENDER_ARGS, "--output-size", "1"]);
+  assertRuntimeError(outputSize, /^--output-size must be an integer from 2 to 8192\n$/);
 });
 
 test("cli passes a full-range u64 seed exactly", () => {
@@ -228,7 +241,7 @@ test("cli rejects --alpha outside auto and 1..255 as a usage error", () => {
   for (const alpha of ["0", "256", "-1", "half"]) {
     const result = runCli([fixturePath, "-o", "-", `--alpha=${alpha}`]);
 
-    assertUsageError(result, /^alpha must be auto or an integer 1\.\.255\n/);
+    assertUsageError(result, /^--alpha must be auto or an integer 1\.\.255\n/);
   }
 });
 
@@ -457,7 +470,7 @@ test("cli reports an invalid background without a stack trace", () => {
 
   assertRuntimeError(
     result,
-    /^background must be auto or an opaque hex color \(RGB or RRGGBB\)\n$/,
+    /^--background must be auto or an opaque hex color \(RGB or RRGGBB\)\n$/,
   );
   assert.equal(fs.existsSync(output), false);
 });

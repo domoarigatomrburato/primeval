@@ -5,6 +5,8 @@ import { test } from "node:test";
 import zlib from "node:zlib";
 import { AbortError, approximate, PrimevalError, ValidationError } from "@aleburato/primeval";
 
+const LONG_RENDER = { count: 100000, resizeInput: 16, outputSize: 16, seed: 7 };
+
 const FIXTURE_IMAGE = fs.readFileSync(
   path.join(process.cwd(), "docs", "readme", "originals", "monalisa.jpg"),
 );
@@ -82,12 +84,11 @@ test("native approximate accepts alpha auto", async () => {
 
 test("native approximate rejects an unknown alpha string with ValidationError", async () => {
   await assert.rejects(
-    async () =>
-      approximate({
-        input: FIXTURE_IMAGE,
-        output: "svg",
-        render: render({ alpha: /** @type {any} */ ("half") }),
-      }),
+    approximate({
+      input: FIXTURE_IMAGE,
+      output: "svg",
+      render: render({ alpha: /** @type {any} */ ("half") }),
+    }),
     (error) =>
       error instanceof ValidationError &&
       error.message === "alpha must be auto or an integer 1..255",
@@ -107,7 +108,7 @@ test("approximate rejects non-Uint8Array input with ValidationError", async () =
 
   for (const input of inputs) {
     await assert.rejects(
-      async () => approximate(/** @type {any} */ ({ input, output: "svg", render: render() })),
+      approximate(/** @type {any} */ ({ input, output: "svg", render: render() })),
       (error) => error instanceof ValidationError && error.message === "input must be a Uint8Array",
     );
   }
@@ -127,8 +128,7 @@ test("native approximate accepts a plain Uint8Array input", async () => {
 test("approximate rejects non-opaque and non-ASCII backgrounds with ValidationError", async () => {
   for (const background of ["a€bc", "#a€bc", "€", "#1234", "#11223344", "11223344"]) {
     await assert.rejects(
-      async () =>
-        approximate({ input: FIXTURE_IMAGE, output: "svg", render: render({ background }) }),
+      approximate({ input: FIXTURE_IMAGE, output: "svg", render: render({ background }) }),
       (error) =>
         error instanceof ValidationError &&
         error.message === "background must be auto or an opaque hex color (RGB or RRGGBB)",
@@ -220,21 +220,22 @@ test("native approximate renders a 2000x5 banner on a 256x2 canvas", async () =>
   assert.match(result.data, /viewBox="0 0 256 2"/);
 });
 
-test("numeric options are range-checked in Rust without wrapping", () => {
+test("numeric options are range-checked in Rust without wrapping", async () => {
   const cases = [
-    ["count", "count must be an integer from 1 to 100000"],
-    ["resizeInput", "resizeInput must be an integer from 2 to 2048"],
-    ["outputSize", "outputSize must be an integer from 2 to 8192"],
+    ["count", "must be an integer from 1 to 100000"],
+    ["resizeInput", "must be an integer from 2 to 2048"],
+    ["outputSize", "must be an integer from 2 to 8192"],
   ];
-  for (const [name, message] of cases) {
+  for (const [name, requirement] of cases) {
     for (const value of [2 ** 32 + 1, 2 ** 32 + 16, 1e20, -1, 0, 1.5, Number.NaN, Infinity]) {
-      assert.throws(
-        () =>
-          approximate({ input: FIXTURE_IMAGE, output: "svg", render: render({ [name]: value }) }),
+      await assert.rejects(
+        approximate({ input: FIXTURE_IMAGE, output: "svg", render: render({ [name]: value }) }),
         (error) =>
           error instanceof ValidationError &&
           error.code === "INVALID_OPTION" &&
-          error.message === message,
+          error.option === name &&
+          error.requirement === requirement &&
+          error.message === `${name} ${requirement}`,
         `${name} = ${value}`,
       );
     }
@@ -244,19 +245,22 @@ test("numeric options are range-checked in Rust without wrapping", () => {
 test("seeds accept safe integers and bigints up to 2^64 - 1", async () => {
   const seedMessage = /^seed must be an integer from 0 to 2\^64 - 1/;
   for (const seed of [2 ** 53, 1e20, -1, 1.5, -1n, 2n ** 64n]) {
-    assert.throws(
-      () => approximate({ input: FIXTURE_IMAGE, output: "svg", render: render({ seed }) }),
+    await assert.rejects(
+      approximate({ input: FIXTURE_IMAGE, output: "svg", render: render({ seed }) }),
       (error) =>
         error instanceof ValidationError &&
         error.code === "INVALID_OPTION" &&
+        error.option === "seed" &&
         seedMessage.test(error.message),
       String(seed),
     );
   }
-  assert.throws(
-    () => approximate({ input: FIXTURE_IMAGE, output: "svg", render: render({ seed: "7" }) }),
+  await assert.rejects(
+    approximate({ input: FIXTURE_IMAGE, output: "svg", render: render({ seed: "7" }) }),
     (error) =>
-      error instanceof ValidationError && error.message === "seed must be a number or a bigint",
+      error instanceof ValidationError &&
+      error.option === "seed" &&
+      error.message === "seed must be a number or a bigint",
   );
 
   const asNumber = await approximate({ input: FIXTURE_IMAGE, output: "svg", render: render() });
@@ -275,15 +279,88 @@ test("seeds accept safe integers and bigints up to 2^64 - 1", async () => {
   assert.equal(maxSeed.format, "svg");
 });
 
+test("every failure is a rejection, never a synchronous throw", async () => {
+  const cases = [
+    [{ input: FIXTURE_IMAGE, output: "svg", render: { count: 0 } }, "count"],
+    [{ input: FIXTURE_IMAGE, output: "svg", render: { shape: "hexagon" } }, "shape"],
+    [{ input: FIXTURE_IMAGE, output: "svg", render: { background: "#1234" } }, "background"],
+    [{ input: FIXTURE_IMAGE, output: "gif" }, "output"],
+  ];
+  for (const [request, option] of cases) {
+    let promise;
+    assert.doesNotThrow(() => {
+      promise = approximate(/** @type {any} */ (request));
+    }, option);
+    await assert.rejects(
+      promise,
+      (error) =>
+        error instanceof ValidationError &&
+        error.code === "INVALID_OPTION" &&
+        error.option === option,
+      option,
+    );
+  }
+});
+
+test("request fields of the wrong type reject with ValidationError, not napi errors", async () => {
+  const cases = [
+    [{ output: 1 }, "output", "output must be a string"],
+    [{ render: { background: 123 } }, "background", "background must be a string"],
+    [{ render: { shape: 1 } }, "shape", "shape must be a string"],
+    [{ render: { count: "4" } }, "count", "count must be a number"],
+    [{ render: { resizeInput: 8n } }, "resizeInput", "resizeInput must be a number"],
+    [{ render: { outputSize: {} } }, "outputSize", "outputSize must be a number"],
+  ];
+  for (const [overrides, option, message] of cases) {
+    const request = { input: FIXTURE_IMAGE, output: "svg", ...overrides };
+    await assert.rejects(
+      approximate(/** @type {any} */ (request)),
+      (error) =>
+        error instanceof ValidationError &&
+        error.code === "INVALID_OPTION" &&
+        error.option === option &&
+        error.message === message,
+      message,
+    );
+  }
+});
+
+test("null is rejected like any other wrong type for every optional field", async () => {
+  const fields = ["count", "shape", "alpha", "seed", "background", "resizeInput", "outputSize"];
+  for (const field of fields) {
+    await assert.rejects(
+      approximate(
+        /** @type {any} */ ({ input: FIXTURE_IMAGE, output: "svg", render: { [field]: null } }),
+      ),
+      (error) =>
+        error instanceof ValidationError &&
+        error.code === "INVALID_OPTION" &&
+        error.option === field,
+      field,
+    );
+  }
+  for (const request of [
+    { render: null },
+    { execution: null },
+    { execution: { onProgress: null } },
+    { execution: { signal: null } },
+  ]) {
+    await assert.rejects(
+      approximate(/** @type {any} */ ({ input: FIXTURE_IMAGE, output: "svg", ...request })),
+      (error) => error instanceof ValidationError && error.code === "INVALID_OPTION",
+      JSON.stringify(request),
+    );
+  }
+});
+
 test("approximate rejects removed output formats with ValidationError", async () => {
   for (const output of ["jpg", "jpeg", "gif"]) {
     await assert.rejects(
-      async () =>
-        approximate({
-          input: FIXTURE_IMAGE,
-          output,
-          render: render(),
-        }),
+      approximate({
+        input: FIXTURE_IMAGE,
+        output,
+        render: render(),
+      }),
       (error) =>
         error instanceof ValidationError &&
         error.code === "INVALID_OPTION" &&
@@ -292,30 +369,102 @@ test("approximate rejects removed output formats with ValidationError", async ()
   }
 });
 
-test("native approximate maps abort signals to AbortError", async () => {
+function isAbortFrom(signal) {
+  return (error) =>
+    error instanceof AbortError &&
+    error instanceof PrimevalError &&
+    error.code === "ABORTED" &&
+    error.cause === signal.reason;
+}
+
+test("an already-aborted signal rejects without starting native work", async () => {
   const controller = new AbortController();
+  controller.abort();
+  let progressCalls = 0;
+
+  // count: 0 fails Rust validation, so reaching native code would reject
+  // with ValidationError instead.
+  await assert.rejects(
+    approximate({
+      input: FIXTURE_IMAGE,
+      output: "svg",
+      render: render({ count: 0 }),
+      execution: {
+        signal: controller.signal,
+        onProgress() {
+          progressCalls += 1;
+        },
+      },
+    }),
+    isAbortFrom(controller.signal),
+  );
+  assert.equal(progressCalls, 0);
+});
+
+test("aborting after the first progress event rejects a long render with AbortError", async () => {
+  const controller = new AbortController();
+  let lastStep = 0;
 
   await assert.rejects(
     approximate({
       input: FIXTURE_IMAGE,
       output: "svg",
-      render: render({ count: 32 }),
+      render: render(LONG_RENDER),
       execution: {
         signal: controller.signal,
         onProgress(info) {
+          lastStep = info.step;
           if (info.step === 1) {
-            controller.abort();
+            controller.abort(new Error("stop"));
           }
         },
       },
     }),
-    (error) =>
-      error instanceof AbortError &&
-      error instanceof PrimevalError &&
-      error.code === "ABORTED" &&
-      error.cause instanceof Error &&
-      error.cause.code === "ABORTED",
+    isAbortFrom(controller.signal),
   );
+  assert.ok(lastStep < LONG_RENDER.count, `stopped at step ${lastStep}`);
+});
+
+test("an abort before the native promise settles wins even if the render finished", async () => {
+  const controller = new AbortController();
+  const promise = approximate({
+    input: FIXTURE_IMAGE,
+    output: "svg",
+    render: render({ count: 2 }),
+    execution: { signal: controller.signal },
+  });
+
+  // The render finishes on the blocking pool while the main thread is busy,
+  // so its result is already queued when the signal fires.
+  const blockUntil = Date.now() + 200;
+  while (Date.now() < blockUntil) {
+    // Busy-wait.
+  }
+  controller.abort();
+
+  await assert.rejects(promise, isAbortFrom(controller.signal));
+});
+
+test("a throwing onProgress rejects with its error and stops the render", async () => {
+  const boom = new Error("boom");
+  let calls = 0;
+
+  await assert.rejects(
+    approximate({
+      input: FIXTURE_IMAGE,
+      output: "svg",
+      render: render(LONG_RENDER),
+      execution: {
+        onProgress() {
+          calls += 1;
+          throw boom;
+        },
+      },
+    }),
+    (error) => error === boom,
+  );
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(calls, 1);
 });
 
 test("native approximate emits monotonic progress exactly count times", async () => {

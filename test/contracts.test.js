@@ -9,10 +9,40 @@ function readRepoFile(...segments) {
   return fs.readFileSync(path.join(repoRoot, ...segments), "utf8");
 }
 
-function parseStringArray(source, label) {
-  const match = source.match(new RegExp(`const ${label}:[^=]+= \\[(.*?)\\];`, "s"));
+function parseStringUnion(source, typeName) {
+  const match = source.match(new RegExp(`export type ${typeName} =([^;]+);`));
+  assert.ok(match, `missing type ${typeName}`);
+  return [...match[1].matchAll(/"([^"]+)"/g)].map((entry) => entry[1]);
+}
+
+function parseConstArray(source, label) {
+  const match = source.match(new RegExp(`const ${label}[^=]*= \\[(.*?)\\]`, "s"));
   assert.ok(match, `missing ${label}`);
   return [...match[1].matchAll(/"([^"]+)"/g)].map((entry) => entry[1]);
+}
+
+// The `@default` tag of each field in `export type RenderOptions = { ... }`.
+function parseJsdocDefaults(source) {
+  const block = source.match(/export type RenderOptions = \{(.*?)\n\};/s);
+  assert.ok(block, "missing RenderOptions type");
+  const defaults = {};
+  for (const [, doc, field] of block[1].matchAll(/\/\*\*((?:(?!\*\/).)*)\*\/\s*(\w+)\?:/gs)) {
+    const tag = doc.match(/@default\s+(\S+)/);
+    if (tag) {
+      defaults[field] = JSON.parse(tag[1]);
+    }
+  }
+  return defaults;
+}
+
+function parseReadmeDefaults(readme) {
+  const line = readme.match(/^- Current Rust defaults are (.*)$/m);
+  assert.ok(line, "missing README defaults line");
+  const defaults = {};
+  for (const [, field, value] of line[1].matchAll(/`(\w+): ([^`]+)`/g)) {
+    defaults[field] = JSON.parse(value);
+  }
+  return defaults;
 }
 
 function parseRustVariants(source, enumName) {
@@ -61,29 +91,37 @@ function parseRustRenderDefaults(source) {
 }
 
 function parseAlphaMessage(source, fileLabel) {
-  const match = source.match(/alpha must be[^"\n]*/);
+  const match = source.match(/must be auto or an integer[^"`\n]*/);
   assert.ok(match, `missing alpha validation message in ${fileLabel}`);
   return match[0];
 }
 
-test("wrapper shape vocabulary mirrors Rust", () => {
-  const tsSource = readRepoFile("src", "index.ts");
-  const rustSource = readRepoFile("crates", "primeval-core", "src", "shapes.rs");
-
-  assert.deepEqual(
-    parseStringArray(tsSource, "VALID_SHAPES"),
-    parseRustVariants(rustSource, "ShapeKind"),
+test("wrapper and cli shape vocabularies mirror Rust", () => {
+  const rustShapes = parseRustVariants(
+    readRepoFile("crates", "primeval-core", "src", "shapes.rs"),
+    "ShapeKind",
   );
+
+  assert.deepEqual(parseStringUnion(readRepoFile("src", "index.ts"), "Shape"), rustShapes);
+  assert.deepEqual(parseConstArray(readRepoFile("src", "cli.ts"), "VALID_SHAPES"), rustShapes);
 });
 
 test("wrapper output vocabulary mirrors Rust", () => {
-  const tsSource = readRepoFile("src", "index.ts");
   const rustSource = readRepoFile("crates", "primeval-render", "src", "output.rs");
 
   assert.deepEqual(
-    parseStringArray(tsSource, "VALID_OUTPUTS"),
+    parseStringUnion(readRepoFile("src", "index.ts"), "OutputFormat"),
     parseRustVariants(rustSource, "OutputFormat"),
   );
+});
+
+test("README and JSDoc defaults match the Rust render defaults", () => {
+  const rustDefaults = parseRustRenderDefaults(
+    readRepoFile("crates", "primeval-render", "src", "lib.rs"),
+  );
+
+  assert.deepEqual(parseJsdocDefaults(readRepoFile("src", "index.ts")), rustDefaults);
+  assert.deepEqual(parseReadmeDefaults(readRepoFile("README.md")), rustDefaults);
 });
 
 test("wrapper leaves render defaults to Rust", () => {
@@ -108,12 +146,13 @@ test("alpha validation message is aligned across surfaces", () => {
       readRepoFile("crates", "primeval-core", "src", "alpha.rs"),
       "crates/primeval-core/src/alpha.rs",
     ),
+    parseAlphaMessage(
+      readRepoFile("crates", "primeval-render", "src", "error.rs"),
+      "crates/primeval-render/src/error.rs",
+    ),
   ];
 
-  assert.deepEqual(
-    messages,
-    new Array(messages.length).fill("alpha must be auto or an integer 1..255"),
-  );
+  assert.deepEqual(messages, new Array(messages.length).fill("must be auto or an integer 1..255"));
 });
 
 test("binding uses shared Rust option parsers and render defaults", () => {

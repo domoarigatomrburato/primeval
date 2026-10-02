@@ -104,3 +104,21 @@ test("binding loader reports both local and package load failures with install g
     "@aleburato/primeval-linux-x64-gnu",
   ]);
 });
+
+test("binding loader excludes network data before reading the linux process report", () => {
+  const processMock = glibcProcess();
+  const excludeNetworkAtReport = [];
+  const getReport = processMock.report.getReport;
+  processMock.report.getReport = () => {
+    excludeNetworkAtReport.push(processMock.report.excludeNetwork);
+    return getReport();
+  };
+  const run = runGeneratedBindingLoader({
+    processMock,
+    requireImpl: () => ({ NativeTask: class {}, startApproximate() {} }),
+  });
+
+  run();
+
+  assert.deepEqual(excludeNetworkAtReport, [true]);
+});

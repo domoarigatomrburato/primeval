@@ -143,20 +143,20 @@ console.log(result.data.slice(0, 32));
 
 - `input` (required): the encoded image bytes as a `Uint8Array` (a `Buffer` is one). Read files yourself, for example with `readFile` from `node:fs/promises`.
 - `output` (required): `"svg" | "png"`
-- `render` (optional): render options forwarded to Rust; omitted fields use Rust defaults
+- `render` (optional): render options forwarded to Rust; omitted (or `undefined`) fields use Rust defaults, and `null` is rejected like any other wrong type
 - `execution` (optional): progress and cancellation controls
 
 Render options:
 
 - `count?: number` optimization steps, an integer `1..100000`. Higher values improve quality. Default: `100`.
 - `shape?: "any" | "triangle" | "rectangle" | "ellipse" | "circle" | "rotated-rectangle" | "quadratic" | "rotated-ellipse" | "polygon"`. Default: `"any"`.
-- `alpha?: "auto" | number` shape opacity. Use `"auto"` to let the optimizer choose each shape's opacity, or a fixed integer `1..255`. Any other value, including `0`, throws a `ValidationError`. Default: `"auto"`.
+- `alpha?: "auto" | number` shape opacity. Use `"auto"` to let the optimizer choose each shape's opacity, or a fixed integer `1..255`. Any other value, including `0`, rejects with a `ValidationError`. Default: `"auto"`.
 - `seed?: number | bigint` deterministic RNG seed, an integer `0..2^64 - 1`. A `number` seed must be a safe integer (at most `Number.MAX_SAFE_INTEGER`); pass larger seeds as a `bigint`. Omit it to let Rust choose a non-deterministic seed.
 - `background?: "auto" | string` opaque background color. Use `"auto"` (the alpha-weighted mean color of the input, or white for a fully transparent input) or a hex color in `RGB` or `RRGGBB` form, with optional leading `#`. Transparent inputs are flattened onto the background before rendering, so the output is always opaque. Default: `"auto"`.
 - `resizeInput?: number` resolution used during optimization, an integer `2..2048`. Smaller values run faster but capture less detail. Default: `256`.
 - `outputSize?: number` resolution of the final exported image, an integer `2..8192`. Default: `1024`.
 
-Numeric options are checked in Rust: a fraction, `NaN`, or a value outside its range throws a `ValidationError`; nothing is wrapped or truncated.
+Numeric options are checked in Rust: a fraction, `NaN`, or a value outside its range rejects with a `ValidationError`; nothing is wrapped or truncated.
 
 These two options are independent — optimize at low resolution for speed, export at full resolution:
 
@@ -174,8 +174,10 @@ const result = await approximate({
 
 Execution options:
 
-- `onProgress?: (info) => void` receives `{ step, total, score }` after each step, where `total` equals the `count` option and `score` is the current RMSE fit (lower is better).
-- `signal?: AbortSignal` cancels an in-flight render and rejects with `AbortError`.
+- `onProgress?: (info) => void` receives `{ step, total, score }` after each step, where `total` equals the `count` option and `score` is the current RMSE fit (lower is better). If it throws, the render is cancelled, `onProgress` is not called again, and `approximate()` rejects with the value it threw, unchanged.
+- `signal?: AbortSignal` cancels the render and rejects with `AbortError`, whose `cause` is `signal.reason`. An already-aborted signal rejects without starting any work. Once the signal fires before `approximate()` settles, the result is an `AbortError` even if the render had already finished.
+
+`approximate()` is typed per output: a request with `output: "svg"` returns `Promise<SvgResult>` (`data: string`), one with `output: "png"` returns `Promise<PngResult>` (`data: Buffer`), and an `output` typed as `OutputFormat` returns `Promise<ApproximateResult>`, narrowed by `result.format`.
 
 Convert results to a data URI:
 
@@ -194,16 +196,16 @@ const uri = toDataUri(result);
 console.log(uri.slice(0, 64));
 ```
 
-Handle errors by catching typed error classes. Every error the package throws or rejects with extends `PrimevalError`, which has a stable `code` and, for errors from the native layer, a `cause` set to the native error:
+Handle errors by catching typed error classes. `approximate()` never throws synchronously: every failure, including an invalid request and a native addon that fails to load, is a rejected promise. Every error it rejects with extends `PrimevalError`, except the value a throwing `onProgress` threw. A `PrimevalError` has a stable `code` and, for errors from the native layer, a `cause` set to the native error:
 
 | Class | `code` | When |
 | --- | --- | --- |
 | `ValidationError` | `INVALID_OPTION` | an option or request field is invalid |
 | `ValidationError` | `INVALID_IMAGE` | the input is not a decodable JPEG, PNG, or WebP image, is larger than 16384 pixels on a side, or is smaller than 2 x 2 pixels |
 | `AbortError` | `ABORTED` | `execution.signal` cancelled the render |
-| `InternalError` | `INTERNAL` | a failure valid input should not cause, such as an encoder error or a caught native panic |
+| `InternalError` | `INTERNAL` | a failure valid input should not cause, such as a native addon that fails to load, an encoder error, or a caught native panic |
 
-Branch on `instanceof` or `code`, not on the message text.
+Branch on `instanceof` or `code`, not on the message text. When an `INVALID_OPTION` error is about `output` or a `render` option, `error.option` names it (for example `"resizeInput"`) and `error.requirement` says what it accepts (for example `"must be an integer from 2 to 2048"`); the message is `` `${option} ${requirement}` ``.
 
 ```js
 import { approximate, ValidationError } from "@aleburato/primeval";
@@ -307,7 +309,7 @@ CLI notes:
 - When the output path is derived, the CLI prints `output: <path>` on stderr (unless `--quiet`).
 - Progress is shown only when stderr is a terminal: a single line, updated in place, with the step, the total, the score, and the elapsed time.
 - Ctrl-C cancels the render and exits without writing the output; a second Ctrl-C exits immediately.
-- Errors go to stderr; stdout carries only the SVG for `--output -`, `--help`, and `--version`.
+- Errors go to stderr; stdout carries only the SVG for `--output -`, `--help`, and `--version`. Errors about an option name its flag, for example `--resize-input must be an integer from 2 to 2048`.
 - Exit codes: `0` success, `1` runtime error (unreadable input, invalid image data or option values rejected by the renderer, existing output, write failure), `2` usage error (unknown option, missing or extra arguments, a numeric option that is not a non-negative integer, unknown shape, unsupported output extension, empty output path), `130` interrupted by Ctrl-C.
 
 ## Benchmarks

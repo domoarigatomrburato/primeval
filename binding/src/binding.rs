@@ -77,7 +77,10 @@ impl NativeTask {
 /// `{ promise, task }`.
 ///
 /// Errors carry the stable code from [`ApproximateError::code`] as `err.code`.
-#[napi(js_name = "startApproximate")]
+#[napi(
+    js_name = "startApproximate",
+    ts_return_type = "{ promise: Promise<NativeApproximateResult>; task: NativeTask }"
+)]
 pub fn start_approximate(env: &Env, request: NativeApproximateRequest) -> Result<Object<'_>> {
     let NativeApproximateRequest {
         input,
@@ -259,13 +262,23 @@ fn node_message(error: &ApproximateError) -> String {
     message
 }
 
-/// A JavaScript `Error` whose `code` is the stable error code.
+/// A JavaScript `Error` whose `code` is the stable error code. An invalid
+/// option also carries `option` (its Node name) and `requirement`, so other
+/// surfaces such as the CLI can print their own spelling without parsing the
+/// message.
 ///
 /// napi-rs only sets a string `code` on errors it creates from an
 /// `Error<S: AsRef<str>>`; the promise path takes `Error<Status>`, so the
 /// error object is created here and passed through as a reference.
 fn js_error(env: &Env, error: &ApproximateError) -> Error {
     let unknown = JsError::from(Error::new(error.code(), node_message(error))).into_unknown(*env);
+    if let ApproximateError::InvalidOption { option } = error
+        && let Ok(mut object) = Object::from_unknown(unknown)
+    {
+        // Failing to add a property still leaves a usable coded error.
+        let _ = object.set("option", node_option_name(*option));
+        let _ = object.set("requirement", option.requirement());
+    }
     Error::from(unknown)
 }
 
