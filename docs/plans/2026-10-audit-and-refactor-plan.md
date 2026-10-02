@@ -53,7 +53,7 @@ The problems are concentrated at the edges: how binaries are built, how failures
 - The algorithm change ("next") happens after everything in this plan is fixed.
 - Proposing removal of obsolete or low-value formats and features is explicitly welcome (section 11).
 - Formats: output is SVG and PNG only (JPG and GIF output are removed); input is JPEG, PNG and WebP (GIF input is removed).
-- The engine works in RGB only: backgrounds must be opaque, and transparent inputs are composited at decode time (RM-4).
+- The engine works in RGB only (RM-4, PERF-4): backgrounds must be opaque, transparent inputs are composited at decode time, and buffers and kernels are three-channel (16% faster end to end). The score is the RGB RMSE divided by 255.
 
 **Top findings:** none open. The largest measured hotspot (PERF-5, anti-aliased rasterizer interiors) landed in T6: single-threaded `model_step` is 46% faster for polygons and 59% for rotated ellipses, with bit-identical output.
 
@@ -194,7 +194,7 @@ Divan benches live behind each crate's non-default `bench` feature; `examples/qu
 - `Model::step`, first step of a fresh 256×256 model, one worker: rectangle 118 ms, quadratic 61 ms, circle 133 ms, triangle 151 ms, ellipse 162 ms, `any` 174 ms, rotated rectangle 197 ms, rotated ellipse 620 ms, polygon 778 ms.
 - Rasterizing 256 shapes: rectangle 3.3 µs, circle 6.5 µs, ellipse 6.7 µs, triangle 12.5 µs, quadratic 49 µs, rotated rectangle 73 µs, polygon 640 µs, rotated ellipse 1.29 ms.
 - Writers for a 200-shape drawing at 1024 px: SVG 0.22 ms, PNG (render and encode) 32 ms.
-- Full runner: 228.6 s over 90 runs. Quadratic quality is far behind every other kind (score 0.12–0.24 against 0.03–0.05 on the photos).
+- Full runner: 228.6 s over 90 runs. Quadratic quality is far behind every other kind (score 0.12–0.24 against 0.03–0.05 on the photos, on the RGBA scale used before PERF-4; multiply by √(4/3) for today's RGB score).
 
 Since ENG-4 (T5), runner quality is identical across thread counts; times still depend on the machine.
 
@@ -224,12 +224,6 @@ Since ENG-4 (T5), runner quality is identical across thread counts; times still 
   - Keep vector accumulators across the scanline and reduce once per line. The lanes are safe up to lines of about 16k pixels.
   - Compute squares as `vabdq_u8` → `vmull_u8` → `vpadalq_u16`.
   - Low priority while the bottleneck is rasterization.
-
-### PERF-4: The alpha channel is processed even when it cannot change
-
-- **Severity / status:** Medium. Estimated (about 25% of per-pixel lanes). `next: no` (the kernels); the product decision lives in RM-4.
-- **Detail:** with an opaque target and background, the blended alpha provably stays 255, yet `score.rs` blends and squares channel A everywhere. JPEG inputs and the auto background are always opaque.
-- **Fix:** with RM-4 (work in RGB only), use RGB-only kernels (`vld3_u8`) and 3-byte buffers: about 25% less arithmetic and memory traffic.
 
 ### PERF-8: Score the random phase at reduced resolution
 
@@ -288,11 +282,7 @@ All TOOL items landed in T1. Follow-ups:
 
 ## 11. Removals (RM)
 
-The project has never been published, so every removal is free.
-
-| ID | `next` | Remove | Why | What it simplifies |
-| --- | --- | --- | --- | --- |
-| RM-4 | yes (contract landed in T2; kernels are PERF-4) | **Alpha channel in the engine**: work in RGB, composite transparent inputs onto the background at decode time, accept only opaque backgrounds (`RGB` / `RRGGBB`) | ENG-16 inconsistency; about 25% of per-pixel work (PERF-4); simpler kernels; transparent output has little value for this product. PERF-0 measures the gain when PERF-4 lands. | 3-byte buffers, RGB-only NEON (`vld3_u8`), one background rule across SVG and PNG. |
+Done. Every removal landed (the last, RM-4's RGB-only kernels, in T6).
 
 ---
 
@@ -357,7 +347,7 @@ Done. Every ENG item and TEST-4 landed, plus two found on the way: symmetric ell
 
 - [x] PERF-5, PERF-6, PERF-10: coverage evaluated only at span-end pixels, reusable row scratch, integer error-grid sums (bit-identical output)
 - [ ] PERF-1 Prefix sums + early exit
-- [ ] PERF-4 RGB-only kernels (RM-4)
+- [x] PERF-4 RGB-only kernels (RM-4): byte-identical output, 16% faster search on the runner
 - [ ] PERF-8 Reduced-resolution random phase (needs quality metrics)
 - [ ] PERF-11 (docs only)
 - [ ] Deferred until the "next" decision: PERF-2 runtime-dispatched x86 SIMD, PERF-3 NEON accumulator tuning (section 15)
