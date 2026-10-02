@@ -111,6 +111,12 @@ jobs:
       # the install when the cached binary already has that version.
       - run: cargo install wasm-bindgen-cli --locked --version "$(node scripts/build-wasm.mjs wasm-bindgen-version)"
 
+      - run: npm ci
+
+      # Chromium's headless shell for the browser tests, at the version the
+      # Playwright in package-lock.json pins, with its system libraries.
+      - run: npx playwright install --with-deps --only-shell chromium
+
       - run: npm run verify:wasm
 
   hygiene:

@@ -23,6 +23,7 @@ threads = ["dep:wasm-bindgen-rayon"]
 js-sys = "0.3.106"
 primeval-js = { path = "../crates/primeval-js" }
 primeval-render = { path = "../crates/primeval-render" }
+rayon = "1.10"
 wasm-bindgen = "0.2.129"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

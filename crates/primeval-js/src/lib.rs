@@ -150,6 +150,12 @@ pub fn panic_message(payload: &(dyn Any + Send)) -> &str {
         .unwrap_or("non-string panic payload")
 }
 
+/// The internal error a binding reports for a caught or hooked panic, with
+/// the panic message: `render panicked: <message>`.
+pub fn panic_error(payload: &(dyn Any + Send)) -> ApproximateError {
+    ApproximateError::internal(format!("render panicked: {}", panic_message(payload)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,5 +363,16 @@ mod tests {
         assert_eq!(panic_message(&"static"), "static");
         assert_eq!(panic_message(&String::from("formatted")), "formatted");
         assert_eq!(panic_message(&42_u8), "non-string panic payload");
+    }
+
+    #[test]
+    fn panic_error_is_an_internal_error_with_the_panic_message() {
+        let error = panic_error(&String::from("boom 7"));
+
+        assert_eq!(error.code(), "INTERNAL");
+        assert_eq!(
+            js_message(&error),
+            "internal render error: render panicked: boom 7"
+        );
     }
 }

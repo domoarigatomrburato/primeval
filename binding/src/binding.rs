@@ -3,7 +3,7 @@ use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::{Env, JsError};
 use napi_derive::napi;
 use primeval_js::{
-    JsAlpha, JsRenderOptions, JsSeed, js_message, js_option_name, normalize_request, panic_message,
+    JsAlpha, JsRenderOptions, JsSeed, js_message, js_option_name, normalize_request, panic_error,
 };
 use primeval_render::{
     ApproximateError, ApproximateRequest, ApproximateResult, CancellationToken, Execution,
@@ -153,12 +153,7 @@ fn render_request(
 fn catch_panic<T>(
     f: impl FnOnce() -> std::result::Result<T, ApproximateError>,
 ) -> std::result::Result<T, ApproximateError> {
-    catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|payload| {
-        Err(ApproximateError::internal(format!(
-            "render panicked: {}",
-            panic_message(payload.as_ref())
-        )))
-    })
+    catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|payload| Err(panic_error(payload.as_ref())))
 }
 
 impl From<NativeRenderOptions> for JsRenderOptions {

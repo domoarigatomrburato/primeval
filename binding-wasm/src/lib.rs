@@ -6,10 +6,12 @@
 //! synchronously on the calling thread (a Web Worker), an absent seed comes
 //! from `crypto.getRandomValues` because the engine's clock seed cannot run on
 //! `wasm32-unknown-unknown`, and the threaded build (feature `threads`)
-//! exports `initThreadPool` for the rayon pool. `scripts/build-wasm.mjs` builds
-//! both variants.
+//! exports `initThreadPool` for the rayon pool. A panic aborts the instance;
+//! [`set_panic_reporter`] installs a hook that reports its message first.
+//! `scripts/build-wasm.mjs` builds both variants.
 #![warn(missing_docs)]
 
+mod panic;
 mod request;
 
 use js_sys::{Error, Function, Object, Reflect, TypeError, Uint8Array};
@@ -17,6 +19,10 @@ use primeval_js::{JsRenderOptions, js_message, js_option_name, normalize_request
 use primeval_render::{ApproximateError, ApproximateResult, CancellationToken, Execution};
 use request::{JsField, RENDER_FIELDS, fill_seed, render_options};
 use wasm_bindgen::prelude::*;
+
+#[doc(hidden)]
+pub use panic::panic_for_tests;
+pub use panic::set_panic_reporter;
 
 #[cfg(all(target_arch = "wasm32", feature = "threads"))]
 pub use wasm_bindgen_rayon::init_thread_pool;

@@ -280,6 +280,30 @@ test("verify runs the wasm checks", () => {
   const { scripts } = JSON.parse(readRepoFile("package.json"));
 
   assert.equal(scripts["build:wasm"], "node scripts/build-wasm.mjs");
-  assert.equal(scripts["verify:wasm"], "node scripts/build-wasm.mjs clippy && npm run build:wasm");
+  assert.equal(
+    scripts["verify:wasm"],
+    "node scripts/build-wasm.mjs clippy && npm run build:wasm && npm run build && npm run build:node && npm run test:browser",
+  );
+  assert.equal(scripts["test:browser"], "node --test test/browser/*.test.js");
   assert.match(scripts.verify, /npm run verify:wasm/);
+});
+
+test("the browser tests use a pinned Playwright and its Chromium headless shell in CI", () => {
+  const { devDependencies } = JSON.parse(readRepoFile("package.json"));
+  assert.match(
+    devDependencies.playwright,
+    /^\d+\.\d+\.\d+$/,
+    "playwright must be an exact version",
+  );
+
+  const quality = readRepoFile(".github", "workflows", "quality.yml");
+  const wasmJob = quality.slice(quality.indexOf("  wasm-checks:"), quality.indexOf("  hygiene:"));
+  assert.match(wasmJob, /- run: npm ci\n/);
+  // The locally installed (lockfile) Playwright picks the browser version.
+  assert.match(wasmJob, /- run: npx playwright install --with-deps --only-shell chromium\n/);
+  assert.ok(
+    wasmJob.indexOf("npm ci") < wasmJob.indexOf("npx playwright install") &&
+      wasmJob.indexOf("npx playwright install") < wasmJob.indexOf("npm run verify:wasm"),
+    "wasm-checks must install dependencies, then the browser, then verify",
+  );
 });

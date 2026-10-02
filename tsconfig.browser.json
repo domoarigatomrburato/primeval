@@ -3,16 +3,16 @@
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "types": ["node"],
+    "lib": ["ES2022", "DOM"],
+    // No Node types: the browser entry and the code it shares with the Node
+    // entry cannot use `Buffer` or `node:*` modules.
+    "types": [],
     "strict": true,
     "skipLibCheck": true,
-    "resolveJsonModule": true,
     "forceConsistentCasingInFileNames": true,
     "declaration": true,
     "rootDir": "src",
     "outDir": "dist"
   },
-  "include": ["src"],
-  // The browser entry and its runtime, built by tsconfig.browser.json.
-  "exclude": ["src/browser.ts", "src/browser-runtime.ts", "src/worker.ts", "src/worker-protocol.ts"]
+  "files": ["src/browser.ts", "src/worker.ts"]
 }

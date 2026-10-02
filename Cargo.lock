@@ -578,6 +578,7 @@ dependencies = [
  "js-sys",
  "primeval-js",
  "primeval-render",
+ "rayon",
  "wasm-bindgen",
  "wasm-bindgen-rayon",
 ]

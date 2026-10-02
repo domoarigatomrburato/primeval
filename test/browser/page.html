@@ -1,0 +1,26 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>primeval browser tests</title>
+<script type="module">
+  import * as primeval from "/dist/browser.js";
+  // Internal module, not part of the public entry: it holds the panic test path.
+  import * as runtime from "/dist/browser-runtime.js";
+
+  window.primeval = primeval;
+  window.runtime = runtime;
+  window.fixture = async (name) =>
+    new Uint8Array(await (await fetch(`/docs/readme/originals/${name}`)).arrayBuffer());
+  // The fields of an error that the tests compare, as plain data.
+  window.describeError = (error) => ({
+    isError: error instanceof Error,
+    isPrimevalError: error instanceof primeval.PrimevalError,
+    constructorName: error?.constructor?.name,
+    name: error?.name,
+    code: error?.code,
+    message: error?.message,
+    option: error?.option,
+    requirement: error?.requirement,
+    hasOption: error instanceof Error && Object.hasOwn(error, "option"),
+  });
+  window.ready = true;
+</script>
