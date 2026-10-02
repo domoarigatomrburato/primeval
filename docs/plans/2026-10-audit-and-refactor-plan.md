@@ -59,7 +59,7 @@ The problems are concentrated at the edges: how binaries are built, how failures
 
 | # | ID | Finding | Severity | Status |
 | --- | --- | --- | --- | --- |
-| 1 | ENG-2, ENG-3, ENG-4 | Quadratic strokes paint pixels twice (15.4% of shapes). Three engine rasterizers are coarser than the geometry they optimise. "Deterministic" seeds depend on the CPU core count. | Medium | Reproduced, verified |
+| 1 | ENG-2, ENG-3 | Quadratic strokes paint pixels twice (15.4% of shapes). Three engine rasterizers are coarser than the geometry they optimise. | Medium | Reproduced, verified |
 | 2 | PERF-* | No benchmarks exist. Polygon and rotated-ellipse take 51% of the total time and are rasterization-bound (10–32 ns/pixel versus 2–4 for rectangles). | Medium | Measured |
 
 **Carry-over:** of the 100 action items the audit identified, 65 carry over unchanged to a redesigned engine and 13 more partially (section 15, a snapshot taken at audit time). This argues for doing the transferable work first and capping the investment in performance tuning of the current engine.
@@ -178,24 +178,6 @@ CLI-1 to CLI-4 landed with RM-7. Deliberate choices: stdout output is SVG only (
   - Quadratic (0.157): each segment is sampled at the left/top edge of its pixels instead of the centre (half a pixel along its main direction). Related to ENG-2.
 - **Fix:** sample edges at pixel centres in these three rasterizers, then tighten their bounds in `geometry_tests.rs` to the 0.1 used by the other kinds and drop the half-pixel exceptions.
 
-### ENG-4: Seeded output depends on the core count
-
-- **Severity / status:** Medium. Reproduced. `next: partial`: the design principle carries over; this implementation does not.
-- **Where:**
-  - `model.rs:87` seeds each worker with `create_rng(seed + index)`.
-  - `model.rs:130` runs `worker_rounds = 16.div_ceil(worker_count)` rounds per worker.
-  - Render defaults `workers` to `available_parallelism()`.
-- **Evidence:** seed 42, `any`, 50 steps: workers 1, 2, 4, 8 and 12 produce 5 different SVGs. The same configuration repeated gives identical output.
-- **Impact:**
-  - The README promises "`--seed <N>` for deterministic output".
-  - The total search effort also varies: `W · ceil(16/W)` rounds, e.g. 24 with 12 workers.
-  - `seed + index` overflows in debug builds near `u64::MAX`.
-  - The streams overlap: worker 1 with seed s equals worker 0 with seed s+1.
-  - Bit-identical results across platforms are not guaranteed (`sin_cos`, `acos` and `rand_distr` use the platform libm); this part is speculative.
-- **Fix:**
-  - Exactly 16 rounds as independent tasks, each with an RNG derived from `(seed, step, round)`, e.g. ChaCha `set_stream`. The output is then independent of thread count, and the load balances better (PERF-9).
-  - Document the guarantee as "same seed, same version, same platform".
-
 ### Smaller correctness items
 
 | ID | Severity | Status | `next` | Where | Problem | Fix |
@@ -259,7 +241,7 @@ Divan benches live behind each crate's non-default `bench` feature; `examples/qu
 - Writers for a 200-shape drawing at 1024 px: SVG 0.22 ms, PNG (render and encode) 32 ms.
 - Full runner: 228.6 s over 90 runs. Quadratic quality is far behind every other kind (score 0.12–0.24 against 0.03–0.05 on the photos).
 
-Until ENG-4 lands, runner results depend on the core count: compare runs on the same machine only.
+Since ENG-4 (T5), runner quality is identical across thread counts; times still depend on the machine.
 
 ### PERF-1: Per-step precomputation and an exact early exit
 
@@ -322,12 +304,6 @@ Until ENG-4 lands, runner results depend on the core count: compare runs on the 
   - It targets the 75–80% of evaluations that are independent.
   - It changes search behaviour, so it needs PERF-0's quality metrics to accept.
 
-### PERF-9: Task structure and P/E-core imbalance
-
-- **Severity / status:** Medium. Measured (scaling numbers above). `next: partial`: the principle of task-based search decoupled from the thread count carries over.
-- **Where:** `model.rs:129-144` runs one rayon task per worker, each doing `ceil(16/W)` rounds, with a barrier per step. Performance cores wait for efficiency cores, and variable hill-climb lengths leave threads idle.
-- **Fix:** `par_iter` over a fixed `0..16` with `map_init` for a per-thread `WorkerCtx` and per-round RNGs (ENG-4). Work stealing balances P and E cores and makes output independent of the thread count. Optionally accept a caller-provided `ThreadPool`.
-
 ### PERF-10: Copies outside the hot path
 
 - **Severity / status:** Low. Verified. `next: partial` (the render/export layer is reused).
@@ -379,7 +355,6 @@ All TOOL items landed in T1. Follow-ups:
 
 | ID | Severity | Status | `next` | Finding | Fix |
 | --- | --- | --- | --- | --- | --- |
-| DOC-1 | Medium | Reproduced | partial | README promises that are false today: "`--seed <N>` for deterministic output" (ENG-4); errors are mapped to `ValidationError` and `AbortError` (NODE-1, still partly false); an abort "rejects with `AbortError`" (NODE-4). | Fix each claim in the same change as its code fix, as `AGENTS.md` requires. |
 | DOC-2 | Medium | Verified | yes | Missing operational documentation: minimum glibc, CPU baseline, memory sizing (per-format peaks), concurrency guidance for servers, untrusted-input guidance, the limits introduced by RT-5. | A "Deploying" section in the README. |
 | DOC-3 | Low | Verified | yes | The README examples read `docs/readme/originals/monalisa.jpg`, which does not exist for npm consumers. | Use `photo.jpg` with a note, or `process.argv[2]`. |
 | DOC-4 | Low | Verified | yes | The Benchmarks section cannot be reproduced (the script was removed in `e24492d`). | Replace with the PERF-0 script and its output, or remove the section. |
@@ -455,7 +430,6 @@ Required in any case, because the current engine becomes the reference and basel
 
 - [ ] ENG-2 Quadratic duplicates (+ PERF-7)
 - [ ] ENG-3 Triangle, rotated-rectangle and quadratic rasterizers sample at pixel centres; tighten the geometry test bounds
-- [ ] ENG-4 Determinism independent of thread count (+ PERF-9)
 - [ ] ENG-6, ENG-8, ENG-9, ENG-10, ENG-17
 - [ ] TEST-4 Property tests for rasterizers and scoring
 
@@ -472,7 +446,7 @@ Required in any case, because the current engine becomes the reference and basel
 
 Continuous: each ticket updates the README for the behaviour it changes. This ticket is the final pass.
 
-- [ ] DOC-1 to DOC-4, DOC-6, DOC-7, API-7
+- [ ] DOC-2 to DOC-4, DOC-6, DOC-7, API-7; regenerate the README and gallery images, which predate the T2–T5 engine and output changes
 
 ---
 
