@@ -31,6 +31,20 @@ impl State {
         }
     }
 
+    /// A state at a committed shape painted at `alpha`, `1..=255`, whose
+    /// moves change the alpha too when `mode` is [`Alpha::Auto`]; with a
+    /// fixed `mode` the alpha stays `alpha`.
+    #[must_use]
+    pub(crate) fn committed(shape: Shape, mode: Alpha, alpha: u8) -> Self {
+        debug_assert!(alpha > 0, "alpha must be non-zero");
+        Self {
+            shape,
+            auto_alpha: matches!(mode, Alpha::Auto),
+            alpha,
+            cached_energy: None,
+        }
+    }
+
     pub(crate) fn energy<R: Rng>(
         &mut self,
         worker: &mut WorkerCtx<R>,

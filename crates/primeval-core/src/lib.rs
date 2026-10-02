@@ -23,6 +23,7 @@ mod model;
 mod optimize;
 mod prefix;
 mod raster;
+mod refine;
 mod rng;
 mod scanline;
 mod score;

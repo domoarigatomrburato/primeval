@@ -37,6 +37,7 @@ fn cell_span(index: u32, size: u32, count: u32, extent: u32) -> (u32, u32) {
 /// After calling [`compute`](ErrorGrid::compute), the internal CDF allows
 /// [`sample`](ErrorGrid::sample) and [`sample_float`](ErrorGrid::sample_float)
 /// to produce coordinates biased toward high-error cells.
+#[derive(Clone)]
 pub(crate) struct ErrorGrid {
     cols: u32,
     rows: u32,

@@ -6,7 +6,7 @@ use rand::Rng;
 
 /// Reusable storage for [`stroke_quadratic_direct`], kept in each worker so
 /// stroking a curve does not allocate.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct StrokeScratch {
     /// The flattened curve.
     points: Vec<(f64, f64)>,
@@ -343,7 +343,7 @@ fn coverage_to_alpha(covered: u32, sub_rows: usize) -> u32 {
 
 /// Reusable per-row storage for the anti-aliased fills, kept in each worker
 /// so that rasterizing a row neither allocates nor zeroes a fixed array.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct RowScratch {
     /// A polygon row's edge crossings: their x and their sub-row.
     hits: Vec<(f64, usize)>,

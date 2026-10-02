@@ -22,6 +22,7 @@ pub(crate) const MIN_SIDE: u32 = 32;
 
 /// The 2× downsampled target and canvas, kept in sync with the model's
 /// canvas after every committed shape.
+#[derive(Clone)]
 pub(crate) struct Coarse {
     target: Buffer,
     current: Buffer,

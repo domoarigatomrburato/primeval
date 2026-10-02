@@ -261,6 +261,14 @@ fn assert_sums_match(sums: Option<&PrefixSums>, width: u32, height: u32) {
     }
 }
 
+/// The blend's fixed-point weight `k` of a scanline of coverage `coverage`
+/// drawn at `alpha`: [`draw_lines`] scales the canvas by `M − k`, so the
+/// blend weight is `k / M`, and `k = 0` leaves the pixels unchanged.
+#[inline]
+pub(crate) fn blend_weight(alpha: i32, coverage: u32) -> u32 {
+    ColorFit::weight(alpha, coverage)
+}
+
 /// A shape's fitted colour and the old error of the pixels it covers,
 /// which its energy subtracts; see [`fit`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -446,6 +446,40 @@ For the main use case (small SVG placeholders with 50–200 shapes) every shape 
    - determinism under the ENG-4 rules.
 4. Keep the current engine (fixed and correct after T5) as the baseline, and possibly as the fast preset.
 
+### Progress
+
+The protocol's runner is `examples/engine.rs` in `primeval-render` (feature `lab`, see `CONTRIBUTING.md`). It runs one search per image and kind and records checkpoints along it. All numbers below are from it on the M3 (seed 42, the PERF-0 corpus of 5 images × 9 kinds, means over the 45 rows; score is the engine's RGB RMSE, lower is better).
+
+**Baseline (greedy, `5cb04d0`):**
+
+| Shapes | Score | SSIM | Search s (total) | SVG bytes |
+| ---: | ---: | ---: | ---: | ---: |
+| 50 | 0.0941 | 0.631 | 24.5 | 5,229 |
+| 100 | 0.0786 | 0.637 | 41.0 | 10,322 |
+| 200 | 0.0649 | 0.639 | 71.1 | 20,542 |
+| 500 | 0.0474 | 0.658 | 149.2 | 51,252 |
+
+Greedy score falls roughly as `shapes^-0.34` between 200 and 500 shapes, so 10% more shapes buys about 3%.
+
+**A1, refit passes (`Model::refine`, `refine.rs`; not used by `approximate` yet).**
+
+- **Method.** A top-down pass re-optimises each shape at its own layer, against an affine model of the layers above. That model includes the integer pipeline's mean truncation. The pass is then verified on the exact canvas and reverted if it does not improve. It is deterministic across thread counts. Tuned constants: 4 climbs per layer, age 50.
+- **Score change** against greedy at the same shape count, with refine time as a share of greedy time:
+
+| Shapes | 1 pass at the end | 2 passes at the end | 1 pass every 50 shapes |
+| ---: | --- | --- | --- |
+| 50 | −3.2% / 0.20 | −4.6% / 0.36 | −3.2% / 0.20 |
+| 100 | −2.8% / 0.15 | −4.2% / 0.30 | −3.9% / 0.26 |
+| 200 | −2.8% / 0.11 | −4.2% / 0.23 | −5.1% / 0.35 |
+| 500 | −3.6% / 0.09 | −5.4% / 0.17 | −10.1% / 0.58 |
+
+- **Results.**
+  - Every row improves in score, and SSIM rises by about 0.002–0.005.
+  - Triangles and ellipses gain most; `quadratic` gains least (about 2%).
+  - At a fixed shape count, A1 is a real but modest gain.
+  - Per second of compute, it is no better than adding greedy shapes. It therefore matters only where the shape count is fixed, which is the placeholder case.
+- **Still open:** whether and how `approximate` uses it. Refits change shapes already reported through `ProgressInfo`, so the progress contract (each step's shape is the SVG's line) needs a decision first.
+
 ---
 
 ## Appendix A: measurements and reproduction
