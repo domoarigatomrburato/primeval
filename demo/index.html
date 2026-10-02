@@ -283,19 +283,21 @@
         </details>
 
         <div class="actions">
-          <button id="run" class="button button-primary" type="submit">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" /></svg>
-            Run
-          </button>
+          <div class="run-group">
+            <button id="run" class="button button-primary" type="submit">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z" /></svg>
+              Run
+            </button>
+            <label class="auto-run" title="Renders again when a setting changes">
+              <input id="auto-run" class="switch" type="checkbox" role="switch" checked aria-describedby="auto-run-hint" />
+              <span class="switch-label">Auto-run</span>
+            </label>
+            <span id="auto-run-hint" class="visually-hidden">Renders again when a setting changes.</span>
+          </div>
           <button id="stop" class="button button-secondary" type="button" disabled>
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="1.5" /></svg>
             Stop
           </button>
-          <div class="auto-run">
-            <input id="auto-run" class="switch" type="checkbox" role="switch" checked aria-describedby="auto-run-hint" />
-            <label class="switch-label" for="auto-run">Auto-run</label>
-            <span id="auto-run-hint" class="hint">Renders again when a setting changes.</span>
-          </div>
         </div>
 
         <div id="error" class="error" role="alert" hidden>
