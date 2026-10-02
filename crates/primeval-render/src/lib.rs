@@ -48,7 +48,7 @@ mod output;
 mod raster;
 mod svg;
 
-use image::{DynamicImage, ImageReader, Limits, RgbaImage};
+use image::{DynamicImage, ImageReader, Limits, RgbImage, RgbaImage};
 use input::{average_background, thumbnail};
 use output::output_dimensions;
 use primeval_core::{Buffer, Drawing, Model, ModelOptions};
@@ -410,7 +410,7 @@ pub fn approximate(
     execution.check_cancelled()?;
     let (working, background) = prepare_target(image, render.background, render.resize_input);
     let (width, height) = working.dimensions();
-    let target = Buffer::from_rgba(width, height, working.into_raw())
+    let target = Buffer::from_rgb(width, height, working.into_raw())
         .ok_or_else(|| ApproximateError::internal("working image has an invalid pixel length"))?;
     let mut options = ModelOptions::default();
     options.seed = render.seed;
@@ -517,16 +517,16 @@ fn decode_input(bytes: &[u8]) -> Result<DynamicImage, ApproximateError> {
 /// Resolve the background, flatten the image onto it, and build the
 /// working-resolution target.
 ///
-/// The target is always opaque: every pixel is composited onto the opaque
-/// background, which leaves already-opaque pixels unchanged. Opaque inputs
-/// are read in place; only inputs with alpha that are not 8-bit RGBA are
-/// converted at full resolution. The full-resolution image is dropped once
-/// the thumbnail exists.
+/// The target is always opaque RGB: every pixel is composited onto the
+/// opaque background, which leaves already-opaque pixels unchanged. Opaque
+/// inputs are read in place; only inputs with alpha that are not 8-bit RGBA
+/// are converted at full resolution. The full-resolution image is dropped
+/// once the thumbnail exists.
 fn prepare_target(
     image: DynamicImage,
     background: BackgroundOption,
     resize_input: u32,
-) -> (RgbaImage, Color) {
+) -> (RgbImage, Color) {
     let background = match background {
         BackgroundOption::Auto => average_background(&image),
         BackgroundOption::Color(color) => color,
@@ -561,7 +561,7 @@ fn flatten_onto(image: &mut RgbaImage, background: Color) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
+    use image::{DynamicImage, ImageFormat, Rgb, Rgba, RgbaImage};
     use std::error::Error as _;
 
     fn fixture_image() -> DynamicImage {
@@ -1108,9 +1108,9 @@ mod tests {
         );
 
         assert_eq!(resolved, background);
-        assert_eq!(target.get_pixel(0, 0), &Rgba([0, 50, 255, 255]));
+        assert_eq!(target.get_pixel(0, 0), &Rgb([0, 50, 255]));
         // (c*a + bg*(255-a) + 127) / 255 with a = 128.
-        assert_eq!(target.get_pixel(1, 0), &Rgba([100, 75, 127, 255]));
+        assert_eq!(target.get_pixel(1, 0), &Rgb([100, 75, 127]));
     }
 
     #[test]
@@ -1128,11 +1128,7 @@ mod tests {
             prepare_target(DynamicImage::ImageRgba8(image), BackgroundOption::Auto, 16);
 
         assert_eq!(background, Color::new(255, 0, 0, 255));
-        assert!(
-            target
-                .pixels()
-                .all(|pixel| pixel == &Rgba([255, 0, 0, 255]))
-        );
+        assert!(target.pixels().all(|pixel| pixel == &Rgb([255, 0, 0])));
     }
 
     #[test]
@@ -1143,11 +1139,7 @@ mod tests {
             prepare_target(DynamicImage::ImageRgba8(image), BackgroundOption::Auto, 16);
 
         assert_eq!(background, Color::new(255, 255, 255, 255));
-        assert!(
-            target
-                .pixels()
-                .all(|pixel| pixel == &Rgba([255, 255, 255, 255]))
-        );
+        assert!(target.pixels().all(|pixel| pixel == &Rgb([255, 255, 255])));
     }
 
     #[test]

@@ -71,9 +71,10 @@ impl Model {
 
     /// Starts a search for `target` from a canvas filled with `background`.
     ///
-    /// `target` is at least 2 x 2 pixels: [`Buffer::from_rgba`] rejects
+    /// `target` is at least 2 x 2 pixels: [`Buffer::from_rgb`] rejects
     /// anything smaller, so a model for an empty or one-pixel-wide canvas
-    /// cannot be created.
+    /// cannot be created. The canvas is opaque RGB, so `background` should
+    /// be opaque: its alpha is ignored.
     #[must_use]
     pub fn new(target: Buffer, background: Color, options: ModelOptions) -> Self {
         let target_width = target.width();
@@ -176,8 +177,9 @@ impl Model {
         self.history.push(CommittedShape { shape, color });
     }
 
-    /// Normalized difference between the canvas and the target: `0.0` is a
-    /// perfect match.
+    /// Normalized difference between the canvas and the target: the RMSE
+    /// over the RGB channels divided by 255, so `0.0` is a perfect match and
+    /// `1.0` is black against white.
     #[must_use]
     pub fn score_f64(&self) -> f64 {
         score::raw_score_to_normalized(self.score, self.current.width(), self.current.height())
@@ -245,9 +247,9 @@ mod tests {
         let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0xadd);
         for (index, &kind) in ShapeKind::all_kinds().iter().enumerate() {
             for (width, height) in [(2, 2), (23, 17), (40, 9)] {
-                let mut pixels = vec![0_u8; (width * height * 4) as usize];
+                let mut pixels = vec![0_u8; (width * height * 3) as usize];
                 rng.fill(&mut pixels[..]);
-                let target = Buffer::from_rgba(width, height, pixels).expect("valid length");
+                let target = Buffer::from_rgb(width, height, pixels).expect("valid length");
                 let background = Color::new(rng.random(), rng.random(), rng.random(), 255);
                 let mut model = Model::new(target, background, ModelOptions::default());
                 let (mut worker, round) = make_test_round(width, height, index as u64);
@@ -342,9 +344,9 @@ mod tests {
 
         let (width, height) = (16, 12);
         let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0x5eed);
-        let mut pixels = vec![0_u8; (width * height * 4) as usize];
+        let mut pixels = vec![0_u8; (width * height * 3) as usize];
         rng.fill(&mut pixels[..]);
-        let target = Buffer::from_rgba(width, height, pixels).expect("valid length");
+        let target = Buffer::from_rgb(width, height, pixels).expect("valid length");
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .build()

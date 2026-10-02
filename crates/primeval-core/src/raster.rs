@@ -721,8 +721,8 @@ mod tests {
         let center = expected_mask.pix_offset(32, 32);
 
         assert_eq!(
-            actual_mask.pixels()[center..center + 4],
-            expected_mask.pixels()[center..center + 4]
+            actual_mask.pixels()[center..center + 3],
+            expected_mask.pixels()[center..center + 3]
         );
         assert!(diff < 0.08, "diff={diff}");
     }

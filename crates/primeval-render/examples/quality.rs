@@ -30,10 +30,10 @@
 //! - `total_s`: wall time of the whole call, including the PNG render and
 //!   encode at the output size.
 //! - `score`: the engine's final score, the normalised RMSE between the
-//!   canvas and the target at working resolution, over the four RGBA
-//!   channels: `sqrt(Σ Δ² / (w · h · 4)) / 255`. Both sides are opaque, so
-//!   alpha contributes zero difference and this equals `png_rmse`'s RGB
-//!   definition times `sqrt(3 / 4)`.
+//!   canvas and the target at working resolution, over the RGB channels:
+//!   `sqrt(Σ Δ² / (w · h · 3)) / 255`, the same definition as `png_rmse`.
+//!   Tables from before the engine became RGB-only measured four RGBA
+//!   channels, which gives this value times `sqrt(3 / 4)`.
 //! - `png_rmse`: the normalised RMSE over the RGB channels between the
 //!   rendered PNG at output size and the input resampled to the same size
 //!   (Catmull-Rom, the filter the engine uses for its working thumbnail):

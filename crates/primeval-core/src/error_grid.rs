@@ -110,20 +110,16 @@ impl ErrorGrid {
                         break;
                     }
 
-                    let i_start = (y as usize * img_w as usize + x_start as usize) * 4;
-                    let i_end = i_start + (x_end - x_start) as usize * 4;
+                    let i_start = target.pix_offset(x_start as i32, y as i32);
+                    let i_end = target.pix_offset(x_end as i32, y as i32);
                     // Sum the cell's part of this row in integers, which is
-                    // exact, and convert once.
+                    // exact, and convert once. Every byte is a colour channel.
                     let row_error: u64 = t_pix[i_start..i_end]
-                        .as_chunks::<4>()
-                        .0
                         .iter()
-                        .zip(c_pix[i_start..i_end].as_chunks::<4>().0)
-                        .map(|(t, c)| {
-                            let dr = i32::from(t[0]) - i32::from(c[0]);
-                            let dg = i32::from(t[1]) - i32::from(c[1]);
-                            let db = i32::from(t[2]) - i32::from(c[2]);
-                            (dr * dr + dg * dg + db * db) as u64
+                        .zip(&c_pix[i_start..i_end])
+                        .map(|(&t, &c)| {
+                            let d = i32::from(t) - i32::from(c);
+                            (d * d) as u64
                         })
                         .sum();
                     self.errors[err_row_base + col_idx as usize] += row_error as f64;
@@ -288,8 +284,8 @@ mod tests {
             let (w, h) = (rng.random_range(2..40), rng.random_range(2..40));
             let (cols, rows) = (rng.random_range(1..12), rng.random_range(1..12));
             let mut random_buffer = || {
-                let pixels = (0..w * h * 4).map(|_| rng.random::<u8>()).collect();
-                Buffer::from_rgba(w, h, pixels).expect("valid buffer")
+                let pixels = (0..w * h * 3).map(|_| rng.random::<u8>()).collect();
+                Buffer::from_rgb(w, h, pixels).expect("valid buffer")
             };
             let (target, current) = (random_buffer(), random_buffer());
             let mut g = ErrorGrid::new(w, h, cols, rows);
@@ -509,7 +505,7 @@ mod tests {
         // Make right half different: target white, current black.
         for y in 0..10u32 {
             for x in 5..10u32 {
-                let off = (y as usize * 10 + x as usize) * 4;
+                let off = (y as usize * 10 + x as usize) * 3;
                 let tp = target.pixels_mut();
                 tp[off] = 255;
                 tp[off + 1] = 255;

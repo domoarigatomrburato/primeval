@@ -3,13 +3,16 @@
 /// [`Model`](crate::Model) cannot be created for anything smaller.
 const MIN_PUBLIC_SIDE: u32 = 2;
 
-/// A contiguous RGBA pixel buffer with no row padding.
+/// Bytes per pixel: the engine works in opaque RGB, with no alpha channel.
+pub(crate) const BYTES_PER_PIXEL: usize = 3;
+
+/// A contiguous, opaque RGB pixel buffer with no row padding.
 ///
-/// Pixels are stored in row-major order as `[R, G, B, A]` quads.
-/// The total byte length is always exactly `width * height * 4`; every
+/// Pixels are stored in row-major order as `[R, G, B]` triples.
+/// The total byte length is always exactly `width * height * 3`; every
 /// constructor checks this with a hard assertion or rejects the input, and the
 /// unsafe NEON scoring kernels rely on it. Buffers built through the public API
-/// ([`Buffer::from_rgba`]) are also at least 2 x 2 pixels.
+/// ([`Buffer::from_rgb`]) are also at least 2 x 2 pixels.
 #[derive(Clone, Debug)]
 pub struct Buffer {
     width: u32,
@@ -22,7 +25,7 @@ impl Buffer {
     ///
     /// # Panics
     ///
-    /// Panics if `width * height * 4` overflows `usize`.
+    /// Panics if `width * height * 3` overflows `usize`.
     #[cfg(test)]
     #[must_use]
     pub(crate) fn new(width: u32, height: u32) -> Self {
@@ -30,25 +33,26 @@ impl Buffer {
         Self::from_parts(width, height, vec![0u8; len])
     }
 
-    /// Creates a buffer filled with a single color.
+    /// Creates a buffer filled with the RGB channels of a single color; its
+    /// alpha is ignored.
     ///
     /// # Panics
     ///
-    /// Panics if `width * height * 4` overflows `usize`.
+    /// Panics if `width * height * 3` overflows `usize`.
     #[must_use]
     pub(crate) fn new_from_color(width: u32, height: u32, color: crate::Color) -> Self {
         let len = pixel_byte_len(width, height);
-        let pixels = [color.r, color.g, color.b, color.a].repeat(len / 4);
+        let pixels = [color.r, color.g, color.b].repeat(len / BYTES_PER_PIXEL);
         Self::from_parts(width, height, pixels)
     }
 
     /// Assembles a buffer, asserting the length invariant
-    /// `pixels.len() == width * height * 4` that the NEON kernels rely on.
+    /// `pixels.len() == width * height * 3` that the NEON kernels rely on.
     fn from_parts(width: u32, height: u32, pixels: Vec<u8>) -> Self {
         assert_eq!(
             pixels.len(),
             pixel_byte_len(width, height),
-            "buffer pixel length must be width * height * 4"
+            "buffer pixel length must be width * height * 3"
         );
         Self {
             width,
@@ -91,22 +95,25 @@ impl Buffer {
     #[must_use]
     #[inline]
     pub(crate) fn pix_offset(&self, x: i32, y: i32) -> usize {
-        (y as usize * self.width as usize + x as usize) * 4
+        (y as usize * self.width as usize + x as usize) * BYTES_PER_PIXEL
     }
 
-    /// Creates a buffer from raw row-major RGBA bytes.
+    /// Creates a buffer from raw row-major RGB bytes, three per pixel.
+    ///
+    /// The engine works in opaque RGB: composite any transparent image onto
+    /// an opaque background before building its buffer.
     ///
     /// Returns `None` unless both sides are at least 2 pixels (the smallest
     /// canvas the engine supports) and `pixels.len()` is exactly
-    /// `width * height * 4`.
+    /// `width * height * 3`.
     #[must_use]
-    pub fn from_rgba(width: u32, height: u32, pixels: Vec<u8>) -> Option<Self> {
+    pub fn from_rgb(width: u32, height: u32, pixels: Vec<u8>) -> Option<Self> {
         if width < MIN_PUBLIC_SIDE || height < MIN_PUBLIC_SIDE {
             return None;
         }
         let len = (width as usize)
             .checked_mul(height as usize)?
-            .checked_mul(4)?;
+            .checked_mul(BYTES_PER_PIXEL)?;
         (pixels.len() == len).then(|| Self::from_parts(width, height, pixels))
     }
 }
@@ -115,7 +122,7 @@ impl Buffer {
 fn pixel_byte_len(width: u32, height: u32) -> usize {
     (width as usize)
         .checked_mul(height as usize)
-        .and_then(|n| n.checked_mul(4))
+        .and_then(|n| n.checked_mul(BYTES_PER_PIXEL))
         .expect("buffer pixel byte length must not overflow usize")
 }
 
@@ -129,7 +136,7 @@ mod tests {
         let buf = Buffer::new(10, 20);
         assert_eq!(buf.width(), 10);
         assert_eq!(buf.height(), 20);
-        assert_eq!(buf.pixels().len(), 10 * 20 * 4);
+        assert_eq!(buf.pixels().len(), 10 * 20 * 3);
     }
 
     #[test]
@@ -139,12 +146,12 @@ mod tests {
     }
 
     #[test]
-    fn new_from_color_fills_correctly() {
-        let c = Color::new(10, 20, 30, 255);
+    fn new_from_color_fills_the_rgb_channels() {
+        let c = Color::new(10, 20, 30, 128);
         let buf = Buffer::new_from_color(2, 2, c);
-        assert_eq!(buf.pixels().len(), 2 * 2 * 4);
-        for chunk in buf.pixels().as_chunks::<4>().0 {
-            assert_eq!(*chunk, [10, 20, 30, 255]);
+        assert_eq!(buf.pixels().len(), 2 * 2 * 3);
+        for chunk in buf.pixels().as_chunks::<3>().0 {
+            assert_eq!(*chunk, [10, 20, 30]);
         }
     }
 
@@ -153,37 +160,39 @@ mod tests {
         let buf = Buffer::new(10, 10);
         // Pixel (0, 0) -> offset 0
         assert_eq!(buf.pix_offset(0, 0), 0);
-        // Pixel (1, 0) -> offset 4
-        assert_eq!(buf.pix_offset(1, 0), 4);
-        // Pixel (0, 1) -> offset 10*4 = 40
-        assert_eq!(buf.pix_offset(0, 1), 40);
-        // Pixel (3, 2) -> (2*10 + 3)*4 = 92
-        assert_eq!(buf.pix_offset(3, 2), 92);
+        // Pixel (1, 0) -> offset 3
+        assert_eq!(buf.pix_offset(1, 0), 3);
+        // Pixel (0, 1) -> offset 10*3 = 30
+        assert_eq!(buf.pix_offset(0, 1), 30);
+        // Pixel (3, 2) -> (2*10 + 3)*3 = 69
+        assert_eq!(buf.pix_offset(3, 2), 69);
     }
 
     #[test]
-    fn from_rgba_keeps_dimensions_and_pixels() {
-        let pixels: Vec<u8> = (0..24).collect();
-        let buf = Buffer::from_rgba(3, 2, pixels.clone()).expect("valid length");
+    fn from_rgb_keeps_dimensions_and_pixels() {
+        let pixels: Vec<u8> = (0..18).collect();
+        let buf = Buffer::from_rgb(3, 2, pixels.clone()).expect("valid length");
         assert_eq!((buf.width(), buf.height()), (3, 2));
         assert_eq!(buf.pixels(), pixels.as_slice());
     }
 
     #[test]
-    fn from_rgba_rejects_wrong_length() {
-        assert!(Buffer::from_rgba(3, 2, vec![0; 23]).is_none());
-        assert!(Buffer::from_rgba(3, 2, vec![0; 25]).is_none());
-        assert!(Buffer::from_rgba(u32::MAX, u32::MAX, Vec::new()).is_none());
+    fn from_rgb_rejects_wrong_length() {
+        assert!(Buffer::from_rgb(3, 2, vec![0; 17]).is_none());
+        assert!(Buffer::from_rgb(3, 2, vec![0; 19]).is_none());
+        // The RGBA length of the same image is rejected too.
+        assert!(Buffer::from_rgb(3, 2, vec![0; 24]).is_none());
+        assert!(Buffer::from_rgb(u32::MAX, u32::MAX, Vec::new()).is_none());
     }
 
     #[test]
-    fn from_rgba_rejects_sides_below_two() {
-        assert!(Buffer::from_rgba(0, 0, Vec::new()).is_none());
-        assert!(Buffer::from_rgba(0, 5, Vec::new()).is_none());
-        assert!(Buffer::from_rgba(1, 1, vec![0; 4]).is_none());
-        assert!(Buffer::from_rgba(1, 5, vec![0; 20]).is_none());
-        assert!(Buffer::from_rgba(5, 1, vec![0; 20]).is_none());
-        assert!(Buffer::from_rgba(2, 2, vec![0; 16]).is_some());
+    fn from_rgb_rejects_sides_below_two() {
+        assert!(Buffer::from_rgb(0, 0, Vec::new()).is_none());
+        assert!(Buffer::from_rgb(0, 5, Vec::new()).is_none());
+        assert!(Buffer::from_rgb(1, 1, vec![0; 3]).is_none());
+        assert!(Buffer::from_rgb(1, 5, vec![0; 15]).is_none());
+        assert!(Buffer::from_rgb(5, 1, vec![0; 15]).is_none());
+        assert!(Buffer::from_rgb(2, 2, vec![0; 12]).is_some());
     }
 
     #[test]

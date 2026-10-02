@@ -174,7 +174,7 @@ const result = await approximate({
 
 Execution options:
 
-- `onProgress?: (info) => void` receives `{ step, total, score }` after each step, where `total` equals the `count` option and `score` is the current RMSE fit (lower is better). If it throws, the render is cancelled, `onProgress` is not called again, and `approximate()` rejects with the value it threw, unchanged.
+- `onProgress?: (info) => void` receives `{ step, total, score }` after each step, where `total` equals the `count` option and `score` is the current fit: the RMSE between the working canvas and the resized input over the RGB channels, divided by 255, from `0` (exact) to `1` (lower is better). If it throws, the render is cancelled, `onProgress` is not called again, and `approximate()` rejects with the value it threw, unchanged.
 - `signal?: AbortSignal` cancels the render and rejects with `AbortError`, whose `cause` is `signal.reason`. An already-aborted signal rejects without starting any work. Once the signal fires before `approximate()` settles, the result is an `AbortError` even if the render had already finished.
 
 `approximate()` is typed per output: a request with `output: "svg"` returns `Promise<SvgResult>` (`data: string`), one with `output: "png"` returns `Promise<PngResult>` (`data: Buffer`), and an `output` typed as `OutputFormat` returns `Promise<ApproximateResult>`, narrowed by `result.format`.

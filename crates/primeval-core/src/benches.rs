@@ -68,7 +68,7 @@ fn synthetic_target() -> Buffer {
         (180.0, 96.0, 52.0, [30, 160, 70]),
         (120.0, 190.0, 34.0, [40, 60, 200]),
     ];
-    let mut pixels = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+    let mut pixels = Vec::with_capacity((SIZE * SIZE * 3) as usize);
     for y in 0..SIZE {
         for x in 0..SIZE {
             let (xf, yf) = (f64::from(x), f64::from(y));
@@ -81,10 +81,10 @@ fn synthetic_target() -> Buffer {
             if x >= 192 && y >= 192 && (x / 2 + y / 3) % 2 == 0 {
                 rgb = [250, 250, 250];
             }
-            pixels.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
+            pixels.extend_from_slice(&rgb);
         }
     }
-    Buffer::from_rgba(SIZE, SIZE, pixels).expect("pixel length matches the size")
+    Buffer::from_rgb(SIZE, SIZE, pixels).expect("pixel length matches the size")
 }
 
 /// Target, canvas and the error grid of the first search step.

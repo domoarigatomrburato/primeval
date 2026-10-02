@@ -355,7 +355,6 @@ mod tests {
         let tp = target.pixels_mut();
         // Make pixel (0,0) bright red
         tp[0] = 255;
-        tp[3] = 255;
 
         let current = Buffer::new(4, 4);
         let mut grid = ErrorGrid::new(4, 4, 2, 2);

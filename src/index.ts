@@ -98,7 +98,11 @@ export type ProgressInfo = {
   step: number;
   /** The total number of steps, equal to the `count` option. */
   total: number;
-  /** The current RMSE fit; lower is better. */
+  /**
+   * The current fit: the RMSE between the working canvas and the resized
+   * input over the RGB channels, divided by 255, from 0 (exact) to 1; lower
+   * is better.
+   */
   score: number;
 };
 
