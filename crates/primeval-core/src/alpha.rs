@@ -37,10 +37,14 @@ impl TryFrom<u32> for Alpha {
 impl FromStr for Alpha {
     type Err = ParseError;
 
-    /// Parses `auto` (any ASCII case) or an integer `1..=255`.
+    /// Parses `auto` or a decimal integer `1..=255` (ASCII digits only, no
+    /// sign), matching what the CLI and the TypeScript types accept.
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        if value.eq_ignore_ascii_case("auto") {
+        if value == "auto" {
             return Ok(Self::Auto);
+        }
+        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(ParseError::new(INVALID_ALPHA));
         }
         let parsed: u32 = value.parse().map_err(|_| ParseError::new(INVALID_ALPHA))?;
         Self::try_from(parsed)
@@ -58,7 +62,7 @@ mod tests {
     #[test]
     fn parses_auto_and_fixed_values() {
         assert_eq!("auto".parse::<Alpha>(), Ok(Alpha::Auto));
-        assert_eq!("AUTO".parse::<Alpha>(), Ok(Alpha::Auto));
+        assert_eq!("0012".parse::<Alpha>(), Ok(fixed(12)));
         assert_eq!("1".parse::<Alpha>(), Ok(fixed(1)));
         assert_eq!("128".parse::<Alpha>(), Ok(fixed(128)));
         assert_eq!("255".parse::<Alpha>(), Ok(fixed(255)));
@@ -66,7 +70,9 @@ mod tests {
 
     #[test]
     fn rejects_zero_out_of_range_and_non_integers() {
-        for value in ["0", "256", "-1", "1.5", "", "half", "+0"] {
+        for value in [
+            "0", "256", "-1", "1.5", "", "half", "+0", "+12", "AUTO", "Auto", " 12",
+        ] {
             assert_eq!(
                 value.parse::<Alpha>(),
                 Err(ParseError::new(INVALID_ALPHA)),

@@ -84,10 +84,10 @@ fn random_string(rng: &mut impl Rng) -> String {
 }
 
 fn is_valid_alpha(value: &str) -> bool {
-    if value.eq_ignore_ascii_case("auto") {
+    if value == "auto" {
         return true;
     }
-    let digits = value.strip_prefix('+').unwrap_or(value);
+    let digits = value;
     if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
         return false;
     }
@@ -96,7 +96,7 @@ fn is_valid_alpha(value: &str) -> bool {
 }
 
 fn is_valid_background(value: &str) -> bool {
-    if value.eq_ignore_ascii_case("auto") {
+    if value == "auto" {
         return true;
     }
     let digits = value.strip_prefix('#').unwrap_or(value);

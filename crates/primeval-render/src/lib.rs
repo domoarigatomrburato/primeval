@@ -98,10 +98,10 @@ pub enum BackgroundOption {
 impl FromStr for BackgroundOption {
     type Err = ParseError;
 
-    /// Parses `auto` (any ASCII case) or an opaque hex color (`RGB` or
-    /// `RRGGBB`, optional leading `#`).
+    /// Parses `auto` or an opaque hex color (`RGB` or `RRGGBB`, optional
+    /// leading `#`).
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        if value.eq_ignore_ascii_case("auto") {
+        if value == "auto" {
             return Ok(Self::Auto);
         }
 
@@ -616,17 +616,19 @@ mod tests {
     #[test]
     fn background_parses_auto_and_hex_colors() {
         assert_eq!("auto".parse(), Ok(BackgroundOption::Auto));
-        assert_eq!("AUTO".parse(), Ok(BackgroundOption::Auto));
         assert_eq!(
             "#112233".parse(),
             Ok(BackgroundOption::Color(Color::new(0x11, 0x22, 0x33, 0xFF)))
         );
-        assert_eq!(
-            "not-a-color".parse::<BackgroundOption>(),
-            Err(ParseError::new(
-                "background must be auto or an opaque hex color (RGB or RRGGBB)"
-            ))
-        );
+        for value in ["AUTO", "Auto", "not-a-color"] {
+            assert_eq!(
+                value.parse::<BackgroundOption>(),
+                Err(ParseError::new(
+                    "background must be auto or an opaque hex color (RGB or RRGGBB)"
+                )),
+                "{value:?}"
+            );
+        }
     }
 
     #[test]

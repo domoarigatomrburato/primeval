@@ -93,8 +93,8 @@ const CASES = [
   apiOnly("shape", null),
 
   accepts("alpha", undefined),
-  ...["auto", 1, 128, 255].map((value) => accepts("alpha", value)),
-  ...[0, 256, -1, 1.5, "half", ""].map((value) => outOfRange("alpha", value)),
+  ...["auto", 1, 128, 255, "0012"].map((value) => accepts("alpha", value)),
+  ...[0, 256, -1, 1.5, "half", "", "AUTO", "+12"].map((value) => outOfRange("alpha", value)),
   apiOnly("alpha", true),
   apiOnly("alpha", null),
 
@@ -108,10 +108,8 @@ const CASES = [
   apiOnly("seed", null),
 
   accepts("background", undefined),
-  ...["auto", "AUTO", "#abc", "abc", "#336699", "336699"].map((value) =>
-    accepts("background", value),
-  ),
-  ...["#1234", "#11223344", "a€bc", "", "red", " #abc", "##abc"].map((value) =>
+  ...["auto", "#abc", "abc", "#336699", "336699"].map((value) => accepts("background", value)),
+  ...["#1234", "#11223344", "a€bc", "", "red", " #abc", "##abc", "AUTO"].map((value) =>
     outOfRange("background", value),
   ),
   apiOnly("background", 123),
