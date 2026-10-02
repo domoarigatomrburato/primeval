@@ -2,12 +2,13 @@ use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::{Env, JsError};
 use napi_derive::napi;
-use primeval_render::{
-    Alpha, ApproximateError, ApproximateRequest, ApproximateResult, BackgroundOption,
-    CancellationToken, Execution, OutputFormat, PartialRenderOptions, ProgressInfo, RenderOption,
-    RenderOptions, ShapeKind, approximate,
+use primeval_js::{
+    JsAlpha, JsRenderOptions, JsSeed, js_message, js_option_name, normalize_request, panic_message,
 };
-use std::any::Any;
+use primeval_render::{
+    ApproximateError, ApproximateRequest, ApproximateResult, CancellationToken, Execution,
+    ProgressInfo, approximate,
+};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 #[napi(object, object_to_js = false)]
@@ -89,8 +90,8 @@ pub fn start_approximate(env: &Env, request: NativeApproximateRequest) -> Result
         execution,
     } = request;
     let progress = execution.and_then(|execution| execution.on_progress);
-    let request =
-        normalize_request(input, output, render).map_err(|error| js_error(env, &error))?;
+    let request = normalize_request(input.into(), &output, render.into())
+        .map_err(|error| js_error(env, &error))?;
     let token = CancellationToken::new();
     let task_token = token.clone();
 
@@ -160,110 +161,38 @@ fn catch_panic<T>(
     })
 }
 
-fn panic_message(payload: &(dyn Any + Send)) -> &str {
-    payload
-        .downcast_ref::<&str>()
-        .copied()
-        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-        .unwrap_or("non-string panic payload")
-}
-
-/// Parses the explicit fields and leaves omitted ones to the Rust defaults.
-fn normalize_request(
-    input: Buffer,
-    output: String,
-    render: NativeRenderOptions,
-) -> std::result::Result<ApproximateRequest, ApproximateError> {
-    let invalid = ApproximateError::invalid_option;
-    let output = output
-        .parse::<OutputFormat>()
-        .map_err(|_| invalid(RenderOption::Output))?;
-
-    let mut partial = PartialRenderOptions::default();
-    if let Some(count) = render.count {
-        partial.set_number(RenderOption::Count, count)?;
-    }
-    partial.shape = render
-        .shape
-        .as_deref()
-        .map(str::parse::<ShapeKind>)
-        .transpose()
-        .map_err(|_| invalid(RenderOption::Shape))?;
-    match render.alpha {
-        Some(Either::A(alpha)) => partial.set_number(RenderOption::Alpha, alpha)?,
-        Some(Either::B(alpha)) => {
-            partial.alpha = Some(
-                alpha
-                    .parse::<Alpha>()
-                    .map_err(|_| invalid(RenderOption::Alpha))?,
-            );
+impl From<NativeRenderOptions> for JsRenderOptions {
+    fn from(render: NativeRenderOptions) -> Self {
+        Self {
+            count: render.count,
+            shape: render.shape,
+            alpha: render.alpha.map(|alpha| match alpha {
+                Either::A(alpha) => JsAlpha::Number(alpha),
+                Either::B(alpha) => JsAlpha::Text(alpha),
+            }),
+            seed: render.seed.map(|seed| match seed {
+                Either::A(seed) => JsSeed::Number(seed),
+                Either::B(seed) => bigint_seed(&seed),
+            }),
+            background: render.background,
+            resize_input: render.resize_input,
+            output_size: render.output_size,
         }
-        None => {}
     }
-    partial.background = render
-        .background
-        .as_deref()
-        .map(str::parse::<BackgroundOption>)
-        .transpose()
-        .map_err(|_| invalid(RenderOption::Background))?;
-    match render.seed {
-        Some(Either::A(seed)) => partial.set_number(RenderOption::Seed, seed)?,
-        Some(Either::B(seed)) => partial.seed = Some(bigint_seed(&seed)?),
-        None => {}
-    }
-    if let Some(resize_input) = render.resize_input {
-        partial.set_number(RenderOption::ResizeInput, resize_input)?;
-    }
-    if let Some(output_size) = render.output_size {
-        partial.set_number(RenderOption::OutputSize, output_size)?;
-    }
-
-    Ok(ApproximateRequest {
-        input: input.into(),
-        output,
-        render: RenderOptions::default().merge(partial),
-    })
 }
 
 /// A `bigint` seed must be in `0..=u64::MAX`.
-fn bigint_seed(seed: &BigInt) -> std::result::Result<u64, ApproximateError> {
+fn bigint_seed(seed: &BigInt) -> JsSeed {
     let (negative, value, lossless) = seed.get_u64();
     if negative || !lossless {
-        return Err(ApproximateError::invalid_option(RenderOption::Seed));
+        JsSeed::BigIntOutOfRange
+    } else {
+        JsSeed::BigInt(value)
     }
-    Ok(value)
-}
-
-/// The Node spelling of an option name. This is the only place that maps
-/// Rust option names to Node ones.
-fn node_option_name(option: RenderOption) -> &'static str {
-    match option {
-        RenderOption::ResizeInput => "resizeInput",
-        RenderOption::OutputSize => "outputSize",
-        other => other.name(),
-    }
-}
-
-/// The message Node callers see: option names in Node spelling, followed by
-/// the chain of error sources.
-fn node_message(error: &ApproximateError) -> String {
-    let mut message = match error {
-        ApproximateError::InvalidOption { option } => {
-            format!("{} {}", node_option_name(*option), option.requirement())
-        }
-        other => other.to_string(),
-    };
-    let mut source = std::error::Error::source(error);
-    while let Some(cause) = source {
-        message.push_str(": ");
-        message.push_str(&cause.to_string());
-        source = cause.source();
-    }
-    message
 }
 
 /// A JavaScript `Error` whose `code` is the stable error code. An invalid
-/// option also carries `option` (its Node name) and `requirement`, so other
+/// option also carries `option` (its JavaScript name) and `requirement`, so other
 /// surfaces such as the CLI can print their own spelling without parsing the
 /// message.
 ///
@@ -271,12 +200,12 @@ fn node_message(error: &ApproximateError) -> String {
 /// `Error<S: AsRef<str>>`; the promise path takes `Error<Status>`, so the
 /// error object is created here and passed through as a reference.
 fn js_error(env: &Env, error: &ApproximateError) -> Error {
-    let unknown = JsError::from(Error::new(error.code(), node_message(error))).into_unknown(*env);
+    let unknown = JsError::from(Error::new(error.code(), js_message(error))).into_unknown(*env);
     if let ApproximateError::InvalidOption { option } = error
         && let Ok(mut object) = Object::from_unknown(unknown)
     {
         // Failing to add a property still leaves a usable coded error.
-        let _ = object.set("option", node_option_name(*option));
+        let _ = object.set("option", js_option_name(*option));
         let _ = object.set("requirement", option.requirement());
     }
     Error::from(unknown)
@@ -303,174 +232,6 @@ impl From<ApproximateResult> for NativeApproximateResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::num::NonZeroU8;
-
-    fn render_options(shape: &str) -> NativeRenderOptions {
-        NativeRenderOptions {
-            count: Some(1.0),
-            shape: Some(shape.to_string()),
-            alpha: Some(Either::A(128.0)),
-            seed: Some(Either::A(7.0)),
-            background: Some("auto".to_string()),
-            resize_input: Some(32.0),
-            output_size: Some(32.0),
-        }
-    }
-
-    fn normalize(render: NativeRenderOptions) -> std::result::Result<ApproximateRequest, String> {
-        normalize_request(Buffer::from(vec![0_u8; 4]), "svg".to_string(), render)
-            .map_err(|error| format!("{}: {}", error.code(), node_message(&error)))
-    }
-
-    #[test]
-    fn normalize_request_uses_shared_shape_and_output_parsers() {
-        let request = normalize_request(
-            Buffer::from(vec![0_u8; 4]),
-            "png".to_string(),
-            render_options("rotated-rectangle"),
-        )
-        .expect("request should normalize");
-
-        assert_eq!(request.output, OutputFormat::Png);
-        assert_eq!(request.render.shape, ShapeKind::RotatedRectangle);
-    }
-
-    #[test]
-    fn normalize_request_rejects_removed_output_formats() {
-        for output in ["jpeg", "jpg", "gif"] {
-            let error = normalize_request(
-                Buffer::from(vec![0_u8; 4]),
-                output.to_string(),
-                render_options("triangle"),
-            )
-            .expect_err("removed output format should fail");
-
-            assert_eq!(
-                node_message(&error),
-                "output must be one of: svg, png",
-                "{output}"
-            );
-        }
-    }
-
-    #[test]
-    fn normalize_request_rejects_unknown_shape() {
-        let error = normalize(render_options("hexagon")).expect_err("shape should fail");
-
-        assert_eq!(
-            error,
-            "INVALID_OPTION: shape must be one of: any, triangle, rectangle, ellipse, circle, \
-             rotated-rectangle, quadratic, rotated-ellipse, polygon"
-        );
-    }
-
-    #[test]
-    fn normalize_request_uses_rust_defaults_for_omitted_render_fields() {
-        let request = normalize(NativeRenderOptions {
-            count: None,
-            shape: None,
-            alpha: None,
-            seed: None,
-            background: None,
-            resize_input: None,
-            output_size: None,
-        })
-        .expect("request should normalize");
-
-        assert_eq!(request.render, RenderOptions::default());
-    }
-
-    fn normalize_alpha(
-        alpha: Either<f64, String>,
-    ) -> std::result::Result<ApproximateRequest, String> {
-        normalize(NativeRenderOptions {
-            alpha: Some(alpha),
-            ..render_options("any")
-        })
-    }
-
-    #[test]
-    fn normalize_request_accepts_auto_alpha_string() {
-        let request = normalize_alpha(Either::B("auto".to_string())).expect("auto alpha");
-
-        assert_eq!(request.render.alpha, Alpha::Auto);
-    }
-
-    #[test]
-    fn normalize_request_accepts_integer_alpha() {
-        let request = normalize_alpha(Either::A(200.0)).expect("integer alpha");
-
-        assert_eq!(
-            request.render.alpha,
-            Alpha::Fixed(NonZeroU8::new(200).expect("non-zero"))
-        );
-    }
-
-    #[test]
-    fn normalize_request_rejects_zero_and_out_of_range_alpha() {
-        for alpha in [
-            Either::A(0.0),
-            Either::A(256.0),
-            Either::A(2_f64.powi(32) + 128.0),
-            Either::A(1.5),
-            Either::B("0".to_string()),
-            Either::B("half".to_string()),
-        ] {
-            let error = normalize_alpha(alpha).expect_err("alpha should fail");
-
-            assert_eq!(
-                error,
-                "INVALID_OPTION: alpha must be auto or an integer 1..255"
-            );
-        }
-    }
-
-    #[test]
-    fn numeric_options_do_not_wrap_and_use_node_names() {
-        let wrapping = 2_f64.powi(32) + 1.0;
-        type Setter = fn(&mut NativeRenderOptions, f64);
-        let cases: [(Setter, &str); 3] = [
-            (|r, v| r.count = Some(v), "count"),
-            (|r, v| r.resize_input = Some(v), "resizeInput"),
-            (|r, v| r.output_size = Some(v), "outputSize"),
-        ];
-        for (set, name) in cases {
-            for value in [wrapping, 1e20, -1.0, 1.5, f64::NAN] {
-                let mut render = render_options("any");
-                set(&mut render, value);
-
-                let error = normalize(render).expect_err("value should fail");
-
-                assert!(
-                    error.starts_with(&format!("INVALID_OPTION: {name} must be an integer from ")),
-                    "{name} = {value}: {error}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn number_seeds_must_be_safe_non_negative_integers() {
-        for seed in [-1.0, 1.5, f64::NAN, 2_f64.powi(53), 1e20] {
-            let error = normalize(NativeRenderOptions {
-                seed: Some(Either::A(seed)),
-                ..render_options("any")
-            })
-            .expect_err("seed should fail");
-
-            assert!(
-                error.starts_with("INVALID_OPTION: seed must be an integer from 0 to 2^64 - 1"),
-                "{seed}: {error}"
-            );
-        }
-
-        let request = normalize(NativeRenderOptions {
-            seed: Some(Either::A(2_f64.powi(53) - 1.0)),
-            ..render_options("any")
-        })
-        .expect("max safe integer seed");
-        assert_eq!(request.render.seed, Some(9_007_199_254_740_991));
-    }
 
     fn bigint(sign_bit: bool, words: Vec<u64>) -> BigInt {
         BigInt { sign_bit, words }
@@ -479,42 +240,54 @@ mod tests {
     #[test]
     fn bigint_seeds_cover_the_full_u64_range() {
         for value in [0, 7, u64::MAX] {
-            assert_eq!(bigint_seed(&bigint(false, vec![value])).ok(), Some(value));
+            assert_eq!(
+                bigint_seed(&bigint(false, vec![value])),
+                JsSeed::BigInt(value)
+            );
         }
         for seed in [bigint(true, vec![1]), bigint(false, vec![0, 1])] {
-            assert!(matches!(
-                bigint_seed(&seed),
-                Err(ApproximateError::InvalidOption {
-                    option: RenderOption::Seed
-                })
-            ));
+            assert_eq!(bigint_seed(&seed), JsSeed::BigIntOutOfRange);
         }
     }
 
     #[test]
-    fn normalize_request_rejects_invalid_background() {
-        let error = normalize(NativeRenderOptions {
-            background: Some("#1234".to_string()),
-            ..render_options("any")
-        })
-        .expect_err("background should fail");
+    fn native_render_options_convert_field_by_field() {
+        let render = JsRenderOptions::from(NativeRenderOptions {
+            count: Some(1.0),
+            shape: Some("circle".to_string()),
+            alpha: Some(Either::B("auto".to_string())),
+            seed: Some(Either::A(7.0)),
+            background: Some("#fff".to_string()),
+            resize_input: Some(32.0),
+            output_size: Some(64.0),
+        });
 
         assert_eq!(
-            error,
-            "INVALID_OPTION: background must be auto or an opaque hex color (RGB or RRGGBB)"
+            render,
+            JsRenderOptions {
+                count: Some(1.0),
+                shape: Some("circle".to_string()),
+                alpha: Some(JsAlpha::Text("auto".to_string())),
+                seed: Some(JsSeed::Number(7.0)),
+                background: Some("#fff".to_string()),
+                resize_input: Some(32.0),
+                output_size: Some(64.0),
+            }
         );
-    }
-
-    #[test]
-    fn node_message_appends_the_source_chain() {
-        let error = ApproximateError::Internal {
-            reason: "PNG encoding failed".into(),
-            source: Some(Box::new(std::io::Error::other("disk full"))),
-        };
-
         assert_eq!(
-            node_message(&error),
-            "internal render error: PNG encoding failed: disk full"
+            JsRenderOptions::from(NativeRenderOptions {
+                count: None,
+                shape: None,
+                alpha: Some(Either::A(9.0)),
+                seed: None,
+                background: None,
+                resize_input: None,
+                output_size: None,
+            }),
+            JsRenderOptions {
+                alpha: Some(JsAlpha::Number(9.0)),
+                ..JsRenderOptions::default()
+            }
         );
     }
 
@@ -526,7 +299,7 @@ mod tests {
             Err(error @ ApproximateError::Internal { .. }) => {
                 assert_eq!(error.code(), "INTERNAL");
                 assert_eq!(
-                    node_message(&error),
+                    js_message(&error),
                     "internal render error: render panicked: boom 7"
                 );
             }
@@ -541,12 +314,5 @@ mod tests {
             catch_panic::<()>(|| Err(ApproximateError::Aborted)),
             Err(ApproximateError::Aborted)
         ));
-    }
-
-    #[test]
-    fn panic_message_reads_static_and_formatted_payloads() {
-        assert_eq!(panic_message(&"static"), "static");
-        assert_eq!(panic_message(&String::from("formatted")), "formatted");
-        assert_eq!(panic_message(&42_u8), "non-string panic payload");
     }
 }

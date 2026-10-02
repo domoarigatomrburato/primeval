@@ -3,6 +3,7 @@
 /dist/
 /output/
 /target/
+/wasm/
 
 # Node
 node_modules/

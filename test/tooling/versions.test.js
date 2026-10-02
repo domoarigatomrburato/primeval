@@ -112,7 +112,9 @@ test("repository cargo crate versions match the npm package version", () => {
   const cargo = readCargoWorkspace(repoRoot);
   assert.deepEqual(Object.keys(cargo.members).sort(), [
     "binding",
+    "binding-wasm",
     "crates/primeval-core",
+    "crates/primeval-js",
     "crates/primeval-render",
   ]);
   assert.doesNotThrow(() => validateCargoVersions(pkg.version, cargo));

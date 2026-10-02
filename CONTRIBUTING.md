@@ -9,7 +9,7 @@ The repository has two public faces that must stay aligned:
 - the Rust engine and render layer
 - the ESM-only Node package and CLI
 
-When behavior changes, keep `crates/primeval-render`, `binding`, `src/index.ts`, and `src/cli.ts` consistent on defaults, accepted values, and error behavior.
+When behavior changes, keep `crates/primeval-render`, `crates/primeval-js`, `binding`, `binding-wasm`, `src/index.ts`, and `src/cli.ts` consistent on defaults, accepted values, and error behavior.
 
 ## Local Setup
 
@@ -25,6 +25,18 @@ npm ci
 npm run build
 npm run build:node
 ```
+
+The WebAssembly builds (`npm run build:wasm`, also part of `npm run verify`) need two more tools. `scripts/build-wasm.mjs` pins both:
+
+```bash
+# The dated nightly for the threaded build, with rust-src
+node scripts/build-wasm.mjs install-nightly
+# wasm-bindgen-cli at the version of the wasm-bindgen crate in Cargo.lock
+cargo install wasm-bindgen-cli --locked --version "$(node scripts/build-wasm.mjs wasm-bindgen-version)"
+npm run build:wasm
+```
+
+The single-threaded build uses the pinned stable toolchain, whose `wasm32-unknown-unknown` target `rust-toolchain.toml` installs. `npm run build:wasm` writes `wasm/single/` and `wasm/threaded/` and prints each `.wasm` file's raw and gzip size; `node scripts/build-wasm.mjs build single` builds one variant.
 
 ## Project Rules
 
