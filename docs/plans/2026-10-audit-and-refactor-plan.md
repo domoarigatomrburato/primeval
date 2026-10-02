@@ -55,11 +55,7 @@ The problems are concentrated at the edges: how binaries are built, how failures
 - Formats: output is SVG and PNG only (JPG and GIF output are removed); input is JPEG, PNG and WebP (GIF input is removed).
 - The engine works in RGB only: backgrounds must be opaque, and transparent inputs are composited at decode time (RM-4).
 
-**Top findings**
-
-| # | ID | Finding | Severity | Status |
-| --- | --- | --- | --- | --- |
-| 1 | PERF-5 | Polygon and rotated-ellipse are rasterization-bound (10–32 ns/pixel versus 2–4 for rectangles) and dominate run time. Benchmarks now exist (PERF-0). | Medium | Measured |
+**Top findings:** none open. The largest measured hotspot (PERF-5, anti-aliased rasterizer interiors) landed in T6: single-threaded `model_step` is 46% faster for polygons and 59% for rotated ellipses, with bit-identical output.
 
 **Carry-over:** of the 100 action items the audit identified, 65 carry over unchanged to a redesigned engine and 13 more partially (section 15, a snapshot taken at audit time). This argues for doing the transferable work first and capping the investment in performance tuning of the current engine.
 
@@ -235,20 +231,6 @@ Since ENG-4 (T5), runner quality is identical across thread counts; times still 
 - **Detail:** with an opaque target and background, the blended alpha provably stays 255, yet `score.rs` blends and squares channel A everywhere. JPEG inputs and the auto background are always opaque.
 - **Fix:** with RM-4 (work in RGB only), use RGB-only kernels (`vld3_u8`) and 3-byte buffers: about 25% less arithmetic and memory traffic.
 
-### PERF-5: Anti-aliased rasterizers compute coverage for interior pixels
-
-- **Severity / status:** High for those shapes. Verified, consistent with the measured ns/pixel. `next: no`.
-- **Where:** `raster.rs:271-285` (polygon) and `:384-397` (rotated ellipse) run scalar `f64` min/max/multiply/convert over all sub-row spans for **every** pixel in `[ix_min, ix_max]`. The replay also uses this path for Ellipse and Circle at scale > 1 (`model.rs:262-292`).
-- **Fix:**
-  - Emit the interior run `[max ceil(l_s), min floor(r_s))` at full coverage directly; evaluate per-pixel coverage only in the two edge bands.
-  - Expected to cut most of the 51% of time these two shapes take (estimate).
-
-### PERF-6: Per-row stack arrays are zeroed
-
-- **Severity / status:** Low. Verified. `next: no`.
-- **Where:** `raster.rs:202` `[(f64, usize); 64]` and a `[_; 32]` array around `:248`. That is about 1.8 KB of memset per polygon row for at most 16 hits.
-- **Fix:** size them to `4 * order`, or use a scratch `Vec` in `WorkerCtx`. The unused `scratch_vertices` field suggests this was the intent.
-
 ### PERF-8: Score the random phase at reduced resolution
 
 - **Severity / status:** Medium–High. Estimated. `next: no` (unless "next" keeps candidate search).
@@ -256,17 +238,6 @@ Since ENG-4 (T5), runner quality is identical across thread counts; times still 
   - Evaluate the 16k random candidates on a 2× downsampled target and canvas (4× fewer pixels), then hill-climb the best k at full resolution.
   - It targets the 75–80% of evaluations that are independent.
   - It changes search behaviour, so it needs PERF-0's quality metrics to accept.
-
-### PERF-10: Copies outside the hot path
-
-- **Severity / status:** Low. Verified. `next: partial` (the render/export layer is reused).
-- **Where:**
-  - `buffer.rs:38-40` fills pixel by pixel (use `repeat`);
-  - `buffer.rs:111` and `:123` clone full buffers (take the image by value, `into_raw`);
-  - `export.rs:65` converts `to_image()` only to encode;
-  - `export.rs:173-179` copies for the average background;
-  - `error_grid.rs:102-109` accumulates `f64` per pixel with bounds checks.
-- **Fix:** together with RT-5.
 
 ### PERF-11: Batch throughput
 
@@ -384,11 +355,11 @@ Done. Every ENG item and TEST-4 landed, plus two found on the way: symmetric ell
 
 ### T6: Performance, gated by benchmarks
 
-- [ ] PERF-5 Anti-aliased rasterizer interiors (largest measured hotspot)
+- [x] PERF-5, PERF-6, PERF-10: coverage evaluated only at span-end pixels, reusable row scratch, integer error-grid sums (bit-identical output)
 - [ ] PERF-1 Prefix sums + early exit
 - [ ] PERF-4 RGB-only kernels (RM-4)
 - [ ] PERF-8 Reduced-resolution random phase (needs quality metrics)
-- [ ] PERF-6, PERF-11
+- [ ] PERF-11 (docs only)
 - [ ] Deferred until the "next" decision: PERF-2 runtime-dispatched x86 SIMD, PERF-3 NEON accumulator tuning (section 15)
 
 ### T7: Documentation
