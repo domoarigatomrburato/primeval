@@ -992,7 +992,7 @@ a:hover {
 }
 
 .actions {
-  grid-template-columns: 2fr 1fr;
+  grid-template-columns: 1fr 1fr;
   padding-top: 16px;
   border-top: 1px solid var(--ink);
 }
