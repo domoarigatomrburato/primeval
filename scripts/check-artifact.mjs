@@ -2,6 +2,12 @@
 // features beyond the target's baseline (no AVX-512 on x86_64, no SVE on
 // aarch64), and Linux GNU artifacts must not need a glibc newer than 2.17.
 //
+// AVX-512 is accepted only inside the dependency functions in
+// DISPATCHED_FUNCTIONS, which run only after a runtime CPU feature check; a
+// raised baseline would put it everywhere else too. Windows artifacts are not
+// scanned: MSVC images carry no function symbols, so the scan could not tell
+// those functions apart. The same sources and flags are scanned on Linux and macOS.
+//
 // Usage: node scripts/check-artifact.mjs <napi target> [file.node]
 // (default: ./<napi.binaryName>.<suffix>.node, as `napi build --platform` writes it)
 //
@@ -40,13 +46,58 @@ const ISA_RULES = {
   ],
 };
 
-/** The checks for one napi target: its ISA family and, for Linux GNU, the newest allowed glibc. */
+// Dependency functions that may use instructions outside the baseline because
+// they run only after a runtime CPU feature check. Names are demangled paths
+// without the legacy `::h<hash>` suffix or v0 `[<hash>]` crate disambiguators.
+const DISPATCHED_FUNCTIONS = {
+  x86_64: [
+    // crc32fast (via png and flate2): the AVX-512 CRC32 fold and its helper.
+    // `State::detect` in src/specialized/pclmulqdq.rs selects it only when
+    // is_x86_feature_detected!("avx512f") and ("vpclmulqdq") both hold.
+    "crc32fast::specialized::pclmulqdq::calculate_avx512",
+    "crc32fast::specialized::pclmulqdq::reduce512",
+  ],
+  aarch64: [],
+};
+
+/**
+ * The checks for one napi target: its ISA family, whether its disassembly is
+ * scanned, and, for Linux GNU, the newest allowed glibc.
+ */
 export function artifactChecksForTarget(target) {
-  const { arch, abi } = runtimeTargetForTarget(target);
+  const { platform, arch, abi } = runtimeTargetForTarget(target);
   if (!ISA_ARCH[arch]) {
     throw new Error(`unsupported architecture for artifact checks: ${arch}`);
   }
-  return { arch: ISA_ARCH[arch], maxGlibc: abi === "gnu" ? MAX_GLIBC : null };
+  return {
+    arch: ISA_ARCH[arch],
+    // MSVC-linked images have no function symbol table, so instructions
+    // cannot be attributed to DISPATCHED_FUNCTIONS.
+    scanIsa: platform !== "win32",
+    maxGlibc: abi === "gnu" ? MAX_GLIBC : null,
+  };
+}
+
+/**
+ * Returns the symbol name of one `objdump -d` function header line
+ * (`0000000000012340 <name>:`), or null when the line is not a header.
+ */
+export function functionHeader(line) {
+  return line.match(/^[0-9a-f]+ <(.*)>:\s*$/i)?.[1] ?? null;
+}
+
+/** Returns the DISPATCHED_FUNCTIONS entry that a demangled symbol name is, or null. */
+function dispatchedFunction(name, arch) {
+  const canonical = name
+    // Mach-O symbols carry a leading underscore when the demangler keeps it.
+    .replace(/^_/, "")
+    // LTO-promoted local symbols: `name.llvm.123`, or ` (.llvm.123)` after demangling.
+    .replace(/(?:\.llvm\.\d+| \(\.llvm\.\d+\))$/, "")
+    // Legacy mangling hash.
+    .replace(/::h[0-9a-f]{16}$/, "")
+    // v0 mangling crate disambiguators.
+    .replace(/\[[0-9a-f]+\]/g, "");
+  return DISPATCHED_FUNCTIONS[arch].find((entry) => entry === canonical) ?? null;
 }
 
 /**
@@ -69,31 +120,70 @@ export function instructionText(line) {
 }
 
 /**
- * Finds instructions that need CPU features outside the portable baseline.
- * `disassembly` is `objdump -d --no-show-raw-insn` output (a string or an
- * iterable of lines).
+ * Scans `objdump -d --no-show-raw-insn --demangle` output line by line for
+ * instructions that need CPU features outside the portable baseline. Returns
+ * `push(line)` and `result()`, which gives the violations (with the enclosing
+ * function, or null before any function header) and the number of accepted
+ * instructions per DISPATCHED_FUNCTIONS entry.
  */
-export function findIsaViolations(disassembly, arch) {
+export function createIsaScanner(arch) {
   const rules = ISA_RULES[arch];
   if (!rules) {
     throw new Error(`unsupported architecture for ISA checks: ${arch}`);
   }
 
-  const lines = typeof disassembly === "string" ? disassembly.split("\n") : disassembly;
   const violations = [];
+  const accepted = new Map();
   let lineNumber = 0;
+  let current = null;
+  let currentDispatched = null;
+  return {
+    push(line) {
+      lineNumber += 1;
+      const header = functionHeader(line);
+      if (header !== null) {
+        current = header;
+        currentDispatched = dispatchedFunction(header, arch);
+        return;
+      }
+      const instruction = instructionText(line);
+      if (!instruction) {
+        return;
+      }
+      const rule = rules.find(({ pattern }) => pattern.test(instruction));
+      if (!rule) {
+        return;
+      }
+      if (currentDispatched !== null) {
+        accepted.set(currentDispatched, (accepted.get(currentDispatched) ?? 0) + 1);
+      } else {
+        violations.push({ line: lineNumber, reason: rule.reason, instruction, function: current });
+      }
+    },
+    result() {
+      return {
+        violations,
+        accepted: [...accepted].map(([name, count]) => ({ function: name, count })),
+        lines: lineNumber,
+      };
+    },
+  };
+}
+
+/** Scans a whole disassembly (a string or an iterable of lines); see createIsaScanner. */
+export function scanDisassembly(disassembly, arch) {
+  const scanner = createIsaScanner(arch);
+  const lines = typeof disassembly === "string" ? disassembly.split("\n") : disassembly;
   for (const line of lines) {
-    lineNumber += 1;
-    const instruction = instructionText(line);
-    if (!instruction) {
-      continue;
-    }
-    const rule = rules.find(({ pattern }) => pattern.test(instruction));
-    if (rule) {
-      violations.push({ line: lineNumber, reason: rule.reason, instruction });
-    }
+    scanner.push(line);
   }
-  return violations;
+  const { violations, accepted } = scanner.result();
+  return { violations, accepted };
+}
+
+/** The violations of scanDisassembly. */
+export function findIsaViolations(disassembly, arch) {
+  return scanDisassembly(disassembly, arch).violations;
 }
 
 function compareVersions(left, right) {
@@ -139,8 +229,8 @@ function objdumpCommand() {
   return candidate;
 }
 
-async function disassemblyViolations(objdump, file, arch) {
-  const child = spawn(objdump, ["-d", "--no-show-raw-insn", file], {
+async function scanArtifact(objdump, file, arch) {
+  const child = spawn(objdump, ["-d", "--no-show-raw-insn", "--demangle", file], {
     stdio: ["ignore", "pipe", "inherit"],
   });
   const exited = new Promise((resolve, reject) => {
@@ -148,22 +238,19 @@ async function disassemblyViolations(objdump, file, arch) {
     child.on("close", resolve);
   });
   const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
-  const violations = [];
-  let lineNumber = 0;
+  const scanner = createIsaScanner(arch);
   for await (const line of lines) {
-    lineNumber += 1;
-    for (const violation of findIsaViolations([line], arch)) {
-      violations.push({ ...violation, line: lineNumber });
-    }
+    scanner.push(line);
   }
   const status = await exited;
   if (status !== 0) {
     throw new Error(`${objdump} -d exited with status ${status}`);
   }
-  if (lineNumber === 0) {
+  const { violations, accepted, lines: lineCount } = scanner.result();
+  if (lineCount === 0) {
     throw new Error(`${objdump} -d produced no output`);
   }
-  return violations;
+  return { violations, accepted };
 }
 
 function summarize(violations, describe) {
@@ -187,21 +274,35 @@ async function main(argv) {
     throw new Error(`artifact does not exist: ${file}`);
   }
 
-  const { arch, maxGlibc } = artifactChecksForTarget(target);
+  const { arch, scanIsa, maxGlibc } = artifactChecksForTarget(target);
+  if (!scanIsa) {
+    console.log(
+      `${file}: ISA scan skipped: ${target} images have no function symbols to tell runtime-dispatched dependency code apart; the same sources and flags are scanned on the Linux GNU and macOS ${arch} artifacts`,
+    );
+    if (maxGlibc === null) {
+      return;
+    }
+  }
   const objdump = objdumpCommand();
   let failed = false;
 
-  const isaViolations = await disassemblyViolations(objdump, file, arch);
-  if (isaViolations.length > 0) {
-    failed = true;
-    console.error(
-      `${file}: ${isaViolations.length} instructions outside the ${arch} baseline:\n${summarize(
-        isaViolations,
-        ({ line, reason, instruction }) => `line ${line}: ${reason}: ${instruction}`,
-      )}`,
-    );
-  } else {
-    console.log(`${file}: no instructions outside the ${arch} baseline`);
+  if (scanIsa) {
+    const { violations, accepted } = await scanArtifact(objdump, file, arch);
+    for (const { function: name, count } of accepted) {
+      console.log(`${file}: accepted ${count} instructions in runtime-dispatched ${name}`);
+    }
+    if (violations.length > 0) {
+      failed = true;
+      console.error(
+        `${file}: ${violations.length} instructions outside the ${arch} baseline:\n${summarize(
+          violations,
+          ({ line, reason, instruction, function: name }) =>
+            `line ${line} in ${name ?? "(no symbol)"}: ${reason}: ${instruction}`,
+        )}`,
+      );
+    } else {
+      console.log(`${file}: no instructions outside the ${arch} baseline`);
+    }
   }
 
   if (maxGlibc !== null) {

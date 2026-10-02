@@ -110,7 +110,12 @@ function detectLinuxLibc() {
   return null
 }
 
+// The ABI part of a target: the libc on Linux, MSVC on Windows (Node for
+// Windows is built with MSVC), none elsewhere.
 function currentRuntimeAbi() {
+  if (process.platform === 'win32') {
+    return 'msvc'
+  }
   if (process.platform !== 'linux') {
     return null
   }

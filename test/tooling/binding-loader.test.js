@@ -5,6 +5,7 @@ import { test } from "node:test";
 import vm from "node:vm";
 
 import { renderBindingLoader } from "../../scripts/generate-binding.mjs";
+import { runtimeTargetForTarget } from "../../scripts/napi-targets.mjs";
 
 const packageJson = JSON.parse(fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8"));
 
@@ -58,6 +59,23 @@ function muslProcess(arch = "x64") {
     },
   };
 }
+
+test("binding loader loads the local artifact of every declared target on its own platform", () => {
+  for (const target of packageJson.napi.targets) {
+    const { platform, arch, suffix } = runtimeTargetForTarget(target);
+    const requireCalls = [];
+    const run = runGeneratedBindingLoader({
+      processMock: platform === "linux" ? glibcProcess(arch) : { platform, arch },
+      requireImpl(specifier) {
+        requireCalls.push(specifier);
+        return { NativeTask: class {}, startApproximate() {} };
+      },
+    });
+
+    assert.doesNotThrow(run, `${target} should load`);
+    assert.deepEqual(requireCalls, [`./primeval-node.${suffix}.node`], target);
+  }
+});
 
 test("binding loader rejects linux musl before attempting gnu artifacts", () => {
   const requireCalls = [];
