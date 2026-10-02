@@ -507,11 +507,18 @@ mod neon {
 }
 
 /// Computes the optimal color for drawing `lines` onto `current` to
-/// best approximate `target` at the given `alpha` level.
+/// best approximate `target` at the given `alpha` level, which must be
+/// `1..=255`.
 ///
 /// Returns a zero [`Color`] if no scanline pixels fall within bounds.
 #[must_use]
-pub fn compute_color(target: &Buffer, current: &Buffer, lines: &[Scanline], alpha: i32) -> Color {
+pub(crate) fn compute_color(
+    target: &Buffer,
+    current: &Buffer,
+    lines: &[Scanline],
+    alpha: i32,
+) -> Color {
+    debug_assert!((1..=255).contains(&alpha), "alpha must be 1..=255");
     #[cfg(target_arch = "aarch64")]
     {
         // SAFETY: NOT fully upheld yet (ENG-1). `neon::compute_color` requires
@@ -556,7 +563,7 @@ pub(crate) fn copy_and_draw_lines(dst: &mut Buffer, src: &Buffer, c: Color, line
 }
 
 /// Blends color `c` onto the existing pixels of `im` along the given scanlines.
-pub fn draw_lines(im: &mut Buffer, c: Color, lines: &[Scanline]) {
+pub(crate) fn draw_lines(im: &mut Buffer, c: Color, lines: &[Scanline]) {
     let [sr, sg, sb, sa] = c.to_premultiplied_rgba();
     let w = im.width() as i32;
     let h = im.height() as i32;
@@ -590,7 +597,7 @@ pub fn draw_lines(im: &mut Buffer, c: Color, lines: &[Scanline]) {
 ///
 /// Panics if the two buffers have different dimensions.
 #[must_use]
-pub fn difference_full_raw(a: &Buffer, b: &Buffer) -> u64 {
+pub(crate) fn difference_full_raw(a: &Buffer, b: &Buffer) -> u64 {
     assert_eq!(a.width(), b.width(), "difference_full: width mismatch");
     assert_eq!(a.height(), b.height(), "difference_full: height mismatch");
 
@@ -690,7 +697,7 @@ pub(crate) fn difference_partial(
 /// update in a single pass. This halves memory traffic compared to the
 /// two-pass approach used outside the hot energy-evaluation loop.
 #[must_use]
-pub fn energy_from_lines_raw(
+pub(crate) fn energy_from_lines_raw(
     target: &Buffer,
     current: &Buffer,
     lines: &[Scanline],

@@ -12,7 +12,7 @@ use rand::{Rng, RngExt};
 /// After calling [`compute`](ErrorGrid::compute), the internal CDF allows
 /// [`sample`](ErrorGrid::sample) and [`sample_float`](ErrorGrid::sample_float)
 /// to produce coordinates biased toward high-error cells.
-pub struct ErrorGrid {
+pub(crate) struct ErrorGrid {
     cols: u32,
     rows: u32,
     cell_w: u32,
@@ -30,7 +30,7 @@ impl ErrorGrid {
     ///
     /// Cell dimensions are floored to at least 1 pixel.
     #[must_use]
-    pub fn new(img_w: u32, img_h: u32, cols: u32, rows: u32) -> Self {
+    pub(crate) fn new(img_w: u32, img_h: u32, cols: u32, rows: u32) -> Self {
         let cols = cols.max(1);
         let rows = rows.max(1);
         let cell_w = (img_w / cols).max(1);
@@ -52,9 +52,10 @@ impl ErrorGrid {
     /// Returns the accumulated total error across all cells.
     ///
     /// This value is meaningful only after calling [`compute`](ErrorGrid::compute).
+    #[cfg(test)]
     #[must_use]
     #[inline]
-    pub fn total(&self) -> f64 {
+    pub(crate) fn total(&self) -> f64 {
         self.total
     }
 
@@ -63,7 +64,7 @@ impl ErrorGrid {
     /// Each cell accumulates the sum of squared RGB channel differences for
     /// every pixel it covers. The last column and last row extend to the
     /// image boundary so that no pixels are missed.
-    pub fn compute(&mut self, target: &Buffer, current: &Buffer) {
+    pub(crate) fn compute(&mut self, target: &Buffer, current: &Buffer) {
         self.errors.fill(0.0);
 
         let img_w = self.img_w;
@@ -121,7 +122,7 @@ impl ErrorGrid {
     ///
     /// The returned `(x, y)` is guaranteed to be within `[0, img_w) x [0, img_h)`.
     #[must_use]
-    pub fn sample<R: Rng>(&self, rng: &mut R) -> (i32, i32) {
+    pub(crate) fn sample<R: Rng>(&self, rng: &mut R) -> (i32, i32) {
         if self.total <= 0.0 {
             if self.img_w == 0 || self.img_h == 0 {
                 return (0, 0);
@@ -152,7 +153,7 @@ impl ErrorGrid {
     /// The returned `(x, y)` is guaranteed to be within
     /// `[0.0, img_w as f64) x [0.0, img_h as f64)`.
     #[must_use]
-    pub fn sample_float<R: Rng>(&self, rng: &mut R) -> (f64, f64) {
+    pub(crate) fn sample_float<R: Rng>(&self, rng: &mut R) -> (f64, f64) {
         if self.total <= 0.0 {
             if self.img_w == 0 || self.img_h == 0 {
                 return (0.0, 0.0);

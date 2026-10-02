@@ -64,7 +64,7 @@ function usage(): string {
     ["-q, --quiet", "No progress or notices on stderr"],
     ["    --count <n>", "Number of optimization steps"],
     ["    --shape <kind>", VALID_SHAPES.join("|")],
-    ["    --alpha <n>", "Alpha 0..255 where 0 means auto"],
+    ["    --alpha <value>", "auto or a fixed shape opacity 1..255"],
     ["    --background <value>", "auto or an opaque hex color (RGB or RRGGBB)"],
     ["    --resize-input <n>", "Working resolution"],
     ["    --output-size <n>", "Final replay resolution"],
@@ -95,10 +95,13 @@ function parseInteger(name: string, value: string, min: number): number {
   return parsed;
 }
 
-function parseAlpha(raw: string): number {
-  const alpha = parseInteger("alpha", raw, 0);
-  if (alpha > 255) {
-    throw usageError("alpha must be 0..255 where 0 means auto");
+function parseAlpha(raw: string): "auto" | number {
+  if (raw === "auto") {
+    return raw;
+  }
+  const alpha = /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
+  if (!(alpha >= 1 && alpha <= 255)) {
+    throw usageError("alpha must be auto or an integer 1..255");
   }
   return alpha;
 }

@@ -1,14 +1,14 @@
 /// Converts degrees to radians.
 #[must_use]
 #[inline]
-pub fn radians(degrees: f64) -> f64 {
+pub(crate) fn radians(degrees: f64) -> f64 {
     degrees * std::f64::consts::PI / 180.0
 }
 
 /// Converts radians to degrees.
 #[must_use]
 #[inline]
-pub fn degrees(radians: f64) -> f64 {
+pub(crate) fn degrees(radians: f64) -> f64 {
     radians * 180.0 / std::f64::consts::PI
 }
 
@@ -18,12 +18,12 @@ pub fn degrees(radians: f64) -> f64 {
 /// redundant trigonometric calls.
 #[must_use]
 #[inline]
-pub fn rotate_sc(x: f64, y: f64, sin_t: f64, cos_t: f64) -> (f64, f64) {
+pub(crate) fn rotate_sc(x: f64, y: f64, sin_t: f64, cos_t: f64) -> (f64, f64) {
     (x * cos_t - y * sin_t, x * sin_t + y * cos_t)
 }
 
 #[must_use]
-pub fn system_clock_seed() -> u64 {
+pub(crate) fn system_clock_seed() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock should be after unix epoch")

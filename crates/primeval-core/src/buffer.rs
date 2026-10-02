@@ -15,8 +15,9 @@ impl Buffer {
     /// # Panics
     ///
     /// Panics if `width * height * 4` overflows `usize`.
+    #[cfg(test)]
     #[must_use]
-    pub fn new(width: u32, height: u32) -> Self {
+    pub(crate) fn new(width: u32, height: u32) -> Self {
         let len = pixel_byte_len(width, height);
         Self {
             width,
@@ -31,7 +32,7 @@ impl Buffer {
     ///
     /// Panics if `width * height * 4` overflows `usize`.
     #[must_use]
-    pub fn new_from_color(width: u32, height: u32, color: crate::Color) -> Self {
+    pub(crate) fn new_from_color(width: u32, height: u32, color: crate::Color) -> Self {
         let len = pixel_byte_len(width, height);
         let mut pixels = Vec::with_capacity(len);
         let pixel = [color.r, color.g, color.b, color.a];
@@ -62,13 +63,13 @@ impl Buffer {
     /// Returns a shared reference to the raw pixel bytes.
     #[must_use]
     #[inline]
-    pub fn pixels(&self) -> &[u8] {
+    pub(crate) fn pixels(&self) -> &[u8] {
         &self.pixels
     }
 
     /// Returns a mutable reference to the raw pixel bytes.
     #[inline]
-    pub fn pixels_mut(&mut self) -> &mut [u8] {
+    pub(crate) fn pixels_mut(&mut self) -> &mut [u8] {
         &mut self.pixels
     }
 
@@ -78,27 +79,8 @@ impl Buffer {
     /// ensuring `x` and `y` are within the buffer dimensions.
     #[must_use]
     #[inline]
-    pub fn pix_offset(&self, x: i32, y: i32) -> usize {
+    pub(crate) fn pix_offset(&self, x: i32, y: i32) -> usize {
         (y as usize * self.width as usize + x as usize) * 4
-    }
-
-    /// Copies all pixels from `other` into `self`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the dimensions of `self` and `other` differ.
-    pub fn copy_from(&mut self, other: &Buffer) {
-        assert_eq!(
-            self.width, other.width,
-            "copy_from: width mismatch ({} vs {})",
-            self.width, other.width
-        );
-        assert_eq!(
-            self.height, other.height,
-            "copy_from: height mismatch ({} vs {})",
-            self.height, other.height
-        );
-        self.pixels.copy_from_slice(&other.pixels);
     }
 
     /// Creates a buffer from raw row-major RGBA bytes.
@@ -165,23 +147,6 @@ mod tests {
         assert_eq!(buf.pix_offset(0, 1), 40);
         // Pixel (3, 2) -> (2*10 + 3)*4 = 92
         assert_eq!(buf.pix_offset(3, 2), 92);
-    }
-
-    #[test]
-    fn copy_from_copies_pixels() {
-        let c = Color::new(42, 84, 126, 255);
-        let src = Buffer::new_from_color(3, 3, c);
-        let mut dst = Buffer::new(3, 3);
-        dst.copy_from(&src);
-        assert_eq!(dst.pixels(), src.pixels());
-    }
-
-    #[test]
-    #[should_panic(expected = "width mismatch")]
-    fn copy_from_panics_on_dimension_mismatch() {
-        let src = Buffer::new(3, 3);
-        let mut dst = Buffer::new(4, 3);
-        dst.copy_from(&src);
     }
 
     #[test]

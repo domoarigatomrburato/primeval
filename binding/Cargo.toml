@@ -16,7 +16,6 @@ workspace = true
 [dependencies]
 napi = { version = "3", features = ["tokio_rt"] }
 napi-derive = "3"
-primeval-core = { path = "../crates/primeval-core" }
 primeval-render = { path = "../crates/primeval-render" }
 
 [build-dependencies]

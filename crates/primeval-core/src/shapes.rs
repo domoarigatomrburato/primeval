@@ -1,4 +1,5 @@
 use crate::drawing::{Geometry, Point};
+use crate::error::ParseError;
 use crate::scanline::Scanline;
 use crate::util::{degrees, radians, rotate_sc};
 use crate::worker::{SearchRound, WorkerCtx};
@@ -9,6 +10,10 @@ use std::str::FromStr;
 const POSITION_SIGMA: f64 = 16.0;
 const ANGLE_SIGMA: f64 = 32.0;
 
+/// The shape family the search draws from.
+///
+/// [`ShapeKind::Any`] picks a concrete family at random for each candidate.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShapeKind {
     Any,
@@ -23,7 +28,7 @@ pub enum ShapeKind {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum Shape {
+pub(crate) enum Shape {
     Triangle(Triangle),
     Rectangle(Rectangle),
     Ellipse(Ellipse),
@@ -35,77 +40,77 @@ pub enum Shape {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Triangle {
-    pub x1: i32,
-    pub y1: i32,
-    pub x2: i32,
-    pub y2: i32,
-    pub x3: i32,
-    pub y3: i32,
+pub(crate) struct Triangle {
+    pub(crate) x1: i32,
+    pub(crate) y1: i32,
+    pub(crate) x2: i32,
+    pub(crate) y2: i32,
+    pub(crate) x3: i32,
+    pub(crate) y3: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Rectangle {
-    pub x1: i32,
-    pub y1: i32,
-    pub x2: i32,
-    pub y2: i32,
+pub(crate) struct Rectangle {
+    pub(crate) x1: i32,
+    pub(crate) y1: i32,
+    pub(crate) x2: i32,
+    pub(crate) y2: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Ellipse {
-    pub x: i32,
-    pub y: i32,
-    pub rx: i32,
-    pub ry: i32,
+pub(crate) struct Ellipse {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) rx: i32,
+    pub(crate) ry: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Circle {
-    pub x: i32,
-    pub y: i32,
-    pub r: i32,
+pub(crate) struct Circle {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) r: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RotatedRectangle {
-    pub x: i32,
-    pub y: i32,
-    pub sx: i32,
-    pub sy: i32,
-    pub angle: i32,
+pub(crate) struct RotatedRectangle {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) sx: i32,
+    pub(crate) sy: i32,
+    pub(crate) angle: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Quadratic {
-    pub x1: f64,
-    pub y1: f64,
-    pub x2: f64,
-    pub y2: f64,
-    pub x3: f64,
-    pub y3: f64,
-    pub width: f64,
+pub(crate) struct Quadratic {
+    pub(crate) x1: f64,
+    pub(crate) y1: f64,
+    pub(crate) x2: f64,
+    pub(crate) y2: f64,
+    pub(crate) x3: f64,
+    pub(crate) y3: f64,
+    pub(crate) width: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RotatedEllipse {
-    pub x: f64,
-    pub y: f64,
-    pub rx: f64,
-    pub ry: f64,
-    pub angle: f64,
+pub(crate) struct RotatedEllipse {
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+    pub(crate) rx: f64,
+    pub(crate) ry: f64,
+    pub(crate) angle: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Polygon {
-    pub order: usize,
-    pub x: [f64; 4],
-    pub y: [f64; 4],
+pub(crate) struct Polygon {
+    pub(crate) order: usize,
+    pub(crate) x: [f64; 4],
+    pub(crate) y: [f64; 4],
 }
 
 impl Shape {
     #[must_use]
-    pub fn random<R: Rng>(
+    pub(crate) fn random<R: Rng>(
         kind: ShapeKind,
         worker: &mut WorkerCtx<R>,
         round: &SearchRound<'_>,
@@ -134,7 +139,7 @@ impl Shape {
         }
     }
 
-    pub fn rasterize<'a, R: Rng>(&self, worker: &'a mut WorkerCtx<R>) -> &'a [Scanline] {
+    pub(crate) fn rasterize<'a, R: Rng>(&self, worker: &'a mut WorkerCtx<R>) -> &'a [Scanline] {
         match self {
             Self::Triangle(shape) => shape.rasterize(worker),
             Self::Rectangle(shape) => shape.rasterize(worker),
@@ -147,7 +152,7 @@ impl Shape {
         }
     }
 
-    pub fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>) {
+    pub(crate) fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>) {
         match self {
             Self::Triangle(shape) => shape.mutate(worker),
             Self::Rectangle(shape) => shape.mutate(worker),
@@ -168,7 +173,7 @@ impl Shape {
     /// working-resolution rasterizer, so the geometry covers the pixels the
     /// engine optimised.
     #[must_use]
-    pub fn geometry(&self) -> Geometry {
+    pub(crate) fn geometry(&self) -> Geometry {
         match self {
             Self::Triangle(shape) => shape.geometry(),
             Self::Rectangle(shape) => shape.geometry(),
@@ -228,7 +233,7 @@ impl ShapeKind {
 }
 
 impl FromStr for ShapeKind {
-    type Err = String;
+    type Err = ParseError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
@@ -241,7 +246,7 @@ impl FromStr for ShapeKind {
             "quadratic" => Ok(Self::Quadratic),
             "rotated-ellipse" => Ok(Self::RotatedEllipse),
             "polygon" => Ok(Self::Polygon),
-            other => Err(format!("unknown shape: {other}")),
+            other => Err(ParseError::new(format!("unknown shape: {other}"))),
         }
     }
 }
@@ -276,7 +281,7 @@ impl Triangle {
     }
 
     #[must_use]
-    pub fn is_valid(&self) -> bool {
+    pub(crate) fn is_valid(&self) -> bool {
         const MIN_DEGREES: f64 = 15.0;
 
         fn angle(ax: i32, ay: i32, bx: i32, by: i32) -> Option<f64> {
@@ -525,13 +530,6 @@ impl RotatedRectangle {
         rect
     }
 
-    #[must_use]
-    pub fn is_valid(&self) -> bool {
-        let a = self.sx.max(self.sy);
-        let b = self.sx.min(self.sy);
-        b > 0 && (a as f64) / (b as f64) <= 5.0
-    }
-
     fn rasterize<'a, R>(&self, worker: &'a mut WorkerCtx<R>) -> &'a [Scanline] {
         let sx = self.sx as f64;
         let sy = self.sy as f64;
@@ -649,7 +647,7 @@ impl Quadratic {
     }
 
     #[must_use]
-    pub fn is_valid(&self) -> bool {
+    pub(crate) fn is_valid(&self) -> bool {
         let dx12 = self.x1 - self.x2;
         let dy12 = self.y1 - self.y2;
         let dx23 = self.x2 - self.x3;
@@ -1169,7 +1167,10 @@ mod tests {
 
     #[test]
     fn shape_kind_rejects_unknown_name() {
-        assert!("hexagon".parse::<ShapeKind>().is_err());
+        assert_eq!(
+            "hexagon".parse::<ShapeKind>(),
+            Err(ParseError::new("unknown shape: hexagon"))
+        );
     }
 
     #[test]
@@ -1253,18 +1254,6 @@ mod tests {
                 },
             ]
         );
-    }
-
-    #[test]
-    fn rotated_rectangle_validity_rejects_extreme_aspect_ratio() {
-        let rect = RotatedRectangle {
-            x: 10,
-            y: 10,
-            sx: 30,
-            sy: 5,
-            angle: 0,
-        };
-        assert!(!rect.is_valid());
     }
 
     #[test]

@@ -198,13 +198,23 @@ test("cli prints no progress when stderr is not a tty", () => {
   assert.equal(result.stderr, "");
 });
 
-test("cli treats --alpha 0 as auto", () => {
-  const output = path.join(makeTmpDir(), "out.svg");
+test("cli accepts --alpha auto and a fixed alpha", () => {
+  for (const alpha of ["auto", "200"]) {
+    const output = path.join(makeTmpDir(), "out.svg");
 
-  const result = runCli([fixturePath, "--output", output, "--alpha", "0", ...RENDER_ARGS]);
+    const result = runCli([fixturePath, "--output", output, "--alpha", alpha, ...RENDER_ARGS]);
 
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(fs.readFileSync(output, "utf8"), /^<svg\b/);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(fs.readFileSync(output, "utf8"), /^<svg\b/);
+  }
+});
+
+test("cli rejects --alpha outside auto and 1..255 as a usage error", () => {
+  for (const alpha of ["0", "256", "-1", "half"]) {
+    const result = runCli([fixturePath, "-o", "-", `--alpha=${alpha}`]);
+
+    assertUsageError(result, /^alpha must be auto or an integer 1\.\.255\n/);
+  }
 });
 
 test("cli derives <input-stem>.svg next to the input when --output is omitted", () => {

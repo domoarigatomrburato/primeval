@@ -435,7 +435,6 @@ dependencies = [
  "napi",
  "napi-build",
  "napi-derive",
- "primeval-core",
  "primeval-render",
 ]
 

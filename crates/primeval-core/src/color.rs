@@ -53,7 +53,7 @@ impl Color {
     /// ```
     #[must_use]
     #[inline]
-    pub fn to_premultiplied_rgba(self) -> [u32; 4] {
+    pub(crate) fn to_premultiplied_rgba(self) -> [u32; 4] {
         let expand = |ch: u8, alpha: u8| -> u32 {
             let v = u32::from(ch);
             let v = v | (v << 8);

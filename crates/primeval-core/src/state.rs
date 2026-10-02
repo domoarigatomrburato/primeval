@@ -1,42 +1,41 @@
+use crate::alpha::Alpha;
 use crate::shapes::Shape;
 use crate::worker::{SearchRound, WorkerCtx};
 use rand::{Rng, RngExt};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AlphaMode {
-    Fixed,
-    Auto,
-}
+/// Alpha a search starts from when the alpha is automatic.
+const AUTO_ALPHA_START: u8 = 128;
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct State {
-    pub shape: Shape,
-    pub alpha_mode: AlphaMode,
-    pub alpha: u8,
-    pub cached_energy: Option<u64>,
+pub(crate) struct State {
+    pub(crate) shape: Shape,
+    /// Whether moves mutate `alpha` too.
+    auto_alpha: bool,
+    /// Always `1..=255`.
+    pub(crate) alpha: u8,
+    pub(crate) cached_energy: Option<u64>,
 }
 
 impl State {
     #[must_use]
-    pub fn new(shape: Shape, alpha: i32) -> Self {
-        if alpha == 0 {
-            return Self {
-                shape,
-                alpha_mode: AlphaMode::Auto,
-                alpha: 128,
-                cached_energy: None,
-            };
-        }
-
+    pub(crate) fn new(shape: Shape, alpha: Alpha) -> Self {
+        let (auto_alpha, alpha) = match alpha {
+            Alpha::Auto => (true, AUTO_ALPHA_START),
+            Alpha::Fixed(alpha) => (false, alpha.get()),
+        };
         Self {
             shape,
-            alpha_mode: AlphaMode::Fixed,
-            alpha: alpha.clamp(1, 255) as u8,
+            auto_alpha,
+            alpha,
             cached_energy: None,
         }
     }
 
-    pub fn energy<R: Rng>(&mut self, worker: &mut WorkerCtx<R>, round: &SearchRound<'_>) -> u64 {
+    pub(crate) fn energy<R: Rng>(
+        &mut self,
+        worker: &mut WorkerCtx<R>,
+        round: &SearchRound<'_>,
+    ) -> u64 {
         if let Some(energy) = self.cached_energy {
             return energy;
         }
@@ -50,10 +49,10 @@ impl State {
         energy
     }
 
-    pub fn do_move<R: Rng>(&mut self, worker: &mut WorkerCtx<R>) -> Self {
+    pub(crate) fn do_move<R: Rng>(&mut self, worker: &mut WorkerCtx<R>) -> Self {
         let previous = self.clone();
         self.shape.mutate(worker);
-        if self.alpha_mode == AlphaMode::Auto {
+        if self.auto_alpha {
             let delta = worker.rng.random_range(0..21) - 10;
             self.alpha = (i32::from(self.alpha) + delta).clamp(1, 255) as u8;
         }
@@ -61,7 +60,7 @@ impl State {
         previous
     }
 
-    pub fn undo_move(&mut self, previous: Self) {
+    pub(crate) fn undo_move(&mut self, previous: Self) {
         *self = previous;
     }
 }
@@ -70,25 +69,33 @@ impl State {
 mod tests {
     use super::*;
     use crate::shapes::{Circle, Shape};
-    use crate::test_util::make_test_round;
+    use crate::test_util::{fixed_alpha, make_test_round};
 
     fn round(w: u32, h: u32) -> (WorkerCtx<rand_chacha::ChaCha8Rng>, SearchRound<'static>) {
         make_test_round(w, h, 123)
     }
 
     #[test]
-    fn new_with_zero_alpha_enables_auto_mode() {
-        let state = State::new(Shape::Circle(Circle { x: 5, y: 5, r: 3 }), 0);
+    fn new_with_auto_alpha_starts_at_128() {
+        let state = State::new(Shape::Circle(Circle { x: 5, y: 5, r: 3 }), Alpha::Auto);
 
-        assert_eq!(state.alpha_mode, AlphaMode::Auto);
+        assert!(state.auto_alpha);
         assert_eq!(state.alpha, 128);
         assert_eq!(state.cached_energy, None);
     }
 
     #[test]
+    fn new_with_fixed_alpha_keeps_it() {
+        let state = State::new(Shape::Circle(Circle { x: 5, y: 5, r: 3 }), fixed_alpha(200));
+
+        assert!(!state.auto_alpha);
+        assert_eq!(state.alpha, 200);
+    }
+
+    #[test]
     fn energy_is_cached_after_first_evaluation() {
         let (mut worker, round) = round(16, 16);
-        let mut state = State::new(Shape::Circle(Circle { x: 5, y: 5, r: 3 }), 128);
+        let mut state = State::new(Shape::Circle(Circle { x: 5, y: 5, r: 3 }), fixed_alpha(128));
 
         let first = state.energy(&mut worker, &round);
         let second = state.energy(&mut worker, &round);
@@ -100,7 +107,7 @@ mod tests {
     #[test]
     fn do_move_invalidates_cached_energy() {
         let (mut worker, round) = round(16, 16);
-        let mut state = State::new(Shape::Circle(Circle { x: 5, y: 5, r: 3 }), 128);
+        let mut state = State::new(Shape::Circle(Circle { x: 5, y: 5, r: 3 }), fixed_alpha(128));
         let _ = state.energy(&mut worker, &round);
 
         let _previous = state.do_move(&mut worker);

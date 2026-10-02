@@ -6,10 +6,10 @@
 //! Progress is reported on stderr.
 
 use primeval_render::{
-    ApproximateRequest, ApproximateResult, OutputFormat, ProgressInfo, RenderOptions, approximate,
+    ApproximateRequest, ApproximateResult, CancellationToken, Execution, OutputFormat,
+    ProgressInfo, RenderOptions, approximate,
 };
 use std::io::Write;
-use std::sync::atomic::AtomicBool;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
@@ -19,22 +19,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let output = args.next();
 
-    let on_progress = |info: ProgressInfo| eprintln!("step {}/{}", info.step, info.total);
-    // Set this flag from another thread to abort the render between steps.
-    let cancelled = AtomicBool::new(false);
+    let mut render = RenderOptions::default();
+    render.count = 100;
+    render.resize_input = 128;
+    render.output_size = 512;
+
+    let mut on_progress = |info: ProgressInfo| eprintln!("step {}/{}", info.step, info.total);
+    // Call `cancel()` on a clone of this token from another thread to abort
+    // the render between steps.
+    let token = CancellationToken::new();
     let result = approximate(
         ApproximateRequest {
             input: std::fs::read(&input)?,
             output: OutputFormat::Svg,
-            render: RenderOptions {
-                count: 100,
-                resize_input: 128,
-                output_size: 512,
-                ..RenderOptions::default()
-            },
+            render,
         },
-        Some(&on_progress),
-        &cancelled,
+        Execution::new()
+            .progress(&mut on_progress)
+            .cancellation(&token),
     )?;
 
     let ApproximateResult::Svg { data, .. } = result else {

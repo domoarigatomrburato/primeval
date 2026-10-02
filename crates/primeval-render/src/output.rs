@@ -1,5 +1,8 @@
+use primeval_core::ParseError;
 use std::str::FromStr;
 
+/// Encoded output format of a render.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OutputFormat {
     Svg,
@@ -35,13 +38,13 @@ impl OutputFormat {
 }
 
 impl FromStr for OutputFormat {
-    type Err = String;
+    type Err = ParseError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "svg" => Ok(Self::Svg),
             "png" => Ok(Self::Png),
-            other => Err(format!("unknown output format: {other}")),
+            other => Err(ParseError::new(format!("unknown output format: {other}"))),
         }
     }
 }
@@ -82,7 +85,10 @@ mod tests {
     #[test]
     fn output_format_rejects_unknown_name() {
         for value in ["bmp", "jpg", "jpeg", "gif"] {
-            assert!(value.parse::<OutputFormat>().is_err(), "{value}");
+            assert_eq!(
+                value.parse::<OutputFormat>(),
+                Err(ParseError::new(format!("unknown output format: {value}")))
+            );
         }
     }
 

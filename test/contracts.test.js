@@ -50,9 +50,9 @@ function parseRustRenderDefaults(source) {
     count: Number(values.count),
     shape: values.shape.toLowerCase(),
     alpha: (() => {
-      const alphaMatch = block[1].match(/alpha:\s*AlphaOption::([A-Za-z]+)(?:\((\d+)\))?,/);
+      const alphaMatch = block[1].match(/alpha:\s*Alpha::Auto,/);
       assert.ok(alphaMatch, "missing Rust default for alpha");
-      return alphaMatch[1] === "Auto" ? 0 : Number(alphaMatch[2]);
+      return "auto";
     })(),
     background: values.background.toLowerCase(),
     resizeInput: Number(values.resizeInput),
@@ -105,23 +105,34 @@ test("alpha validation message is aligned across surfaces", () => {
     parseAlphaMessage(readRepoFile("src", "index.ts"), "src/index.ts"),
     parseAlphaMessage(readRepoFile("src", "cli.ts"), "src/cli.ts"),
     parseAlphaMessage(
-      readRepoFile("crates", "primeval-render", "src", "lib.rs"),
-      "crates/primeval-render/src/lib.rs",
+      readRepoFile("crates", "primeval-core", "src", "alpha.rs"),
+      "crates/primeval-core/src/alpha.rs",
     ),
   ];
 
   assert.deepEqual(
     messages,
-    new Array(messages.length).fill("alpha must be 0..255 where 0 means auto"),
+    new Array(messages.length).fill("alpha must be auto or an integer 1..255"),
   );
 });
 
-test("binding uses shared Rust option parsers", () => {
+test("binding uses shared Rust option parsers and render defaults", () => {
   const bindingSource = readRepoFile("binding", "src", "binding.rs");
 
-  assert.match(bindingSource, /parse_alpha_str/);
-  assert.match(bindingSource, /parse_background_str/);
-  assert.match(bindingSource, /parse_seed_i64/);
+  assert.match(bindingSource, /parse::<OutputFormat>/);
+  assert.match(bindingSource, /parse::<ShapeKind>/);
+  assert.match(bindingSource, /parse::<Alpha>/);
+  assert.match(bindingSource, /Alpha::try_from/);
+  assert.match(bindingSource, /parse::<BackgroundOption>/);
+  assert.match(bindingSource, /RenderOptions::default\(\)\.merge\(/);
+  assert.doesNotMatch(bindingSource, /unwrap_or\(defaults/);
+});
+
+test("binding depends on primeval-render only", () => {
+  const manifest = readRepoFile("binding", "Cargo.toml");
+
+  assert.match(manifest, /^primeval-render = /m);
+  assert.doesNotMatch(manifest, /primeval-core/);
 });
 
 test("obsolete rust cli tree is absent", () => {

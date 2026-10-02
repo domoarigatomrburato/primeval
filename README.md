@@ -81,7 +81,7 @@ Useful options:
 
 - `--shape any|triangle|rectangle|ellipse|circle|rotated-rectangle|quadratic|rotated-ellipse|polygon` with `any` as the default
 - `--count <N>` number of optimization steps (default `100`); higher values improve quality at the cost of time
-- `--alpha <N>` shape opacity, `0`..`255` where `0` is `auto` (default `0`)
+- `--alpha auto|<N>` shape opacity: `auto` lets the optimizer choose, or a fixed integer `1`..`255` (default `auto`)
 - `--resize-input <N>` resolution used during optimization; smaller is faster but less detailed (default `256`)
 - `--output-size <N>` resolution of the final exported image (default `1024`)
 
@@ -150,7 +150,7 @@ Render options:
 
 - `count?: number` optimization steps. Higher values improve quality. Default: `100`.
 - `shape?: "any" | "triangle" | "rectangle" | "ellipse" | "circle" | "rotated-rectangle" | "quadratic" | "rotated-ellipse" | "polygon"`. Default: `"any"`.
-- `alpha?: number` shape opacity. Accepted values: `0..255` where `0` means auto-detect. Default: `0`.
+- `alpha?: "auto" | number` shape opacity. Use `"auto"` to let the optimizer choose each shape's opacity, or a fixed integer `1..255`. Any other value, including `0`, throws a `ValidationError`. Default: `"auto"`.
 - `seed?: number` deterministic RNG seed (non-negative integer). Omit it to let Rust choose a non-deterministic seed.
 - `background?: "auto" | string` opaque background color. Use `"auto"` (the alpha-weighted mean color of the input, or white for a fully transparent input) or a hex color in `RGB` or `RRGGBB` form, with optional leading `#`. Transparent inputs are flattened onto the background before rendering, so the output is always opaque. Default: `"auto"`.
 - `resizeInput?: number` resolution used during optimization. Smaller values run faster but capture less detail. Default: `256`.
@@ -250,7 +250,7 @@ Package notes:
 
 - Accepted input formats: **JPEG, PNG, and WebP**.
 - Missing `render` fields are forwarded to Rust and resolved there; the package does not reinvent render defaults in TypeScript.
-- Current Rust defaults are `count: 100`, `shape: "any"`, `alpha: 0` (`auto`), omitted `seed`, `background: "auto"`, `resizeInput: 256`, and `outputSize: 1024`.
+- Current Rust defaults are `count: 100`, `shape: "any"`, `alpha: "auto"`, omitted `seed`, `background: "auto"`, `resizeInput: 256`, and `outputSize: 1024`.
 - `approximate()` returns exactly one output format per call: `svg` or `png`.
 - The default shape is `any` (mixed); all nine CLI shape modes are available.
 - Errors are mapped to `ValidationError` and `AbortError` — use `instanceof` to distinguish them.
@@ -261,10 +261,10 @@ Package notes:
 
 The images below use identical settings (`shape: any`, `count: 200`, `seed: 42`) with only alpha changed:
 
-- `alpha: 0` (`auto`)
+- `alpha: "auto"`
 - `alpha: 128` (fixed, historical default)
 
-| Alpha 0 (auto) | Alpha 128 (fixed) | Difference (boosted) |
+| Alpha auto | Alpha 128 (fixed) | Difference (boosted) |
 | --- | --- | --- |
 | ![Mona Lisa rendered with alpha auto at 200 steps.](docs/readme/comparisons/monalisa-any-200-alpha-auto.png) | ![Mona Lisa rendered with fixed alpha 128 at 200 steps.](docs/readme/comparisons/monalisa-any-200-alpha-128.png) | ![Boosted per-pixel difference between alpha auto and alpha 128 renders.](docs/readme/comparisons/monalisa-any-200-alpha-diff-boosted.png) |
 
@@ -282,7 +282,7 @@ primeval <input> [options]
 - `-q, --quiet`: print no progress and no notices on stderr.
 - `--count <N>` optimization steps. Higher values improve quality. Default: `100`.
 - `--shape any|triangle|rectangle|ellipse|circle|rotated-rectangle|quadratic|rotated-ellipse|polygon`. Default: `any`.
-- `--alpha <N>` shape opacity. Accepted values: `0..255` where `0` means auto-detect. Default: `0`.
+- `--alpha auto|<N>` shape opacity. Use `auto` to let the optimizer choose each shape's opacity, or a fixed integer `1..255`. Default: `auto`.
 - `--background <VALUE>` opaque background color. Use `auto` (the alpha-weighted mean color of the input, or white for a fully transparent input) or a hex color in `RGB` or `RRGGBB` form, with optional leading `#`. Transparent inputs are flattened onto the background, so the output is always opaque. Default: `auto`.
 - `--resize-input <N>` resolution used during optimization. Smaller values run faster but capture less detail; the final output is always rendered at `--output-size` resolution. Default: `256`.
 - `--output-size <N>` resolution of the final exported image. Default: `1024`.

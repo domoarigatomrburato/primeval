@@ -26,7 +26,7 @@ export interface NativeHandle {
 export interface NativeRenderOptions {
   count?: number;
   shape?: string;
-  alpha?: string;
+  alpha?: number | string;
   seed?: number;
   background?: string;
   resizeInput?: number;

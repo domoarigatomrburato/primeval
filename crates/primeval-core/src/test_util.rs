@@ -1,3 +1,4 @@
+use crate::alpha::Alpha;
 use crate::buffer::Buffer;
 use crate::color::Color;
 use crate::error_grid::ErrorGrid;
@@ -36,4 +37,9 @@ pub(crate) fn make_test_round(
     };
     let worker = WorkerCtx::new(width as i32, height as i32, create_rng(seed));
     (worker, round)
+}
+
+/// A fixed alpha for tests; panics on zero.
+pub(crate) fn fixed_alpha(alpha: u8) -> Alpha {
+    Alpha::Fixed(std::num::NonZeroU8::new(alpha).expect("non-zero alpha"))
 }

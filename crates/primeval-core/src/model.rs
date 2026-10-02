@@ -1,3 +1,4 @@
+use crate::alpha::Alpha;
 use crate::drawing::{Drawing, DrawnShape};
 use crate::error_grid::ErrorGrid;
 use crate::score;
@@ -8,18 +9,26 @@ use crate::{Buffer, Color};
 use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
 
+/// A shape the model has painted, with the colour it was painted in.
 #[derive(Clone, Debug)]
-pub struct CommittedShape {
-    pub shape: Shape,
-    pub color: Color,
-    pub alpha: u8,
+struct CommittedShape {
+    shape: Shape,
+    color: Color,
 }
 
+/// Search settings for a [`Model`].
+///
+/// Construct with [`ModelOptions::default`] and set the fields you need.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug)]
 pub struct ModelOptions {
+    /// Deterministic RNG seed. `None` seeds from the system clock.
     pub seed: Option<u64>,
+    /// Number of parallel search workers; `0` is treated as `1`.
     pub workers: usize,
+    /// Columns of the error grid that biases sampling; `0` is treated as `1`.
     pub grid_cols: u32,
+    /// Rows of the error grid that biases sampling; `0` is treated as `1`.
     pub grid_rows: u32,
 }
 
@@ -34,12 +43,15 @@ impl Default for ModelOptions {
     }
 }
 
+/// The search: paints shapes one [`step`](Model::step) at a time to
+/// approximate a target image.
 pub struct Model {
-    pub background: Color,
-    pub target: Buffer,
-    pub current: Buffer,
-    pub(crate) score: u64,
-    pub history: Vec<CommittedShape>,
+    background: Color,
+    target: Buffer,
+    current: Buffer,
+    /// Raw squared difference between `current` and `target`.
+    score: u64,
+    history: Vec<CommittedShape>,
     error_grid: ErrorGrid,
     workers: Vec<WorkerCtx<ChaCha8Rng>>,
 }
@@ -52,6 +64,7 @@ impl Model {
         }
     }
 
+    /// Starts a search for `target` from a canvas filled with `background`.
     #[must_use]
     pub fn new(target: Buffer, background: Color, options: ModelOptions) -> Self {
         let target_width = target.width();
@@ -86,7 +99,14 @@ impl Model {
         }
     }
 
-    pub fn step(&mut self, kind: ShapeKind, alpha: i32) -> Result<u64, String> {
+    /// Searches for the best next shape of `kind` and paints it.
+    ///
+    /// Returns the number of candidate evaluations the search made.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the search produced no candidate.
+    pub fn step(&mut self, kind: ShapeKind, alpha: Alpha) -> Result<u64, String> {
         let evaluations_before: u64 = self.workers.iter().map(|worker| worker.evaluations).sum();
         self.error_grid.compute(&self.target, &self.current);
 
@@ -133,7 +153,9 @@ impl Model {
         Ok(evaluations_after - evaluations_before)
     }
 
-    pub fn add(&mut self, shape: Shape, alpha: u8) {
+    /// Paints `shape` at `alpha`, which must be `1..=255`.
+    fn add(&mut self, shape: Shape, alpha: u8) {
+        debug_assert!(alpha > 0, "alpha must be non-zero");
         let worker = &mut self.workers[0];
         let lines = shape.rasterize(worker);
         let color =
@@ -147,13 +169,11 @@ impl Model {
         );
         crate::score::draw_lines(&mut self.current, color, lines);
         self.score = score;
-        self.history.push(CommittedShape {
-            shape,
-            color,
-            alpha,
-        });
+        self.history.push(CommittedShape { shape, color });
     }
 
+    /// Normalized difference between the canvas and the target: `0.0` is a
+    /// perfect match.
     #[must_use]
     pub fn score_f64(&self) -> f64 {
         score::raw_score_to_normalized(self.score, self.current.width(), self.current.height())
@@ -184,6 +204,7 @@ mod tests {
     use super::*;
     use crate::score;
     use crate::shapes::{Rectangle, Shape};
+    use crate::test_util::fixed_alpha;
 
     #[test]
     fn search_params_keeps_quadratic_budget_near_default() {
@@ -225,12 +246,12 @@ mod tests {
         );
 
         let _ = model
-            .step(ShapeKind::Triangle, 128)
+            .step(ShapeKind::Triangle, fixed_alpha(128))
             .expect("first step should succeed");
         let first_total: u64 = model.workers.iter().map(|worker| worker.evaluations).sum();
 
         let second_reported = model
-            .step(ShapeKind::Triangle, 128)
+            .step(ShapeKind::Triangle, fixed_alpha(128))
             .expect("second step should succeed");
         let second_total: u64 = model.workers.iter().map(|worker| worker.evaluations).sum();
 
@@ -252,7 +273,7 @@ mod tests {
         );
 
         let evaluations = model
-            .step(ShapeKind::Triangle, 128)
+            .step(ShapeKind::Triangle, fixed_alpha(128))
             .expect("step should succeed");
 
         assert!(evaluations > 0);

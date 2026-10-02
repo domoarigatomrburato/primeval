@@ -3,7 +3,7 @@ use crate::worker::{SearchRound, WorkerCtx};
 use rand::Rng;
 
 #[must_use]
-pub fn hill_climb<R: Rng>(
+pub(crate) fn hill_climb<R: Rng>(
     state: &State,
     worker: &mut WorkerCtx<R>,
     round: &SearchRound<'_>,
@@ -35,7 +35,7 @@ mod tests {
     use super::*;
     use crate::shapes::{Circle, Shape};
     use crate::state::State;
-    use crate::test_util::make_test_round;
+    use crate::test_util::{fixed_alpha, make_test_round};
 
     fn round(w: u32, h: u32) -> (WorkerCtx<rand_chacha::ChaCha8Rng>, SearchRound<'static>) {
         make_test_round(w, h, 456)
@@ -44,7 +44,7 @@ mod tests {
     #[test]
     fn hill_climb_with_zero_age_returns_equivalent_state() {
         let (mut worker, round) = round(16, 16);
-        let state = State::new(Shape::Circle(Circle { x: 5, y: 5, r: 3 }), 128);
+        let state = State::new(Shape::Circle(Circle { x: 5, y: 5, r: 3 }), fixed_alpha(128));
 
         let result = hill_climb(&state, &mut worker, &round, 0);
 

@@ -69,15 +69,29 @@ test("native approximate accepts omitted seed", async () => {
   assert.match(result.data, /^<svg\b/);
 });
 
-test("native approximate treats alpha 0 as auto", async () => {
+test("native approximate accepts alpha auto", async () => {
   const result = await approximate({
     input: FIXTURE_IMAGE,
     output: "svg",
-    render: render({ alpha: 0 }),
+    render: render({ alpha: "auto" }),
   });
 
   assert.equal(result.format, "svg");
   assert.match(result.data, /^<svg\b/);
+});
+
+test("native approximate rejects an unknown alpha string with ValidationError", async () => {
+  await assert.rejects(
+    async () =>
+      approximate({
+        input: FIXTURE_IMAGE,
+        output: "svg",
+        render: render({ alpha: /** @type {any} */ ("half") }),
+      }),
+    (error) =>
+      error instanceof ValidationError &&
+      error.message === "alpha must be auto or an integer 1..255",
+  );
 });
 
 test("approximate rejects non-Uint8Array input with ValidationError", async () => {

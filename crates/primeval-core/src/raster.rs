@@ -11,7 +11,7 @@ use rand::Rng;
 /// adaptively subdivided via de Casteljau (flatness tolerance 0.5 px) and each
 /// flat segment is rasterised with distance-based antialiased coverage using
 /// the given stroke `half_width`.
-pub fn stroke_quadratic_direct<R: Rng>(
+pub(crate) fn stroke_quadratic_direct<R: Rng>(
     worker: &mut WorkerCtx<R>,
     x1: f64,
     y1: f64,
@@ -152,7 +152,12 @@ fn stroke_segment(
 /// Each polygon edge is intersected at 4 sub-rows per pixel row, and the
 /// coverage for each pixel is the fraction of sub-rows where the pixel is
 /// inside the polygon (non-zero winding rule).
-pub fn fill_polygon_direct(lines: &mut Vec<Scanline>, vertices: &[(f64, f64)], w: i32, h: i32) {
+pub(crate) fn fill_polygon_direct(
+    lines: &mut Vec<Scanline>,
+    vertices: &[(f64, f64)],
+    w: i32,
+    h: i32,
+) {
     lines.clear();
 
     let n = vertices.len();
@@ -217,8 +222,7 @@ pub fn fill_polygon_direct(lines: &mut Vec<Scanline>, vertices: &[(f64, f64)], w
 
         // Sort all intersections within each sub-row.
         // Since we packed them together, sort the full array and process per sub-row.
-        x_hits[..num_hits]
-            .sort_unstable_by(|a, b| a.1.cmp(&b.1).then(a.0.partial_cmp(&b.0).unwrap()));
+        x_hits[..num_hits].sort_unstable_by(|a, b| a.1.cmp(&b.1).then(a.0.total_cmp(&b.0)));
 
         // Build per-sub-row span pairs.
         // For each sub-row, pair consecutive intersections (even-odd).
@@ -293,7 +297,7 @@ pub fn fill_polygon_direct(lines: &mut Vec<Scanline>, vertices: &[(f64, f64)], w
 /// `angle` radians. Each row is intersected at 4 sub-row sample positions, then
 /// the exact horizontal overlap of each sub-row span with each pixel is summed
 /// into a 16-bit alpha value.
-pub fn fill_rotated_ellipse_direct(
+pub(crate) fn fill_rotated_ellipse_direct(
     lines: &mut Vec<Scanline>,
     cx: f64,
     cy: f64,

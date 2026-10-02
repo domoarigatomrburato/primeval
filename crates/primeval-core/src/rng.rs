@@ -11,7 +11,7 @@ use rand_chacha::ChaCha8Rng;
 /// Two calls with the same seed will always produce the same sequence,
 /// regardless of platform.
 #[must_use]
-pub fn create_rng(seed: u64) -> ChaCha8Rng {
+pub(crate) fn create_rng(seed: u64) -> ChaCha8Rng {
     ChaCha8Rng::seed_from_u64(seed)
 }
 

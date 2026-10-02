@@ -23,7 +23,8 @@ export type Shape =
 export type RenderOptions = {
   count?: number;
   shape?: Shape;
-  alpha?: number;
+  /** `"auto"`, or a fixed shape opacity as an integer `1..255`. */
+  alpha?: "auto" | number;
   seed?: number;
   background?: "auto" | string;
   resizeInput?: number;
@@ -109,7 +110,7 @@ const VALID_OUTPUTS: readonly OutputFormat[] = ["svg", "png"];
 interface NormalizedRender {
   count?: number;
   shape?: Shape;
-  alpha?: number;
+  alpha?: "auto" | number;
   seed?: number;
   background?: string;
   resizeInput?: number;
@@ -132,6 +133,14 @@ function isAbortSignal(value: unknown): value is AbortSignal {
   return value instanceof AbortSignal;
 }
 
+// Strings pass through: Rust owns the vocabulary and rejects anything but "auto".
+function isAlpha(value: unknown): boolean {
+  return (
+    typeof value === "string" ||
+    (typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 255)
+  );
+}
+
 function normalizeInput(input: unknown): Buffer {
   if (Buffer.isBuffer(input)) {
     return input;
@@ -147,7 +156,7 @@ function normalizeRender(render?: Record<string, unknown>): NormalizedRender {
   const r = render ?? {};
   const count = r.count == null ? undefined : (r.count as number);
   const shape = r.shape == null ? undefined : (r.shape as Shape);
-  const alpha = r.alpha == null ? undefined : (r.alpha as number);
+  const alpha = r.alpha == null ? undefined : r.alpha;
   const background = r.background == null ? undefined : (r.background as string);
   const resizeInput = r.resizeInput == null ? undefined : (r.resizeInput as number);
   const outputSize = r.outputSize == null ? undefined : (r.outputSize as number);
@@ -159,8 +168,8 @@ function normalizeRender(render?: Record<string, unknown>): NormalizedRender {
   if (shape !== undefined && !(VALID_SHAPES as readonly string[]).includes(shape)) {
     throw new ValidationError(`unknown shape: ${shape}`);
   }
-  if (alpha !== undefined && (!Number.isInteger(alpha) || alpha < 0 || alpha > 255)) {
-    throw new ValidationError("alpha must be 0..255 where 0 means auto");
+  if (alpha !== undefined && !isAlpha(alpha)) {
+    throw new ValidationError("alpha must be auto or an integer 1..255");
   }
   if (seed !== undefined && (!Number.isInteger(seed) || seed < 0)) {
     throw new ValidationError("seed must be a positive integer");
@@ -172,7 +181,15 @@ function normalizeRender(render?: Record<string, unknown>): NormalizedRender {
     throw new ValidationError("outputSize must be at least 1");
   }
 
-  return { count, shape, alpha, seed, background, resizeInput, outputSize };
+  return {
+    count,
+    shape,
+    alpha: alpha as NormalizedRender["alpha"],
+    seed,
+    background,
+    resizeInput,
+    outputSize,
+  };
 }
 
 function normalizeRequest(request: unknown): NormalizedRequest {
@@ -247,7 +264,7 @@ function startApproximate(request: ApproximateRequest): {
     render: {
       ...(normalized.render.count === undefined ? {} : { count: normalized.render.count }),
       ...(normalized.render.shape === undefined ? {} : { shape: normalized.render.shape }),
-      ...(normalized.render.alpha === undefined ? {} : { alpha: String(normalized.render.alpha) }),
+      ...(normalized.render.alpha === undefined ? {} : { alpha: normalized.render.alpha }),
       ...(normalized.render.seed === undefined ? {} : { seed: normalized.render.seed }),
       ...(normalized.render.background === undefined
         ? {}

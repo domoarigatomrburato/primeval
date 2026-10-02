@@ -5,6 +5,7 @@
 //! borrows the read-only data that every worker needs during a single
 //! optimization round.
 
+use crate::alpha::Alpha;
 use crate::buffer::Buffer;
 use crate::error_grid::ErrorGrid;
 use crate::optimize::hill_climb;
@@ -23,41 +24,41 @@ const QUADRATIC_HILL_CLIMB_SEEDS: usize = 2;
 ///
 /// Each worker thread gets its own `WorkerCtx` so that shape rasterization
 /// and scoring can proceed without any synchronization.
-pub struct WorkerCtx<R> {
+pub(crate) struct WorkerCtx<R> {
     /// Image width in pixels.
-    pub width: i32,
+    pub(crate) width: i32,
     /// Image height in pixels.
-    pub height: i32,
+    pub(crate) height: i32,
     /// Reusable storage for rasterized scanlines.
-    pub lines: Vec<Scanline>,
+    pub(crate) lines: Vec<Scanline>,
     /// Reusable storage for per-scanline min bounds during rectangle tracking.
-    pub rect_min: Vec<i32>,
+    pub(crate) rect_min: Vec<i32>,
     /// Reusable storage for per-scanline max bounds during rectangle tracking.
-    pub rect_max: Vec<i32>,
+    pub(crate) rect_max: Vec<i32>,
     /// The worker's own RNG instance.
-    pub rng: R,
+    pub(crate) rng: R,
     /// Running count of energy evaluations performed by this worker.
-    pub evaluations: u64,
+    pub(crate) evaluations: u64,
 }
 
 /// Read-only shared state for a single search round, borrowed from the model.
 ///
 /// All workers in a round share the same target, current approximation,
 /// error grid, and baseline score.
-pub struct SearchRound<'a> {
+pub(crate) struct SearchRound<'a> {
     /// The original target image.
-    pub target: &'a Buffer,
+    pub(crate) target: &'a Buffer,
     /// The current best approximation.
-    pub current: &'a Buffer,
+    pub(crate) current: &'a Buffer,
     /// Pre-computed spatial error distribution.
-    pub error_grid: &'a ErrorGrid,
+    pub(crate) error_grid: &'a ErrorGrid,
     /// Baseline raw squared-difference score of `current` against `target`.
-    pub score: u64,
+    pub(crate) score: u64,
 }
 
 impl<R: Rng> WorkerCtx<R> {
     #[must_use]
-    pub fn new(width: i32, height: i32, rng: R) -> Self {
+    pub(crate) fn new(width: i32, height: i32, rng: R) -> Self {
         let edge_capacity = (width + 2 * height) as usize;
         Self {
             width,
@@ -77,7 +78,7 @@ impl<R: Rng> WorkerCtx<R> {
     /// With probability `BIASED_SAMPLING_RATE`, the coordinate is drawn
     /// from the error grid's CDF; otherwise it is drawn uniformly.
     #[inline]
-    pub fn sample_xy(&mut self, round: &SearchRound<'_>) -> (i32, i32) {
+    pub(crate) fn sample_xy(&mut self, round: &SearchRound<'_>) -> (i32, i32) {
         if self.rng.random::<f64>() < BIASED_SAMPLING_RATE {
             round.error_grid.sample(&mut self.rng)
         } else {
@@ -92,7 +93,7 @@ impl<R: Rng> WorkerCtx<R> {
     /// With probability `BIASED_SAMPLING_RATE`, the coordinate is drawn
     /// from the error grid's CDF; otherwise it is drawn uniformly.
     #[inline]
-    pub fn sample_xy_float(&mut self, round: &SearchRound<'_>) -> (f64, f64) {
+    pub(crate) fn sample_xy_float(&mut self, round: &SearchRound<'_>) -> (f64, f64) {
         if self.rng.random::<f64>() < BIASED_SAMPLING_RATE {
             round.error_grid.sample_float(&mut self.rng)
         } else {
@@ -114,7 +115,7 @@ impl<R: Rng> WorkerCtx<R> {
     /// 2. Compute the optimal blending color for those scanlines.
     /// 3. Fused score: compute blend and partial RMS in one pass (no buffer write).
     /// 4. Increment `self.evaluations`.
-    pub fn energy(
+    pub(crate) fn energy(
         &mut self,
         round: &SearchRound<'_>,
         rasterize: impl FnOnce(&mut Self) -> &[Scanline],
@@ -140,15 +141,20 @@ impl<R: Rng> WorkerCtx<R> {
         result
     }
 
-    pub fn random_state(&mut self, round: &SearchRound<'_>, kind: ShapeKind, alpha: i32) -> State {
-        State::new(Shape::random(kind, self, round), alpha)
-    }
-
-    pub fn best_random_state(
+    pub(crate) fn random_state(
         &mut self,
         round: &SearchRound<'_>,
         kind: ShapeKind,
-        alpha: i32,
+        alpha: Alpha,
+    ) -> State {
+        State::new(Shape::random(kind, self, round), alpha)
+    }
+
+    pub(crate) fn best_random_state(
+        &mut self,
+        round: &SearchRound<'_>,
+        kind: ShapeKind,
+        alpha: Alpha,
         n: usize,
     ) -> State {
         assert!(n > 0, "best_random_state requires at least one sample");
@@ -191,7 +197,7 @@ impl<R: Rng> WorkerCtx<R> {
         &mut self,
         round: &SearchRound<'_>,
         kind: ShapeKind,
-        alpha: i32,
+        alpha: Alpha,
         n: usize,
         limit: usize,
     ) -> Vec<State> {
@@ -210,11 +216,11 @@ impl<R: Rng> WorkerCtx<R> {
         states
     }
 
-    pub fn best_hill_climb_state(
+    pub(crate) fn best_hill_climb_state(
         &mut self,
         round: &SearchRound<'_>,
         kind: ShapeKind,
-        alpha: i32,
+        alpha: Alpha,
         n: usize,
         age: usize,
         m: usize,
@@ -269,6 +275,7 @@ mod tests {
     use crate::Color;
     use crate::shapes::ShapeKind;
     use crate::state::State;
+    use crate::test_util::fixed_alpha;
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
 
@@ -279,7 +286,7 @@ mod tests {
     fn state_with_energy(energy: u64) -> State {
         let mut state = State::new(
             crate::shapes::Shape::Circle(crate::shapes::Circle { x: 5, y: 5, r: 3 }),
-            128,
+            fixed_alpha(128),
         );
         state.cached_energy = Some(energy);
         state
@@ -446,7 +453,7 @@ mod tests {
 
         let mut worker = WorkerCtx::new(32, 32, test_rng());
         for _ in 0..32 {
-            let state = worker.random_state(&round, ShapeKind::Any, 128);
+            let state = worker.random_state(&round, ShapeKind::Any, fixed_alpha(128));
             match state.shape {
                 crate::shapes::Shape::Triangle(_)
                 | crate::shapes::Shape::Rectangle(_)
@@ -474,7 +481,7 @@ mod tests {
         };
 
         let mut worker = WorkerCtx::new(32, 32, test_rng());
-        let mut state = worker.best_random_state(&round, ShapeKind::Any, 128, 8);
+        let mut state = worker.best_random_state(&round, ShapeKind::Any, fixed_alpha(128), 8);
         let energy = state.energy(&mut worker, &round);
 
         assert!(energy > 0);

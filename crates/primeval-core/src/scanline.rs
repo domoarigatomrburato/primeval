@@ -4,15 +4,15 @@
 /// field is in the 0..=0xFFFF range, matching Go's `uint32` convention
 /// used in the blending math.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Scanline {
+pub(crate) struct Scanline {
     /// The row this scanline occupies.
-    pub y: i32,
+    pub(crate) y: i32,
     /// The inclusive left column bound.
-    pub x1: i32,
+    pub(crate) x1: i32,
     /// The inclusive right column bound.
-    pub x2: i32,
+    pub(crate) x2: i32,
     /// Per-scanline alpha in the 0..=0xFFFF range.
-    pub alpha: u32,
+    pub(crate) alpha: u32,
 }
 
 /// Filters and clamps scanlines in-place so that every remaining line
@@ -20,7 +20,7 @@ pub struct Scanline {
 ///
 /// Lines that fall entirely outside the bounds are removed.
 /// Lines that partially overlap have their `x1`/`x2` clamped.
-pub fn crop_scanlines(lines: &mut Vec<Scanline>, w: i32, h: i32) {
+pub(crate) fn crop_scanlines(lines: &mut Vec<Scanline>, w: i32, h: i32) {
     let mut write = 0;
     for read in 0..lines.len() {
         let mut line = lines[read];
@@ -54,7 +54,7 @@ pub fn crop_scanlines(lines: &mut Vec<Scanline>, w: i32, h: i32) {
 /// The buffer is assumed to start at `(0, 0)`.
 #[must_use]
 #[inline]
-pub fn clamp_line(line: &Scanline, w: i32, h: i32) -> Option<(i32, i32)> {
+pub(crate) fn clamp_line(line: &Scanline, w: i32, h: i32) -> Option<(i32, i32)> {
     if line.y < 0 || line.y > h - 1 {
         return None;
     }

@@ -80,3 +80,21 @@ test("approximate rejects invalid abort signals with ValidationError", () => {
       err instanceof ValidationError && err.message === "execution.signal must be an AbortSignal",
   );
 });
+
+test("approximate rejects alpha outside auto and 1..255 with ValidationError", () => {
+  for (const alpha of [0, 256, -1, 1.5, true]) {
+    assert.throws(
+      () =>
+        approximate(
+          /** @type {any} */ ({
+            input: Buffer.from([0]),
+            output: "svg",
+            render: { alpha },
+          }),
+        ),
+      (err) =>
+        err instanceof ValidationError && err.message === "alpha must be auto or an integer 1..255",
+      String(alpha),
+    );
+  }
+});
