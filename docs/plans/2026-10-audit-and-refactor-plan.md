@@ -215,14 +215,6 @@ Since ENG-4 (T5), runner quality is identical across thread counts; times still 
   - Compute squares as `vabdq_u8` → `vmull_u8` → `vpadalq_u16`.
   - Low priority while the bottleneck is rasterization.
 
-### PERF-8: Score the random phase at reduced resolution
-
-- **Severity / status:** Medium–High. Estimated. `next: no` (unless "next" keeps candidate search).
-- **Idea:**
-  - Evaluate the 16k random candidates on a 2× downsampled target and canvas (4× fewer pixels), then hill-climb the best k at full resolution.
-  - It targets the 75–80% of evaluations that are independent.
-  - It changes search behaviour, so it needs PERF-0's quality metrics to accept.
-
 ---
 
 ## 7. API and engineering quality (API)
@@ -324,10 +316,12 @@ Done. Every ENG item and TEST-4 landed, plus two found on the way: symmetric ell
 
 ### T6: Performance, gated by benchmarks
 
+Done except the deferred items. Full PERF-0 runner, 8 threads, total search time on the M3 (median of alternating runs, one core busy with another app): 161 s before PERF-1, 142 s with it (-12%), about 123 s with PERF-8 as landed (-14%; the excluded kinds were within 4% of PERF-1 alone). PERF-4 gave -16% before that, PERF-5 -46%/-59% single-threaded on polygon and rotated-ellipse steps.
+
 - [x] PERF-5, PERF-6, PERF-10: coverage evaluated only at span-end pixels, reusable row scratch, integer error-grid sums (bit-identical output)
-- [x] PERF-1 Prefix sums + exact early exit: same chosen shapes, about half the blended pixels skipped (clean runner timings still to record)
-- [x] PERF-4 RGB-only kernels (RM-4): byte-identical output, 16% faster search on the runner
-- [ ] PERF-8 Reduced-resolution random phase (needs quality metrics)
+- [x] PERF-4 RGB-only kernels (RM-4): byte-identical output
+- [x] PERF-1 Prefix sums and an exact early exit: same chosen shapes, about half the blended pixels skipped; single-threaded `model_step` 5% (quadratic) to 52% (rectangle) faster
+- [x] PERF-8 Half-resolution ranking of the random phase, rescoring the best 128 at full resolution, for any, circle, ellipse, rotated ellipse and polygon only: quality equal within noise at 100–1000 steps. Rescoring only 4 lost 1.3% at 1000 steps; rectangles, rotated rectangles and triangles gained almost no time, so they rank at full resolution.
 - [x] PERF-11: documented in the README's Deploying section; a CLI batch mode is a maintainer decision
 - [ ] Deferred until the "next" decision: PERF-2 runtime-dispatched x86 SIMD, PERF-3 NEON accumulator tuning (section 15)
 
