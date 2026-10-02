@@ -5,9 +5,15 @@
 //! pixels by coverage instead. Buffers are opaque RGB, so every kernel
 //! works on the three colour channels only. On aarch64, hot paths use NEON
 //! intrinsics to process 8 pixels per iteration.
+//!
+//! The search scores every candidate against the same target and canvas, so
+//! [`fit`] reads each line's sums from the step's [`PrefixSums`] and the
+//! energy only blends; [`energy_below`] stops a candidate as soon as it
+//! cannot beat the best energy so far.
 
 use crate::buffer::{BYTES_PER_PIXEL, Buffer};
 use crate::color::Color;
+use crate::prefix::{MAX_CHANNEL_SPAN, PrefixSums, SpanSums};
 use crate::scanline::{Scanline, clamp_line};
 
 const M: u32 = 0xFFFF;
@@ -195,39 +201,313 @@ impl ColorFit {
     }
 }
 
-mod scalar {
-    use super::{
-        BYTES_PER_PIXEL, Buffer, Color, ColorFit, M, Scanline, blend_channel_scalar, clamp_line,
-    };
+/// Lines shorter than this, the one-pixel anti-aliased edge runs that make
+/// up most lines of the polygon, rotated-ellipse and quadratic fills, are
+/// summed from their pixels, which the energy reads next anyway; longer
+/// lines read the step's [`PrefixSums`]. Measured with the Divan
+/// `compute_color` and `energy_from_lines_raw` benches: looking up one-pixel
+/// lines is slower, and summing two-pixel lines directly gains nothing.
+const SHORT_LINE_PIXELS: usize = 2;
 
-    #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
-    pub(super) fn compute_color(
-        target: &Buffer,
-        current: &Buffer,
-        lines: &[Scanline],
-        alpha: i32,
-    ) -> Color {
-        let w = target.width() as i32;
-        let h = target.height() as i32;
-        let t_pix = target.pixels();
-        let c_pix = current.pixels();
-        let mut fit = ColorFit::new();
+/// The per-scanline kernels behind [`fit`] and the energies, in
+/// scalar code ([`Scalar`]) or NEON ([`Neon`]).
+///
+/// # Safety
+///
+/// For every method, `start + pixels * 3` must not exceed `t_pix.len()` or
+/// `c_pix.len()`.
+trait LineKernels {
+    /// Per-channel RGB sums of `pixels` pixels from byte offset `start` in
+    /// the target and in the canvas.
+    unsafe fn line_sums(
+        t_pix: &[u8],
+        c_pix: &[u8],
+        start: usize,
+        pixels: usize,
+    ) -> ([u64; 3], [u64; 3]);
 
-        for line in lines {
-            let k = ColorFit::weight(alpha, line.alpha);
-            if k == 0 {
-                continue;
+    /// The sum of squared channel differences between the target and the
+    /// canvas over `pixels` pixels from byte offset `start`.
+    unsafe fn line_error(t_pix: &[u8], c_pix: &[u8], start: usize, pixels: usize) -> u64;
+
+    /// The same sum after blending premultiplied `source` channels onto the
+    /// canvas with coverage `ma` and canvas factor `a`, as [`draw_lines`]
+    /// would.
+    unsafe fn line_after(
+        t_pix: &[u8],
+        c_pix: &[u8],
+        start: usize,
+        pixels: usize,
+        source: [u32; 3],
+        ma: u32,
+        a: u32,
+    ) -> u64;
+}
+
+/// The kernels for this target: NEON on aarch64, scalar elsewhere.
+#[cfg(target_arch = "aarch64")]
+type Native = Neon;
+#[cfg(not(target_arch = "aarch64"))]
+type Native = Scalar;
+
+/// Asserts that `sums` were built for buffers of `width` x `height`.
+#[inline]
+fn assert_sums_match(sums: Option<&PrefixSums>, width: u32, height: u32) {
+    if let Some(sums) = sums {
+        assert!(
+            sums.matches(width, height),
+            "prefix sums must match the buffers"
+        );
+    }
+}
+
+/// A shape's fitted colour and the old error of the pixels it covers,
+/// which its energy subtracts; see [`fit`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Fit {
+    pub(crate) color: Color,
+    /// The squared channel differences between the target and the canvas
+    /// over every in-bounds pixel of every line, a pixel counted once per
+    /// line that covers it.
+    pub(crate) before: u64,
+}
+
+/// [`fit`] with the kernels `K`.
+fn fit_with<K: LineKernels>(
+    target: &Buffer,
+    current: &Buffer,
+    sums: Option<&PrefixSums>,
+    lines: &[Scanline],
+    alpha: i32,
+) -> Fit {
+    assert_same_dimensions(target, current);
+    assert_sums_match(sums, target.width(), target.height());
+    debug_assert!((1..=255).contains(&alpha), "alpha must be 1..=255");
+    let w = target.width() as i32;
+    let h = target.height() as i32;
+    let t_pix = target.pixels();
+    let c_pix = current.pixels();
+    let mut fit = ColorFit::new();
+    let mut before = 0_u64;
+
+    for line in lines {
+        let Some((x1, x2)) = clamp_line(line, w, h) else {
+            continue;
+        };
+        let k = ColorFit::weight(alpha, line.alpha);
+        let pixels = (x2 - x1 + 1) as usize;
+        let start = target.pix_offset(x1, line.y);
+        // `clamp_line` keeps `line.y` in `0..h` and `x1..=x2` in `0..w` of
+        // `target`, so `start + pixels * 3` is at most `w * h * 3`, the
+        // length of `target.pixels()` (the `Buffer` length invariant,
+        // asserted by every constructor). `current` has the same dimensions
+        // (asserted above), so the same length: every kernel call below
+        // meets its contract.
+        let span = if pixels < SHORT_LINE_PIXELS {
+            // SAFETY: see above.
+            Some(unsafe { scalar::span_sums(t_pix, c_pix, start, pixels) })
+        } else {
+            match sums {
+                Some(sums) if pixels <= MAX_CHANNEL_SPAN => Some(sums.span(line.y, x1, x2)),
+                _ => None,
             }
-            let Some((x1, x2)) = clamp_line(line, w, h) else {
-                continue;
-            };
-            let pixels = (x2 - x1 + 1) as usize;
-            let start = target.pix_offset(x1, line.y);
-            let (target_sums, current_sums) = line_sums(t_pix, c_pix, start, pixels);
-            fit.add_line(k, pixels, target_sums, current_sums);
+        };
+        match span {
+            Some(span) => {
+                before = before.wrapping_add(span.error);
+                if k != 0 {
+                    fit.add_line(k, pixels, span.target, span.current);
+                }
+            }
+            None => {
+                let error = match sums {
+                    Some(sums) => sums.error(line.y, x1, x2),
+                    // SAFETY: see above.
+                    None => unsafe { K::line_error(t_pix, c_pix, start, pixels) },
+                };
+                before = before.wrapping_add(error);
+                if k != 0 {
+                    // SAFETY: see above.
+                    let (target_sums, current_sums) =
+                        unsafe { K::line_sums(t_pix, c_pix, start, pixels) };
+                    fit.add_line(k, pixels, target_sums, current_sums);
+                }
+            }
         }
+    }
 
-        fit.color(alpha)
+    Fit {
+        color: fit.color(alpha),
+        before,
+    }
+}
+
+/// The energy of drawing `lines` in `fit.color`: `score` minus
+/// `fit.before` plus the new error of every covered pixel, in the wrapping
+/// arithmetic of [`energy`].
+///
+/// With a `limit`, stops and returns `None` as soon as the running total
+/// reaches it. Every old error is subtracted first and the new errors are
+/// non-negative, so from then on the total only grows, and stopping means
+/// the energy is at least `limit`. That holds while no partial total
+/// overflows `i64`, which needs a canvas of about `2^43` pixels.
+fn energy_with<K: LineKernels>(
+    target: &Buffer,
+    current: &Buffer,
+    lines: &[Scanline],
+    fit: Fit,
+    score: u64,
+    limit: Option<i64>,
+) -> Option<u64> {
+    assert_same_dimensions(target, current);
+    let [sr, sg, sb, sa] = fit.color.to_premultiplied_rgba();
+    let w = target.width() as i32;
+    let h = target.height() as i32;
+    let t_pix = target.pixels();
+    let c_pix = current.pixels();
+    let reached = |total: i64| limit.is_some_and(|limit| total >= limit);
+
+    let mut total = (score as i64).wrapping_sub(fit.before as i64);
+    if reached(total) {
+        return None;
+    }
+    for line in lines {
+        let Some((x1, x2)) = clamp_line(line, w, h) else {
+            continue;
+        };
+        let ma = line.alpha;
+        let a = (M - sa * ma / M) * 0x101;
+        let pixels = (x2 - x1 + 1) as usize;
+        let start = target.pix_offset(x1, line.y);
+        // SAFETY: as in `fit_with`, the clamped line lies inside `target`,
+        // and `current` has the same dimensions.
+        let after = unsafe { K::line_after(t_pix, c_pix, start, pixels, [sr, sg, sb], ma, a) };
+        total = total.wrapping_add(after as i64);
+        if reached(total) {
+            return None;
+        }
+    }
+
+    Some(total as u64)
+}
+
+/// The scalar kernels, for targets without NEON and as the reference the
+/// NEON kernels are tested against.
+#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+struct Scalar;
+
+impl LineKernels for Scalar {
+    #[inline]
+    unsafe fn line_sums(
+        t_pix: &[u8],
+        c_pix: &[u8],
+        start: usize,
+        pixels: usize,
+    ) -> ([u64; 3], [u64; 3]) {
+        scalar::line_sums(t_pix, c_pix, start, pixels)
+    }
+
+    #[inline]
+    unsafe fn line_error(t_pix: &[u8], c_pix: &[u8], start: usize, pixels: usize) -> u64 {
+        let end = start + pixels * BYTES_PER_PIXEL;
+        scalar::difference_full_raw_pixels(&t_pix[start..end], &c_pix[start..end])
+    }
+
+    #[inline]
+    unsafe fn line_after(
+        t_pix: &[u8],
+        c_pix: &[u8],
+        start: usize,
+        pixels: usize,
+        source: [u32; 3],
+        ma: u32,
+        a: u32,
+    ) -> u64 {
+        scalar::line_after(t_pix, c_pix, start, pixels, source, ma, a)
+    }
+}
+
+/// The NEON kernels.
+#[cfg(target_arch = "aarch64")]
+struct Neon;
+
+#[cfg(target_arch = "aarch64")]
+impl LineKernels for Neon {
+    #[inline]
+    unsafe fn line_sums(
+        t_pix: &[u8],
+        c_pix: &[u8],
+        start: usize,
+        pixels: usize,
+    ) -> ([u64; 3], [u64; 3]) {
+        // SAFETY: this method's contract is `neon::line_sums`'s.
+        unsafe { neon::line_sums(t_pix, c_pix, start, pixels) }
+    }
+
+    #[inline]
+    unsafe fn line_error(t_pix: &[u8], c_pix: &[u8], start: usize, pixels: usize) -> u64 {
+        let end = start + pixels * BYTES_PER_PIXEL;
+        neon::difference_bytes(&t_pix[start..end], &c_pix[start..end])
+    }
+
+    #[inline]
+    unsafe fn line_after(
+        t_pix: &[u8],
+        c_pix: &[u8],
+        start: usize,
+        pixels: usize,
+        source: [u32; 3],
+        ma: u32,
+        a: u32,
+    ) -> u64 {
+        // SAFETY: this method's contract is `neon::line_after`'s.
+        unsafe { neon::line_after(t_pix, c_pix, start, pixels, source, ma, a) }
+    }
+}
+
+mod scalar {
+    use super::{BYTES_PER_PIXEL, Buffer, SpanSums, blend_channel_scalar};
+
+    /// The sums of [`SpanSums`] over `pixels` pixels from byte offset
+    /// `start`, in one pass over the pixels; for the short lines that are
+    /// cheaper to read than to look up.
+    ///
+    /// # Safety
+    ///
+    /// `start + pixels * 3` must not exceed `t_pix.len()` or `c_pix.len()`.
+    #[inline]
+    pub(super) unsafe fn span_sums(
+        t_pix: &[u8],
+        c_pix: &[u8],
+        start: usize,
+        pixels: usize,
+    ) -> SpanSums {
+        let mut span = SpanSums {
+            target: [0; 3],
+            current: [0; 3],
+            error: 0,
+        };
+        let mut byte = start;
+        for _ in 0..pixels {
+            let mut error = 0_u32;
+            for channel in 0..BYTES_PER_PIXEL {
+                // SAFETY: `byte + channel` is below `start + pixels * 3`,
+                // within both slices by the caller's contract.
+                let (t, c) = unsafe {
+                    (
+                        *t_pix.get_unchecked(byte + channel),
+                        *c_pix.get_unchecked(byte + channel),
+                    )
+                };
+                span.target[channel] += u64::from(t);
+                span.current[channel] += u64::from(c);
+                let d = u32::from(t.abs_diff(c));
+                error += d * d;
+            }
+            span.error += u64::from(error);
+            byte += BYTES_PER_PIXEL;
+        }
+        span
     }
 
     /// Per-channel RGB sums of `pixels` pixels from byte offset `start` in
@@ -272,58 +552,39 @@ mod scalar {
             .sum()
     }
 
+    /// The squared channel differences between the target and the canvas
+    /// blended with `source`, over `pixels` pixels from byte offset `start`.
     #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
-    pub(super) fn energy_from_lines_raw(
-        target: &Buffer,
-        current: &Buffer,
-        lines: &[Scanline],
-        color: Color,
-        score: u64,
+    #[inline]
+    pub(super) fn line_after(
+        t_pix: &[u8],
+        c_pix: &[u8],
+        start: usize,
+        pixels: usize,
+        source: [u32; 3],
+        ma: u32,
+        a: u32,
     ) -> u64 {
-        let [sr, sg, sb, sa] = color.to_premultiplied_rgba();
-        let w = target.width() as i32;
-        let h = target.height() as i32;
-        let mut total = score;
-
-        let t_pix = target.pixels();
-        let c_pix = current.pixels();
-
-        for line in lines {
-            let (x1, x2) = match clamp_line(line, w, h) {
-                Some(v) => v,
-                None => continue,
-            };
-            let ma = line.alpha;
-            let a = (M - sa * ma / M) * 0x101;
-            let start = target.pix_offset(x1, line.y);
-            let end = target.pix_offset(x2 + 1, line.y);
-            let (t_px3, _) = t_pix[start..end].as_chunks::<3>();
-            let (c_px3, _) = c_pix[start..end].as_chunks::<3>();
-            for (t_px, c_px) in t_px3.iter().zip(c_px3) {
-                let mut before = 0_i32;
-                let mut after = 0_i32;
-                for (channel, &source) in [sr, sg, sb].iter().enumerate() {
-                    let t = i32::from(t_px[channel]);
-                    let c = c_px[channel];
-                    let d1 = t - i32::from(c);
-                    let d2 = t - i32::from(blend_channel_scalar(c, source, ma, a));
-                    before += d1 * d1;
-                    after += d2 * d2;
-                }
-                total = total.wrapping_sub(before as u64).wrapping_add(after as u64);
+        let end = start + pixels * BYTES_PER_PIXEL;
+        let (t_px3, _) = t_pix[start..end].as_chunks::<3>();
+        let (c_px3, _) = c_pix[start..end].as_chunks::<3>();
+        let mut total = 0_u64;
+        for (t_px, c_px) in t_px3.iter().zip(c_px3) {
+            let mut after = 0_u32;
+            for channel in 0..3 {
+                let blended = blend_channel_scalar(c_px[channel], source[channel], ma, a);
+                let d = u32::from(t_px[channel].abs_diff(blended));
+                after += d * d;
             }
+            total += u64::from(after);
         }
-
         total
     }
 }
 
 #[cfg(target_arch = "aarch64")]
 mod neon {
-    use super::{
-        BYTES_PER_PIXEL, Buffer, Color, ColorFit, M, Scanline, blend_channel_scalar, clamp_line,
-        scalar,
-    };
+    use super::{BYTES_PER_PIXEL, Buffer, blend_channel_scalar, scalar};
     use std::arch::aarch64::*;
 
     /// Bytes in a chunk of 8 RGB pixels, the unit of every `vld3_u8`.
@@ -434,7 +695,7 @@ mod neon {
     ///
     /// `start + pixels * 3` must not exceed `t_pix.len()` or `c_pix.len()`.
     #[inline]
-    unsafe fn line_sums(
+    pub(super) unsafe fn line_sums(
         t_pix: &[u8],
         c_pix: &[u8],
         start: usize,
@@ -529,47 +790,6 @@ mod neon {
         (target_sums, current_sums)
     }
 
-    /// # Safety
-    ///
-    /// `current` must have the same width and height as `target`. Scanlines are
-    /// clipped against `target`, and the 8-pixel loads read both buffers at the
-    /// same byte offsets. The safe wrapper [`super::compute_color`] checks this.
-    pub(super) unsafe fn compute_color(
-        target: &Buffer,
-        current: &Buffer,
-        lines: &[Scanline],
-        alpha: i32,
-    ) -> Color {
-        let w = target.width() as i32;
-        let h = target.height() as i32;
-        let t_pix = target.pixels();
-        let c_pix = current.pixels();
-        let mut fit = ColorFit::new();
-
-        for line in lines {
-            let k = ColorFit::weight(alpha, line.alpha);
-            if k == 0 {
-                continue;
-            }
-            let Some((x1, x2)) = clamp_line(line, w, h) else {
-                continue;
-            };
-            let pixels = (x2 - x1 + 1) as usize;
-            let start = target.pix_offset(x1, line.y);
-            // SAFETY: `clamp_line` keeps `line.y` in `0..h` and `x1..=x2` in
-            // `0..w` of `target`, so `start + pixels * 3` is at most the
-            // length of `target.pixels()`, `w * h * 3` (the `Buffer` length
-            // invariant, asserted by every constructor). `current` has
-            // `target`'s width and height (this function's contract, asserted
-            // by the safe caller), so by the same invariant
-            // `c_pix.len() == t_pix.len()`.
-            let (target_sums, current_sums) = unsafe { line_sums(t_pix, c_pix, start, pixels) };
-            fit.add_line(k, pixels, target_sums, current_sums);
-        }
-
-        fit.color(alpha)
-    }
-
     /// Chunks of 16 bytes whose squared differences are summed in 32-bit
     /// lanes before widening: each chunk adds at most `4 * 255²` to a lane,
     /// and `4096 * 4 * 65_025 < 2^32`.
@@ -578,13 +798,18 @@ mod neon {
     /// Sum of squared differences of every byte; matches
     /// [`scalar::difference_full_raw`]. Every byte of an RGB buffer is a
     /// colour channel, so plain 16-byte loads need no deinterleaving.
+    pub(super) fn difference_full_raw(a: &Buffer, b: &Buffer) -> u64 {
+        difference_bytes(a.pixels(), b.pixels())
+    }
+
+    /// Sum of squared differences of every pair of bytes; matches
+    /// [`scalar::difference_full_raw_pixels`].
     ///
-    /// # Safety
+    /// # Panics
     ///
-    /// `a` and `b` must have the same width and height.
-    pub(super) unsafe fn difference_full_raw(a: &Buffer, b: &Buffer) -> u64 {
-        let a_pix = a.pixels();
-        let b_pix = b.pixels();
+    /// Panics if the slices have different lengths.
+    pub(super) fn difference_bytes(a_pix: &[u8], b_pix: &[u8]) -> u64 {
+        assert_eq!(a_pix.len(), b_pix.len(), "byte slices of different lengths");
         let mut chunks = a_pix.len() / 16;
         let chunk_bytes = chunks * 16;
         let mut total = 0_u64;
@@ -595,12 +820,10 @@ mod neon {
             chunks -= block;
             // SAFETY: each `vld1q_u8` reads 16 bytes from `byte_index`, and
             // the loops read `a_pix.len() / 16` chunks in total from 0, so
-            // every read ends at or below `chunk_bytes <= a_pix.len()`. By
-            // this function's contract `b` has `a`'s dimensions, so by the
-            // `Buffer` invariant (`len == width * height * 3`)
-            // `b_pix.len() == a_pix.len()` and the reads from `b_pix` are in
-            // bounds too. The remaining calls are register-only NEON
-            // operations; NEON is a baseline aarch64 feature.
+            // every read ends at or below `chunk_bytes <= a_pix.len()`, and
+            // `b_pix` has the same length (asserted above). The remaining
+            // calls are register-only NEON operations; NEON is a baseline
+            // aarch64 feature.
             unsafe {
                 let mut acc = vdupq_n_u32(0);
                 for _ in 0..block {
@@ -620,119 +843,78 @@ mod neon {
         total + scalar::difference_full_raw_pixels(&a_pix[chunk_bytes..], &b_pix[chunk_bytes..])
     }
 
+    /// The squared channel differences between the target and the canvas
+    /// blended with `source`; matches [`scalar::line_after`].
+    ///
     /// # Safety
     ///
-    /// `current` must have the same width and height as `target`. Scanlines are
-    /// clipped against `target`, and the 8-pixel loads read both buffers at the
-    /// same byte offsets. The safe wrapper [`super::energy_from_lines_raw`]
-    /// checks this.
-    pub(super) unsafe fn energy_from_lines_raw(
-        target: &Buffer,
-        current: &Buffer,
-        lines: &[Scanline],
-        color: Color,
-        score: u64,
+    /// `start + pixels * 3` must not exceed `t_pix.len()` or `c_pix.len()`.
+    #[inline]
+    pub(super) unsafe fn line_after(
+        t_pix: &[u8],
+        c_pix: &[u8],
+        start: usize,
+        pixels: usize,
+        source: [u32; 3],
+        ma: u32,
+        a: u32,
     ) -> u64 {
-        let [sr, sg, sb, sa] = color.to_premultiplied_rgba();
-        let w = target.width() as i32;
-        let h = target.height() as i32;
-        let mut total = score;
-        let t_pix = target.pixels();
-        let c_pix = current.pixels();
+        let [sr, sg, sb] = source;
+        let mut total = 0_u64;
+        let mut byte_index = start;
 
-        for line in lines {
-            let (x1, x2) = match clamp_line(line, w, h) {
-                Some(v) => v,
-                None => continue,
-            };
-
-            let ma = line.alpha;
-            let a = (M - sa * ma / M) * 0x101;
-            let pixel_count = (x2 - x1 + 1) as usize;
-            let mut byte_index = target.pix_offset(x1, line.y);
-            let chunk_pixels = pixel_count / 8;
-
-            for _ in 0..chunk_pixels {
-                // SAFETY: same bounds argument as in `compute_color`: each
-                // `vld3_u8` reads 8 pixels (24 bytes) inside the clipped row
-                // of `target`, and `current` has `target`'s dimensions (this
-                // function's contract, asserted by the safe caller), so
-                // `c_pix.len() == t_pix.len()` by the `Buffer` length
-                // invariant.
-                let (target_channels, current_channels) = unsafe {
-                    (
-                        vld3_u8(t_pix.as_ptr().add(byte_index)),
-                        vld3_u8(c_pix.as_ptr().add(byte_index)),
-                    )
-                };
-
-                // SAFETY: these helpers only run register-only NEON operations
-                // (no memory access); NEON is a baseline aarch64 feature.
-                unsafe {
-                    total = total
-                        .wrapping_sub(sum_squared_diff_u8x8(target_channels.0, current_channels.0));
-                    total = total
-                        .wrapping_sub(sum_squared_diff_u8x8(target_channels.1, current_channels.1));
-                    total = total
-                        .wrapping_sub(sum_squared_diff_u8x8(target_channels.2, current_channels.2));
-
-                    let after_r = blend_vector_u8x8(current_channels.0, sr, ma, a);
-                    let after_g = blend_vector_u8x8(current_channels.1, sg, ma, a);
-                    let after_b = blend_vector_u8x8(current_channels.2, sb, ma, a);
-
-                    total = total.wrapping_add(sum_squared_diff_u8x8(target_channels.0, after_r));
-                    total = total.wrapping_add(sum_squared_diff_u8x8(target_channels.1, after_g));
-                    total = total.wrapping_add(sum_squared_diff_u8x8(target_channels.2, after_b));
-                }
-                byte_index += CHUNK_BYTES;
+        for _ in 0..pixels / 8 {
+            // SAFETY: each `vld3_u8` reads 8 pixels (24 bytes) from
+            // `byte_index`; the loop reads `pixels / 8` chunks from `start`,
+            // which end at or below `start + pixels * 3`, within both slices
+            // by the caller's contract. The remaining calls are
+            // register-only NEON operations; NEON is a baseline aarch64
+            // feature.
+            unsafe {
+                let t = vld3_u8(t_pix.as_ptr().add(byte_index));
+                let c = vld3_u8(c_pix.as_ptr().add(byte_index));
+                total += sum_squared_diff_u8x8(t.0, blend_vector_u8x8(c.0, sr, ma, a));
+                total += sum_squared_diff_u8x8(t.1, blend_vector_u8x8(c.1, sg, ma, a));
+                total += sum_squared_diff_u8x8(t.2, blend_vector_u8x8(c.2, sb, ma, a));
             }
+            byte_index += CHUNK_BYTES;
+        }
 
-            // As in `line_sums`: a masked 8-pixel chunk for three or more
-            // tail pixels when the buffers extend that far, scalar otherwise.
-            let tail = pixel_count % 8;
-            if tail > 2 && byte_index + CHUNK_BYTES <= t_pix.len() {
-                // SAFETY: `vld3_u8` reads 24 bytes from `byte_index`, within
-                // `t_pix` by the check above and within `c_pix`, which has
-                // the same length. Lanes past the line keep the canvas
-                // value, so their before and after terms cancel exactly.
-                // The remaining calls are register-only NEON operations.
-                unsafe {
-                    let mask = tail_mask(tail);
-                    let t = vld3_u8(t_pix.as_ptr().add(byte_index));
-                    let c = vld3_u8(c_pix.as_ptr().add(byte_index));
-                    total = total.wrapping_sub(sum_squared_diff_u8x8(t.0, c.0));
-                    total = total.wrapping_sub(sum_squared_diff_u8x8(t.1, c.1));
-                    total = total.wrapping_sub(sum_squared_diff_u8x8(t.2, c.2));
-                    let after_r = vbsl_u8(mask, blend_vector_u8x8(c.0, sr, ma, a), c.0);
-                    let after_g = vbsl_u8(mask, blend_vector_u8x8(c.1, sg, ma, a), c.1);
-                    let after_b = vbsl_u8(mask, blend_vector_u8x8(c.2, sb, ma, a), c.2);
-                    total = total.wrapping_add(sum_squared_diff_u8x8(t.0, after_r));
-                    total = total.wrapping_add(sum_squared_diff_u8x8(t.1, after_g));
-                    total = total.wrapping_add(sum_squared_diff_u8x8(t.2, after_b));
+        // As in `line_sums`: a masked 8-pixel chunk for three or more tail
+        // pixels when the buffers extend that far, scalar otherwise.
+        let tail = pixels % 8;
+        if tail > 2 && byte_index + CHUNK_BYTES <= t_pix.len().min(c_pix.len()) {
+            // SAFETY: `vld3_u8` reads 24 bytes from `byte_index`, within
+            // both slices by the check above. Lanes past the line take the
+            // target's value, so they add nothing. The remaining calls are
+            // register-only NEON operations.
+            unsafe {
+                let mask = tail_mask(tail);
+                let t = vld3_u8(t_pix.as_ptr().add(byte_index));
+                let c = vld3_u8(c_pix.as_ptr().add(byte_index));
+                let after_r = vbsl_u8(mask, blend_vector_u8x8(c.0, sr, ma, a), t.0);
+                let after_g = vbsl_u8(mask, blend_vector_u8x8(c.1, sg, ma, a), t.1);
+                let after_b = vbsl_u8(mask, blend_vector_u8x8(c.2, sb, ma, a), t.2);
+                total += sum_squared_diff_u8x8(t.0, after_r);
+                total += sum_squared_diff_u8x8(t.1, after_g);
+                total += sum_squared_diff_u8x8(t.2, after_b);
+            }
+        } else {
+            for _ in 0..tail {
+                for (channel, &source) in source.iter().enumerate() {
+                    // SAFETY: the tail reads the last `tail` pixels of the
+                    // line, which end at `start + pixels * 3`, within both
+                    // slices by the caller's contract.
+                    let (t, c) = unsafe {
+                        (
+                            *t_pix.as_ptr().add(byte_index + channel),
+                            *c_pix.as_ptr().add(byte_index + channel),
+                        )
+                    };
+                    let d = u32::from(t.abs_diff(blend_channel_scalar(c, source, ma, a)));
+                    total += u64::from(d * d);
                 }
-            } else {
-                let source = [sr, sg, sb];
-                for _ in 0..tail {
-                    let mut before = 0_i32;
-                    let mut after = 0_i32;
-                    for (channel, &source) in source.iter().enumerate() {
-                        // SAFETY: the tail reads the last `tail` pixels of
-                        // the clipped row, inside `target` and, by this
-                        // function's contract, inside `current`.
-                        let (t, c) = unsafe {
-                            (
-                                i32::from(*t_pix.as_ptr().add(byte_index + channel)),
-                                *c_pix.as_ptr().add(byte_index + channel),
-                            )
-                        };
-                        let d1 = t - i32::from(c);
-                        let d2 = t - i32::from(blend_channel_scalar(c, source, ma, a));
-                        before += d1 * d1;
-                        after += d2 * d2;
-                    }
-                    total = total.wrapping_sub(before as u64).wrapping_add(after as u64);
-                    byte_index += BYTES_PER_PIXEL;
-                }
+                byte_index += BYTES_PER_PIXEL;
             }
         }
 
@@ -742,17 +924,12 @@ mod neon {
 
 /// Computes the optimal color for drawing `lines` onto `current` to
 /// best approximate `target` at the given `alpha` level, which must be
-/// `1..=255`.
-///
-/// Each pixel is weighted by its scanline's coverage, so anti-aliased edges
-/// are fitted as partly covered (see [`ColorFit`]); Go's `primitive` treats
-/// them as fully covered, which under-saturates the colour.
-///
-/// Returns a zero [`Color`] if no in-bounds scanline pixel has coverage.
+/// `1..=255`; [`fit`] without prefix sums.
 ///
 /// # Panics
 ///
 /// Panics if `current` and `target` have different dimensions.
+#[cfg(test)]
 #[must_use]
 pub(crate) fn compute_color(
     target: &Buffer,
@@ -760,19 +937,33 @@ pub(crate) fn compute_color(
     lines: &[Scanline],
     alpha: i32,
 ) -> Color {
-    assert_same_dimensions(target, current);
-    debug_assert!((1..=255).contains(&alpha), "alpha must be 1..=255");
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: `assert_same_dimensions` above guarantees that `current` has
-        // `target`'s width and height, the contract of `neon::compute_color`.
-        unsafe { neon::compute_color(target, current, lines, alpha) }
-    }
+    fit(target, current, None, lines, alpha).color
+}
 
-    #[cfg(not(target_arch = "aarch64"))]
-    {
-        scalar::compute_color(target, current, lines, alpha)
-    }
+/// Fits the colour for drawing `lines` onto `current` to best approximate
+/// `target` at the given `alpha` level, which must be `1..=255`, and sums
+/// the old error of the covered pixels for [`energy`].
+///
+/// Each pixel is weighted by its scanline's coverage, so anti-aliased edges
+/// are fitted as partly covered (see [`ColorFit`]); Go's `primitive` treats
+/// them as fully covered, which under-saturates the colour. The colour is
+/// a zero [`Color`] if no in-bounds scanline pixel has coverage.
+///
+/// `sums`, the prefix sums of `target` against `current`, turn each line
+/// into two lookups; without them every pixel is read.
+///
+/// # Panics
+///
+/// Panics if `current`, `target` and `sums` have different dimensions.
+#[must_use]
+pub(crate) fn fit(
+    target: &Buffer,
+    current: &Buffer,
+    sums: Option<&PrefixSums>,
+    lines: &[Scanline],
+    alpha: i32,
+) -> Fit {
+    fit_with::<Native>(target, current, sums, lines, alpha)
 }
 
 /// Asserts the precondition of the NEON scanline kernels: `current` has
@@ -855,9 +1046,7 @@ pub(crate) fn difference_full_raw(a: &Buffer, b: &Buffer) -> u64 {
 
     #[cfg(target_arch = "aarch64")]
     {
-        // SAFETY: the `assert_eq!`s above guarantee `a` and `b` have the same
-        // dimensions, which is the contract of `neon::difference_full_raw`.
-        unsafe { neon::difference_full_raw(a, b) }
+        neon::difference_full_raw(a, b)
     }
 
     #[cfg(not(target_arch = "aarch64"))]
@@ -923,12 +1112,13 @@ pub(crate) fn difference_partial(
     raw_score_to_normalized(total, target.width(), target.height())
 }
 
-/// Fused replacement for `copy_and_draw_lines` + `difference_partial`.
+/// The raw score after drawing `lines` with `fit`, which [`fit`] computed
+/// for the same buffers and lines.
 ///
-/// Computes the blended pixel for each covered scanline pixel on the fly
-/// (no write to any intermediate buffer) and accumulates the squared-difference
-/// update in a single pass. This halves memory traffic compared to the
-/// two-pass approach used outside the hot energy-evaluation loop.
+/// Fused replacement for `copy_and_draw_lines` + `difference_partial`:
+/// `score` minus the old error of the covered pixels, from `fit.before`,
+/// plus their error after blending, computed on the fly (no write to any
+/// intermediate buffer).
 ///
 /// The running total uses wrapping arithmetic: a scanline set that covers a
 /// pixel twice (the quadratic stroke, ENG-2) subtracts that pixel's old
@@ -939,6 +1129,47 @@ pub(crate) fn difference_partial(
 ///
 /// Panics if `current` and `target` have different dimensions.
 #[must_use]
+pub(crate) fn energy(
+    target: &Buffer,
+    current: &Buffer,
+    lines: &[Scanline],
+    fit: Fit,
+    score: u64,
+) -> u64 {
+    energy_with::<Native>(target, current, lines, fit, score, None)
+        .expect("an evaluation without a limit runs to the end")
+}
+
+/// The [`energy`] if it is below `bound`, `None` otherwise.
+///
+/// The search only keeps a candidate whose energy is below the best so far,
+/// so it passes that energy as the bound, and the evaluation stops as soon
+/// as the candidate cannot beat it: once every old error is subtracted, the
+/// running total only grows.
+///
+/// # Panics
+///
+/// Panics if `current` and `target` have different dimensions.
+#[must_use]
+pub(crate) fn energy_below(
+    target: &Buffer,
+    current: &Buffer,
+    lines: &[Scanline],
+    fit: Fit,
+    score: u64,
+    bound: u64,
+) -> Option<u64> {
+    // A bound beyond `i64::MAX` is never reached by a total that fits in
+    // `i64`, so the evaluation runs to the end and the check below decides.
+    let limit = i64::try_from(bound).ok();
+    energy_with::<Native>(target, current, lines, fit, score, limit)
+        .filter(|&energy| energy < bound)
+}
+
+/// [`energy`] for `color` instead of a fit: the old error comes from the
+/// pixels.
+#[cfg(test)]
+#[must_use]
 pub(crate) fn energy_from_lines_raw(
     target: &Buffer,
     current: &Buffer,
@@ -946,19 +1177,8 @@ pub(crate) fn energy_from_lines_raw(
     color: Color,
     score: u64,
 ) -> u64 {
-    assert_same_dimensions(target, current);
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: `assert_same_dimensions` above guarantees that `current` has
-        // `target`'s width and height, the contract of
-        // `neon::energy_from_lines_raw`.
-        unsafe { neon::energy_from_lines_raw(target, current, lines, color, score) }
-    }
-
-    #[cfg(not(target_arch = "aarch64"))]
-    {
-        scalar::energy_from_lines_raw(target, current, lines, color, score)
-    }
+    let before = fit(target, current, None, lines, 255).before;
+    energy(target, current, lines, Fit { color, before }, score)
 }
 
 #[cfg(test)]
@@ -973,6 +1193,52 @@ pub(crate) fn energy_from_lines(
     let raw = normalized_to_raw_score(score, target.width(), target.height());
     let total = energy_from_lines_raw(target, current, lines, color, raw);
     raw_score_to_normalized(total, target.width(), target.height())
+}
+
+#[cfg(test)]
+mod fixtures {
+    use super::M;
+    use crate::buffer::Buffer;
+    use crate::scanline::Scanline;
+    use rand::RngExt;
+    use rand_chacha::ChaCha8Rng;
+
+    pub(super) fn random_buffer(rng: &mut ChaCha8Rng, width: u32, height: u32) -> Buffer {
+        let mut buffer = Buffer::new(width, height);
+        rng.fill(buffer.pixels_mut());
+        buffer
+    }
+
+    /// Scanlines of every kind the kernels must handle: full rows touching
+    /// both edges, lines sticking out on either side or off the canvas,
+    /// lengths around the 8-pixel chunk size, and every coverage extreme.
+    pub(super) fn random_lines(rng: &mut ChaCha8Rng, width: i32, height: i32) -> Vec<Scanline> {
+        let alpha = |rng: &mut ChaCha8Rng| match rng.random_range(0..4) {
+            0 => 0,
+            1 => M,
+            _ => rng.random_range(0..=M),
+        };
+        let mut lines = Vec::new();
+        for y in -1..=height {
+            lines.push(Scanline {
+                y,
+                x1: -rng.random_range(0..3),
+                x2: width - 1 + rng.random_range(0..3),
+                alpha: alpha(rng),
+            });
+        }
+        for _ in 0..64 {
+            let x1 = rng.random_range(-10..width + 2);
+            let len = rng.random_range(0..2 * width + 20);
+            lines.push(Scanline {
+                y: rng.random_range(-1..=height),
+                x1,
+                x2: x1 + len - rng.random_range(0..2),
+                alpha: alpha(rng),
+            });
+        }
+        lines
+    }
 }
 
 #[cfg(test)]
@@ -1577,6 +1843,131 @@ mod tests {
         assert!((normalized - expected).abs() < 1e-12);
     }
 
+    /// Builds prefix sums for `target` against `current`.
+    fn prefix_sums(target: &Buffer, current: &Buffer) -> PrefixSums {
+        let mut sums = PrefixSums::default();
+        sums.compute(target, current);
+        sums
+    }
+
+    /// The fused energy computed pixel by pixel and line by line, as the
+    /// kernels did before prefix sums: each line subtracts the old error of
+    /// its pixels and adds their error after blending that line alone.
+    fn reference_energy(
+        target: &Buffer,
+        current: &Buffer,
+        lines: &[Scanline],
+        color: Color,
+        score: u64,
+    ) -> u64 {
+        let [sr, sg, sb, sa] = color.to_premultiplied_rgba();
+        let (w, h) = (target.width() as i32, target.height() as i32);
+        let mut total = score;
+        for line in lines {
+            let Some((x1, x2)) = clamp_line(line, w, h) else {
+                continue;
+            };
+            let ma = line.alpha;
+            let a = (M - sa * ma / M) * 0x101;
+            for x in x1..=x2 {
+                let i = target.pix_offset(x, line.y);
+                for (channel, source) in [sr, sg, sb].into_iter().enumerate() {
+                    let t = i64::from(target.pixels()[i + channel]);
+                    let c = current.pixels()[i + channel];
+                    let d1 = t - i64::from(c);
+                    let d2 = t - i64::from(blend_channel_scalar(c, source, ma, a));
+                    total = total.wrapping_sub((d1 * d1) as u64);
+                    total = total.wrapping_add((d2 * d2) as u64);
+                }
+            }
+        }
+        total
+    }
+
+    /// The prefix-sum colour fit and energy equal the per-pixel ones, and
+    /// the bounded energy is the energy exactly when it is below the bound,
+    /// on random buffers and scanlines that stick out, overlap and repeat.
+    #[test]
+    fn scoring_with_prefix_sums_matches_the_per_pixel_path() {
+        use super::fixtures::{random_buffer, random_lines};
+        use rand::{RngExt, SeedableRng};
+        use rand_chacha::ChaCha8Rng;
+
+        let mut rng = ChaCha8Rng::seed_from_u64(0x9e5);
+        for (width, height) in [(1, 1), (2, 2), (9, 5), (17, 6), (33, 9), (65, 4)] {
+            let target = random_buffer(&mut rng, width, height);
+            let current = random_buffer(&mut rng, width, height);
+            let sums = prefix_sums(&target, &current);
+            let score = difference_full_raw(&target, &current);
+            for alpha in [1, 37, 128, 200, 255] {
+                let lines = random_lines(&mut rng, width as i32, height as i32);
+                let color = compute_color(&target, &current, &lines, alpha);
+                let fit_pixels = fit(&target, &current, None, &lines, alpha);
+                let fit_sums = fit(&target, &current, Some(&sums), &lines, alpha);
+                assert_eq!(fit_pixels.color, color);
+                assert_eq!(fit_sums, fit_pixels);
+
+                let expected = reference_energy(&target, &current, &lines, color, score);
+                assert_eq!(
+                    energy_from_lines_raw(&target, &current, &lines, color, score),
+                    expected
+                );
+                assert_eq!(energy(&target, &current, &lines, fit_sums, score), expected);
+                let bounds = [
+                    0,
+                    1,
+                    expected.wrapping_sub(1),
+                    expected,
+                    expected.wrapping_add(1),
+                    score,
+                    u64::MAX,
+                    rng.random_range(0..=score),
+                ];
+                for bound in bounds {
+                    assert_eq!(
+                        energy_below(&target, &current, &lines, fit_sums, score, bound),
+                        (expected < bound).then_some(expected),
+                        "{width}x{height} alpha={alpha} bound={bound} energy={expected}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A line listed twice subtracts its old error twice, so the running
+    /// total dips below zero before the new errors come back in. The bounded
+    /// energy must neither stop at the dip nor misread the wrapped result.
+    #[test]
+    fn energy_below_is_exact_when_repeated_lines_dip_below_zero() {
+        let target = Buffer::new_from_color(2, 2, Color::new(255, 255, 255, 255));
+        let current = Buffer::new(2, 2);
+        let sums = prefix_sums(&target, &current);
+        let score = difference_full_raw(&target, &current);
+        let line = full_row(0, 2);
+        let lines = [line, line, line];
+        let shape_fit = fit(&target, &current, Some(&sums), &lines, 255);
+        assert_eq!(shape_fit.color, Color::new(255, 255, 255, 255));
+        let expected = energy(&target, &current, &lines, shape_fit, score);
+        // The row's error is half the score, subtracted three times, and
+        // the opaque white shape matches the target, so nothing comes back.
+        assert_eq!(expected, (score as i64 - 3 * (score as i64 / 2)) as u64);
+        for bound in [0, 1, score, u64::MAX - 1, u64::MAX] {
+            assert_eq!(
+                energy_below(&target, &current, &lines, shape_fit, score, bound),
+                (expected < bound).then_some(expected),
+                "bound={bound}"
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "prefix sums must match the buffers")]
+    fn fit_rejects_prefix_sums_of_another_size() {
+        let target = Buffer::new(16, 4);
+        let sums = prefix_sums(&Buffer::new(16, 5), &Buffer::new(16, 5));
+        let _ = fit(&target, &target, Some(&sums), &[full_row(3, 16)], 128);
+    }
+
     fn full_row(y: i32, width: i32) -> Scanline {
         Scanline {
             y,
@@ -1640,48 +2031,21 @@ mod tests {
 /// only run the NEON ones, so CI covers them on the macOS arm64 leg.
 #[cfg(all(test, target_arch = "aarch64"))]
 mod neon_parity {
-    use super::{M, blend_channel_scalar, neon, scalar};
+    use super::fixtures::{random_buffer, random_lines};
+    use super::{
+        Fit, LineKernels, M, Neon, Scalar, blend_channel_scalar, energy_with, fit_with, neon,
+        scalar,
+    };
     use crate::buffer::Buffer;
     use crate::color::Color;
-    use crate::scanline::Scanline;
+    use crate::prefix::PrefixSums;
     use rand::{RngExt, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
-    fn random_buffer(rng: &mut ChaCha8Rng, width: u32, height: u32) -> Buffer {
-        let mut buffer = Buffer::new(width, height);
-        rng.fill(buffer.pixels_mut());
-        buffer
-    }
-
-    /// Scanlines of every kind the kernels must handle: full rows touching
-    /// both edges, lines sticking out on either side or off the canvas,
-    /// lengths around the 8-pixel chunk size, and every coverage extreme.
-    fn random_lines(rng: &mut ChaCha8Rng, width: i32, height: i32) -> Vec<Scanline> {
-        let alpha = |rng: &mut ChaCha8Rng| match rng.random_range(0..4) {
-            0 => 0,
-            1 => M,
-            _ => rng.random_range(0..=M),
-        };
-        let mut lines = Vec::new();
-        for y in -1..=height {
-            lines.push(Scanline {
-                y,
-                x1: -rng.random_range(0..3),
-                x2: width - 1 + rng.random_range(0..3),
-                alpha: alpha(rng),
-            });
-        }
-        for _ in 0..64 {
-            let x1 = rng.random_range(-10..width + 2);
-            let len = rng.random_range(0..2 * width + 20);
-            lines.push(Scanline {
-                y: rng.random_range(-1..=height),
-                x1,
-                x2: x1 + len - rng.random_range(0..2),
-                alpha: alpha(rng),
-            });
-        }
-        lines
+    fn prefix_sums(target: &Buffer, current: &Buffer) -> PrefixSums {
+        let mut sums = PrefixSums::default();
+        sums.compute(target, current);
+        sums
     }
 
     fn sizes() -> impl Iterator<Item = (u32, u32)> {
@@ -1705,17 +2069,19 @@ mod neon_parity {
         for (width, height) in sizes() {
             let target = random_buffer(&mut rng, width, height);
             let current = random_buffer(&mut rng, width, height);
+            let sums = prefix_sums(&target, &current);
             for alpha in 1..=255 {
                 let lines = random_lines(&mut rng, width as i32, height as i32);
-                let expected = scalar::compute_color(&target, &current, &lines, alpha);
-                // SAFETY: `target` and `current` have the same dimensions.
-                let actual = unsafe { neon::compute_color(&target, &current, &lines, alpha) };
-                assert_eq!(actual, expected, "{width}x{height} alpha={alpha}");
+                for sums in [None, Some(&sums)] {
+                    let expected = fit_with::<Scalar>(&target, &current, sums, &lines, alpha);
+                    let actual = fit_with::<Neon>(&target, &current, sums, &lines, alpha);
+                    assert_eq!(actual, expected, "{width}x{height} alpha={alpha}");
+                }
             }
         }
     }
 
-    /// Lines longer than `CHUNKS_PER_BLOCK` chunks of 8 pixels, so the NEON
+    /// Lines longer than `BLOCKS_PER_FLUSH` blocks of 16 pixels, so the NEON
     /// line sums flush their 16-bit lanes at least once mid-line; bright
     /// buffers push every lane towards its overflow bound.
     #[test]
@@ -1725,17 +2091,19 @@ mod neon_parity {
         let mut target = Buffer::new_from_color(width, height, Color::new(255, 255, 255, 255));
         let current = random_buffer(&mut rng, width, height);
         rng.fill(&mut target.pixels_mut()[..64]);
+        let sums = prefix_sums(&target, &current);
         for alpha in [1, 128, 255] {
             let lines = random_lines(&mut rng, width as i32, height as i32);
-            let expected = scalar::compute_color(&target, &current, &lines, alpha);
-            // SAFETY: `target` and `current` have the same dimensions.
-            let actual = unsafe { neon::compute_color(&target, &current, &lines, alpha) };
-            assert_eq!(actual, expected, "alpha={alpha}");
+            for sums in [None, Some(&sums)] {
+                let expected = fit_with::<Scalar>(&target, &current, sums, &lines, alpha);
+                let actual = fit_with::<Neon>(&target, &current, sums, &lines, alpha);
+                assert_eq!(actual, expected, "alpha={alpha}");
+            }
         }
     }
 
     #[test]
-    fn energy_from_lines_raw_matches_scalar_for_every_alpha() {
+    fn energy_matches_scalar_for_every_alpha() {
         let mut rng = ChaCha8Rng::seed_from_u64(0xe4e7);
         for (width, height) in sizes() {
             let target = random_buffer(&mut rng, width, height);
@@ -1744,12 +2112,56 @@ mod neon_parity {
             for alpha in 1..=255 {
                 let lines = random_lines(&mut rng, width as i32, height as i32);
                 let color = Color::new(rng.random(), rng.random(), rng.random(), alpha);
-                let expected =
-                    scalar::energy_from_lines_raw(&target, &current, &lines, color, score);
-                // SAFETY: `target` and `current` have the same dimensions.
-                let actual =
-                    unsafe { neon::energy_from_lines_raw(&target, &current, &lines, color, score) };
-                assert_eq!(actual, expected, "{width}x{height} {color:?}");
+                let before = fit_with::<Scalar>(&target, &current, None, &lines, 255).before;
+                let fit = Fit { color, before };
+                let limit = Some(rng.random_range(0..=score as i64));
+                for limit in [None, limit] {
+                    let expected =
+                        energy_with::<Scalar>(&target, &current, &lines, fit, score, limit);
+                    let actual = energy_with::<Neon>(&target, &current, &lines, fit, score, limit);
+                    assert_eq!(actual, expected, "{width}x{height} {color:?} {limit:?}");
+                }
+            }
+        }
+    }
+
+    /// Every line kernel on every start and length of a few rows, so the
+    /// masked tails meet the end of the buffer and fall back to scalar code.
+    #[test]
+    fn line_kernels_match_scalar_on_every_span() {
+        let mut rng = ChaCha8Rng::seed_from_u64(0x11e5);
+        for (width, height) in [(1, 1), (9, 2), (23, 3)] {
+            let target = random_buffer(&mut rng, width, height);
+            let current = random_buffer(&mut rng, width, height);
+            let (t_pix, c_pix) = (target.pixels(), current.pixels());
+            let total = (width * height) as usize;
+            for first in 0..total {
+                for pixels in 0..=total - first {
+                    let start = first * 3;
+                    let color = Color::new(rng.random(), rng.random(), rng.random(), rng.random());
+                    let [sr, sg, sb, sa] = color.to_premultiplied_rgba();
+                    let ma = rng.random_range(0..=M);
+                    let a = (M - sa * ma / M) * 0x101;
+                    // SAFETY: `start + pixels * 3` is at most `total * 3`,
+                    // the length of both buffers.
+                    unsafe {
+                        assert_eq!(
+                            Neon::line_sums(t_pix, c_pix, start, pixels),
+                            Scalar::line_sums(t_pix, c_pix, start, pixels),
+                            "{first} {pixels}"
+                        );
+                        assert_eq!(
+                            Neon::line_error(t_pix, c_pix, start, pixels),
+                            Scalar::line_error(t_pix, c_pix, start, pixels),
+                            "{first} {pixels}"
+                        );
+                        assert_eq!(
+                            Neon::line_after(t_pix, c_pix, start, pixels, [sr, sg, sb], ma, a),
+                            Scalar::line_after(t_pix, c_pix, start, pixels, [sr, sg, sb], ma, a),
+                            "{first} {pixels} {color:?} {ma}"
+                        );
+                    }
+                }
             }
         }
     }
@@ -1761,8 +2173,7 @@ mod neon_parity {
             let a = random_buffer(&mut rng, width, height);
             let b = random_buffer(&mut rng, width, height);
             let expected = scalar::difference_full_raw(&a, &b);
-            // SAFETY: `a` and `b` have the same dimensions.
-            let actual = unsafe { neon::difference_full_raw(&a, &b) };
+            let actual = neon::difference_full_raw(&a, &b);
             assert_eq!(actual, expected, "{width}x{height}");
         }
     }
@@ -1775,15 +2186,13 @@ mod neon_parity {
         let (width, height) = (7_301, 9);
         let mut black = Buffer::new_from_color(width, height, Color::new(0, 0, 0, 255));
         let white = Buffer::new_from_color(width, height, Color::new(255, 255, 255, 255));
-        // SAFETY: both buffers have the same dimensions.
-        let actual = unsafe { neon::difference_full_raw(&black, &white) };
+        let actual = neon::difference_full_raw(&black, &white);
         assert_eq!(actual, u64::from(width * height) * 3 * 255 * 255);
 
         let mut rng = ChaCha8Rng::seed_from_u64(0xb16);
         rng.fill(&mut black.pixels_mut()[..4096]);
         let expected = scalar::difference_full_raw(&black, &white);
-        // SAFETY: both buffers have the same dimensions.
-        let actual = unsafe { neon::difference_full_raw(&black, &white) };
+        let actual = neon::difference_full_raw(&black, &white);
         assert_eq!(actual, expected);
     }
 

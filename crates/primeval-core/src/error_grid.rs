@@ -5,6 +5,7 @@
 //! function so that random samples concentrate in high-error regions.
 
 use crate::buffer::Buffer;
+use crate::prefix::PrefixSums;
 use rand::{Rng, RngExt};
 
 /// The number of cells in a `cols x rows` grid, computed in `u64` so large
@@ -46,6 +47,9 @@ pub(crate) struct ErrorGrid {
     errors: Vec<f64>,
     cdf: Vec<f64>,
     total: f64,
+    /// The per-row prefix sums the cell errors are read from, which the
+    /// step's candidates score against.
+    sums: PrefixSums,
 }
 
 impl ErrorGrid {
@@ -70,6 +74,7 @@ impl ErrorGrid {
             errors: vec![0.0; n],
             cdf: vec![0.0; n],
             total: 0.0,
+            sums: PrefixSums::default(),
         }
     }
 
@@ -83,18 +88,19 @@ impl ErrorGrid {
         self.total
     }
 
-    /// Recomputes per-cell errors and the CDF from the given target/current pair.
+    /// Recomputes the prefix sums, the per-cell errors and the CDF from the
+    /// given target/current pair.
     ///
     /// Each cell accumulates the sum of squared RGB channel differences for
-    /// every pixel it covers. The last column and last row extend to the
-    /// image boundary so that no pixels are missed.
+    /// every pixel it covers, read row by row from the prefix sums. The last
+    /// column and last row extend to the image boundary so that no pixels
+    /// are missed.
     pub(crate) fn compute(&mut self, target: &Buffer, current: &Buffer) {
+        self.sums.compute(target, current);
         self.errors.fill(0.0);
 
         let img_w = self.img_w;
         let img_h = self.img_h;
-        let t_pix = target.pixels();
-        let c_pix = current.pixels();
 
         for row_idx in 0..self.rows {
             let (y_start, y_end) = cell_span(row_idx, self.cell_h, self.rows, img_h);
@@ -109,19 +115,9 @@ impl ErrorGrid {
                     if x_start >= img_w {
                         break;
                     }
-
-                    let i_start = target.pix_offset(x_start as i32, y as i32);
-                    let i_end = target.pix_offset(x_end as i32, y as i32);
-                    // Sum the cell's part of this row in integers, which is
-                    // exact, and convert once. Every byte is a colour channel.
-                    let row_error: u64 = t_pix[i_start..i_end]
-                        .iter()
-                        .zip(&c_pix[i_start..i_end])
-                        .map(|(&t, &c)| {
-                            let d = i32::from(t) - i32::from(c);
-                            (d * d) as u64
-                        })
-                        .sum();
+                    // The cell's part of this row, summed exactly in
+                    // integers and converted once.
+                    let row_error = self.sums.error(y as i32, x_start as i32, x_end as i32 - 1);
                     self.errors[err_row_base + col_idx as usize] += row_error as f64;
                 }
             }
@@ -132,6 +128,12 @@ impl ErrorGrid {
             self.total += e;
             self.cdf[i] = self.total;
         }
+    }
+
+    /// The prefix sums of the last [`compute`](ErrorGrid::compute).
+    #[inline]
+    pub(crate) fn sums(&self) -> &PrefixSums {
+        &self.sums
     }
 
     /// Samples an integer pixel coordinate biased toward high-error cells.

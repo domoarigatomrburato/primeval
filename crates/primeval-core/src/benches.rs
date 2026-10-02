@@ -153,16 +153,19 @@ fn rasterize(bencher: Bencher<'_, '_>, kind: ShapeKind) {
     });
 }
 
-/// Solves the colour of [`SHAPES`] rasterized shapes of one kind per iteration.
+/// Fits the colour of [`SHAPES`] rasterized shapes of one kind per
+/// iteration, with the step's prefix sums, as the search does; the fit also
+/// sums the old error the energy subtracts.
 #[divan::bench(args = CONCRETE_KINDS)]
 fn compute_color(bencher: Bencher<'_, '_>, kind: ShapeKind) {
     let fixture = Fixture::new();
     let lines = fixture.lines(kind);
     bencher.counter(ItemsCount::new(SHAPES)).bench_local(|| {
         for shape_lines in &lines {
-            divan::black_box(score::compute_color(
+            divan::black_box(score::fit(
                 divan::black_box(&fixture.target),
                 &fixture.current,
+                Some(fixture.grid.sums()),
                 shape_lines,
                 i32::from(ALPHA),
             ));
@@ -170,30 +173,32 @@ fn compute_color(bencher: Bencher<'_, '_>, kind: ShapeKind) {
     });
 }
 
-/// Scores [`SHAPES`] rasterized shapes of one kind, in their solved colours,
-/// per iteration.
+/// Scores [`SHAPES`] rasterized shapes of one kind, from their fits, per
+/// iteration, in full (without a bound): the blend and new error of every
+/// covered pixel.
 #[divan::bench(args = CONCRETE_KINDS)]
 fn energy_from_lines_raw(bencher: Bencher<'_, '_>, kind: ShapeKind) {
     let fixture = Fixture::new();
     let lines = fixture.lines(kind);
-    let colors: Vec<Color> = lines
+    let fits: Vec<score::Fit> = lines
         .iter()
         .map(|shape_lines| {
-            score::compute_color(
+            score::fit(
                 &fixture.target,
                 &fixture.current,
+                Some(fixture.grid.sums()),
                 shape_lines,
                 i32::from(ALPHA),
             )
         })
         .collect();
     bencher.counter(ItemsCount::new(SHAPES)).bench_local(|| {
-        for (shape_lines, &color) in lines.iter().zip(&colors) {
-            divan::black_box(score::energy_from_lines_raw(
+        for (shape_lines, &fit) in lines.iter().zip(&fits) {
+            divan::black_box(score::energy(
                 divan::black_box(&fixture.target),
                 &fixture.current,
                 shape_lines,
-                color,
+                fit,
                 fixture.score,
             ));
         }

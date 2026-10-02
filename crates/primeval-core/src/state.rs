@@ -49,6 +49,31 @@ impl State {
         energy
     }
 
+    /// The energy if it is below `bound`, `None` otherwise, which the
+    /// evaluation can tell early. Only an energy below the bound is cached:
+    /// the search drops or undoes every other state.
+    pub(crate) fn energy_below<R: Rng>(
+        &mut self,
+        worker: &mut WorkerCtx<R>,
+        round: &SearchRound<'_>,
+        bound: u64,
+    ) -> Option<u64> {
+        if let Some(energy) = self.cached_energy {
+            return (energy < bound).then_some(energy);
+        }
+
+        let energy = worker.energy_below(
+            round,
+            |ctx| self.shape.rasterize(ctx),
+            i32::from(self.alpha),
+            bound,
+        );
+        if energy.is_some() {
+            self.cached_energy = energy;
+        }
+        energy
+    }
+
     pub(crate) fn do_move<R: Rng>(&mut self, worker: &mut WorkerCtx<R>) -> Self {
         let previous = self.clone();
         self.shape.mutate(worker);

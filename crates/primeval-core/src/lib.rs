@@ -18,6 +18,7 @@ mod error;
 mod error_grid;
 mod model;
 mod optimize;
+mod prefix;
 mod raster;
 mod rng;
 mod scanline;

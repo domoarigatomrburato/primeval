@@ -59,6 +59,10 @@ pub struct Model {
     seed: u64,
     /// Scratch for rasterizing the shape that [`Model::add`] paints.
     scratch: WorkerCtx<ChaCha8Rng>,
+    /// Whether the search may stop evaluations early; see
+    /// `WorkerCtx::pruning`.
+    #[cfg(test)]
+    pruning: bool,
 }
 
 impl Model {
@@ -106,6 +110,8 @@ impl Model {
             ),
             seed,
             scratch,
+            #[cfg(test)]
+            pruning: true,
         }
     }
 
@@ -133,12 +139,18 @@ impl Model {
         // Each step commits exactly one shape, so this is the step index.
         let step = self.history.len() as u64;
         let (candidate_count, hill_climb_age) = Self::search_params(kind);
+        #[cfg(test)]
+        let pruning = self.pruning;
         let results: Vec<(State, u64)> = (0..SEARCH_ROUNDS)
             .into_par_iter()
             .map_init(
                 || WorkerCtx::new(width, height, crate::rng::round_rng(seed, step, 0)),
                 |worker, index| {
                     worker.rng = crate::rng::round_rng(seed, step, index);
+                    #[cfg(test)]
+                    {
+                        worker.pruning = pruning;
+                    }
                     let evaluations_before = worker.evaluations;
                     let state =
                         worker.search_round(&round, kind, alpha, candidate_count, hill_climb_age);
@@ -163,18 +175,14 @@ impl Model {
     fn add(&mut self, shape: Shape, alpha: u8) {
         debug_assert!(alpha > 0, "alpha must be non-zero");
         let lines = shape.rasterize(&mut self.scratch);
-        let color =
-            crate::score::compute_color(&self.target, &self.current, lines, i32::from(alpha));
-        let score = crate::score::energy_from_lines_raw(
-            &self.target,
-            &self.current,
-            lines,
-            color,
-            self.score,
-        );
-        crate::score::draw_lines(&mut self.current, color, lines);
+        let fit = score::fit(&self.target, &self.current, None, lines, i32::from(alpha));
+        let score = score::energy(&self.target, &self.current, lines, fit, self.score);
+        score::draw_lines(&mut self.current, fit.color, lines);
         self.score = score;
-        self.history.push(CommittedShape { shape, color });
+        self.history.push(CommittedShape {
+            shape,
+            color: fit.color,
+        });
     }
 
     /// Normalized difference between the canvas and the target: the RMSE
@@ -340,6 +348,17 @@ mod tests {
     /// Runs `steps` seeded `Any` steps on a 16 x 12 noise target inside a
     /// dedicated rayon pool of `threads` threads.
     fn seeded_drawing(seed: u64, threads: usize, steps: usize) -> Drawing {
+        seeded_drawing_of(seed, threads, steps, ShapeKind::Any, true)
+    }
+
+    /// [`seeded_drawing`] for any `kind`, with or without the early exit.
+    fn seeded_drawing_of(
+        seed: u64,
+        threads: usize,
+        steps: usize,
+        kind: ShapeKind,
+        pruning: bool,
+    ) -> Drawing {
         use rand::{RngExt, SeedableRng};
 
         let (width, height) = (16, 12);
@@ -360,8 +379,9 @@ mod tests {
                     ..ModelOptions::default()
                 },
             );
+            model.pruning = pruning;
             for _ in 0..steps {
-                model.step(ShapeKind::Any, Alpha::Auto);
+                model.step(kind, Alpha::Auto);
             }
             model.drawing()
         })
@@ -375,6 +395,20 @@ mod tests {
                 seeded_drawing(42, threads, 4),
                 reference,
                 "{threads} threads"
+            );
+        }
+    }
+
+    /// The early exit skips work without changing which shape any step
+    /// commits: the drawings, and so the SVG written from them, are equal.
+    #[test]
+    fn seeded_output_is_the_same_without_the_early_exit() {
+        let kinds = [ShapeKind::Any, ShapeKind::Quadratic, ShapeKind::Polygon];
+        for (seed, kind) in [7, 8, 9].into_iter().zip(kinds) {
+            assert_eq!(
+                seeded_drawing_of(seed, 2, 4, kind, true),
+                seeded_drawing_of(seed, 2, 4, kind, false),
+                "{kind:?}"
             );
         }
     }

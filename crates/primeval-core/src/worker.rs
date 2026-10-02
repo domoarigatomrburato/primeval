@@ -41,6 +41,13 @@ pub(crate) struct WorkerCtx<R> {
     pub(crate) rng: R,
     /// Running count of energy evaluations performed by this worker.
     pub(crate) evaluations: u64,
+    /// Whether bounded evaluations may stop early; tests turn it off to
+    /// check that the early exit never changes a result.
+    #[cfg(test)]
+    pub(crate) pruning: bool,
+    /// Bounded evaluations that came back at or above their bound.
+    #[cfg(test)]
+    pub(crate) rejected: u64,
 }
 
 /// Read-only shared state for a single search round, borrowed from the model.
@@ -69,6 +76,10 @@ impl<R: Rng> WorkerCtx<R> {
             rows: RowScratch::default(),
             rng,
             evaluations: 0,
+            #[cfg(test)]
+            pruning: true,
+            #[cfg(test)]
+            rejected: 0,
         }
     }
 }
@@ -112,34 +123,67 @@ impl<R: Rng> WorkerCtx<R> {
     /// Go code had (shapes storing `*Worker`).
     ///
     /// Steps:
-    /// 1. Call `rasterize` to populate `self.lines`.
-    /// 2. Compute the optimal blending color for those scanlines.
-    /// 3. Fused score: compute blend and partial RMS in one pass (no buffer write).
-    /// 4. Increment `self.evaluations`.
+    /// 1. Increment `self.evaluations`.
+    /// 2. Call `rasterize` to populate `self.lines`.
+    /// 3. Fit the blending colour for those scanlines and sum the old error
+    ///    of their pixels, from the error grid's prefix sums, so the grid
+    ///    must be computed for `round`'s buffers.
+    /// 4. Add the error of each pixel after blending (no buffer write).
     pub(crate) fn energy(
         &mut self,
         round: &SearchRound<'_>,
         rasterize: impl FnOnce(&mut Self) -> &[Scanline],
         alpha: i32,
     ) -> u64 {
+        self.evaluate(round, rasterize, alpha, None)
+            .expect("an evaluation without a bound always has an energy")
+    }
+
+    /// [`Self::energy`] if it is below `bound`, `None` otherwise; the
+    /// evaluation stops as soon as the shape cannot get below `bound`.
+    pub(crate) fn energy_below(
+        &mut self,
+        round: &SearchRound<'_>,
+        rasterize: impl FnOnce(&mut Self) -> &[Scanline],
+        alpha: i32,
+        bound: u64,
+    ) -> Option<u64> {
+        let energy = self.evaluate(round, rasterize, alpha, Some(bound));
+        #[cfg(test)]
+        {
+            self.rejected += u64::from(energy.is_none());
+        }
+        energy
+    }
+
+    fn evaluate(
+        &mut self,
+        round: &SearchRound<'_>,
+        rasterize: impl FnOnce(&mut Self) -> &[Scanline],
+        alpha: i32,
+        bound: Option<u64>,
+    ) -> Option<u64> {
+        #[cfg(test)]
+        let pruning = self.pruning;
+        #[cfg(not(test))]
+        let pruning = true;
+
+        self.evaluations += 1;
         let lines = rasterize(self);
+        let below = |energy: u64| bound.is_none_or(|bound| energy < bound);
         if lines.is_empty() {
-            self.evaluations += 1;
-            return round.score;
+            return Some(round.score).filter(|&energy| below(energy));
         }
 
-        let color = score::compute_color(round.target, round.current, lines, alpha);
-        // Re-borrow lines from self after the closure has returned.
-        // Fused blend + diff: avoids any intermediate buffer write.
-        let result = score::energy_from_lines_raw(
-            round.target,
-            round.current,
-            &self.lines,
-            color,
-            round.score,
-        );
-        self.evaluations += 1;
-        result
+        let (target, current) = (round.target, round.current);
+        let fit = score::fit(target, current, Some(round.error_grid.sums()), lines, alpha);
+        match bound {
+            Some(bound) if pruning => {
+                score::energy_below(target, current, lines, fit, round.score, bound)
+            }
+            _ => Some(score::energy(target, current, lines, fit, round.score))
+                .filter(|&energy| below(energy)),
+        }
     }
 
     pub(crate) fn random_state(
@@ -164,8 +208,9 @@ impl<R: Rng> WorkerCtx<R> {
         let mut best_energy = best_state.energy(self, round);
         for _ in 1..n {
             let mut state = self.random_state(round, kind, alpha);
-            let energy = state.energy(self, round);
-            if energy < best_energy {
+            // Only a strictly lower energy replaces the best, so ties keep
+            // the earliest candidate.
+            if let Some(energy) = state.energy_below(self, round, best_energy) {
                 best_energy = energy;
                 best_state = state;
             }
@@ -208,10 +253,25 @@ impl<R: Rng> WorkerCtx<R> {
             "best_random_states requires at least one retained state"
         );
 
-        let mut states = Vec::with_capacity(limit);
+        let mut states: Vec<State> = Vec::with_capacity(limit);
         for _ in 0..n {
             let mut state = self.random_state(round, kind, alpha);
-            let _ = state.energy(self, round);
+            // A full list takes a state whose energy is at most its worst
+            // (`insert_top_state` places a tie before the equal entry), so
+            // anything at or above `worst + 1` can stop early.
+            let bound = (states.len() == limit)
+                .then(|| states[limit - 1].cached_energy.unwrap_or(u64::MAX))
+                .and_then(|worst| worst.checked_add(1));
+            match bound {
+                Some(bound) => {
+                    if state.energy_below(self, round, bound).is_none() {
+                        continue;
+                    }
+                }
+                None => {
+                    let _ = state.energy(self, round);
+                }
+            }
             Self::insert_top_state(&mut states, state, limit);
         }
         states
@@ -441,6 +501,179 @@ mod tests {
             drawn.insert(std::mem::discriminant(&state.shape));
         }
         assert_eq!(drawn.len(), ShapeKind::all_kinds().len());
+    }
+
+    /// A seeded noise target over its top half and a flat colour over its
+    /// bottom half, against a canvas of other noise on top and the same
+    /// flat colour below.
+    fn noise_round(width: u32, height: u32) -> (Buffer, Buffer) {
+        use rand::RngExt;
+        let mut rng = ChaCha8Rng::seed_from_u64(0x9a7e);
+        let mut target = Buffer::new_from_color(width, height, Color::new(90, 140, 60, 255));
+        let mut current = target.clone();
+        let half = target.pixels().len() / 2;
+        rng.fill(&mut target.pixels_mut()[..half]);
+        rng.fill(&mut current.pixels_mut()[..half]);
+        (target, current)
+    }
+
+    /// The search as it ran before the early exit: every candidate is
+    /// evaluated in full and compared with `<`, so ties keep the earlier
+    /// state, and the quadratic seeds go through `insert_top_state`.
+    fn reference_search_round(
+        worker: &mut WorkerCtx<ChaCha8Rng>,
+        round: &SearchRound<'_>,
+        kind: ShapeKind,
+        alpha: Alpha,
+        n: usize,
+        age: usize,
+    ) -> State {
+        fn climb(
+            worker: &mut WorkerCtx<ChaCha8Rng>,
+            round: &SearchRound<'_>,
+            state: &State,
+            max_age: usize,
+        ) -> State {
+            let mut current = state.clone();
+            let mut best_state = current.clone();
+            let mut best_energy = current.energy(worker, round);
+            let mut age = 0;
+            while age < max_age {
+                let undo = current.do_move(worker);
+                let energy = current.energy(worker, round);
+                if energy >= best_energy {
+                    current.undo_move(undo);
+                    age += 1;
+                } else {
+                    best_energy = energy;
+                    best_state = current.clone();
+                    age = 0;
+                }
+            }
+            best_state
+        }
+
+        if kind == ShapeKind::Quadratic {
+            let mut seeds = Vec::new();
+            for _ in 0..n {
+                let mut state = worker.random_state(round, kind, alpha);
+                let _ = state.energy(worker, round);
+                WorkerCtx::<ChaCha8Rng>::insert_top_state(
+                    &mut seeds,
+                    state,
+                    QUADRATIC_HILL_CLIMB_SEEDS,
+                );
+            }
+            let (mut best_state, mut best_energy) = (None, u64::MAX);
+            for seed in seeds {
+                let mut state = climb(worker, round, &seed, age);
+                let energy = state.energy(worker, round);
+                if energy < best_energy {
+                    best_energy = energy;
+                    best_state = Some(state);
+                }
+            }
+            return best_state.unwrap();
+        }
+
+        let mut best_state = worker.random_state(round, kind, alpha);
+        let mut best_energy = best_state.energy(worker, round);
+        for _ in 1..n {
+            let mut state = worker.random_state(round, kind, alpha);
+            let energy = state.energy(worker, round);
+            if energy < best_energy {
+                best_energy = energy;
+                best_state = state;
+            }
+        }
+        let mut best_state = climb(worker, round, &best_state, age);
+        let _ = best_state.energy(worker, round);
+        best_state
+    }
+
+    /// The early exit only skips work: every kind's search picks the same
+    /// shape, alpha and energy, after the same number of evaluations, as
+    /// the search without it, and candidates are rejected. A black canvas
+    /// that already matches its black target gives every candidate the
+    /// energy zero, so every comparison there is a tie.
+    #[test]
+    fn search_round_matches_the_search_without_the_early_exit() {
+        let (width, height) = (40, 32);
+        let black = Buffer::new(width, height);
+        for (target, current) in [noise_round(width, height), (black.clone(), black)] {
+            let mut grid = ErrorGrid::new(width, height, 4, 4);
+            grid.compute(&target, &current);
+            let round = SearchRound {
+                target: &target,
+                current: &current,
+                error_grid: &grid,
+                score: score::difference_full_raw(&target, &current),
+            };
+
+            let kinds =
+                std::iter::once(ShapeKind::Any).chain(ShapeKind::all_kinds().iter().copied());
+            for kind in kinds {
+                let mut rejected = 0;
+                for seed in 0..4 {
+                    let alpha = if seed % 2 == 0 {
+                        Alpha::Auto
+                    } else {
+                        fixed_alpha(100)
+                    };
+                    let rng = || ChaCha8Rng::seed_from_u64(seed);
+                    let mut bounded = WorkerCtx::new(width as i32, height as i32, rng());
+                    let mut reference = WorkerCtx::new(width as i32, height as i32, rng());
+
+                    let expected =
+                        reference_search_round(&mut reference, &round, kind, alpha, 40, 30);
+                    let actual = bounded.search_round(&round, kind, alpha, 40, 30);
+                    let case = format!("{kind:?} seed {seed} score {}", round.score);
+                    assert_eq!(actual, expected, "{case}");
+                    assert_eq!(bounded.evaluations, reference.evaluations, "{case}");
+                    rejected += bounded.rejected;
+                }
+                assert!(rejected > 0, "{kind:?}: no candidate was rejected");
+            }
+        }
+    }
+
+    /// The bounded top-state sampling keeps exactly the states that full
+    /// evaluation and `insert_top_state` keep, ties included: the all-black
+    /// round ties every candidate at zero, so there every candidate is
+    /// below the bound `worst + 1` and the ties decide the order.
+    #[test]
+    fn best_random_states_match_the_states_kept_without_the_early_exit() {
+        let (width, height) = (40, 32);
+        let black = Buffer::new(width, height);
+        for (target, current) in [noise_round(width, height), (black.clone(), black)] {
+            let mut grid = ErrorGrid::new(width, height, 4, 4);
+            grid.compute(&target, &current);
+            let round = SearchRound {
+                target: &target,
+                current: &current,
+                error_grid: &grid,
+                score: score::difference_full_raw(&target, &current),
+            };
+            for kind in [ShapeKind::Quadratic, ShapeKind::Triangle] {
+                for limit in [1, 2, 3] {
+                    let rng = || ChaCha8Rng::seed_from_u64(limit as u64);
+                    let mut bounded = WorkerCtx::new(width as i32, height as i32, rng());
+                    let mut reference = WorkerCtx::new(width as i32, height as i32, rng());
+                    let mut expected = Vec::new();
+                    for _ in 0..60 {
+                        let mut state = reference.random_state(&round, kind, Alpha::Auto);
+                        let _ = state.energy(&mut reference, &round);
+                        WorkerCtx::<ChaCha8Rng>::insert_top_state(&mut expected, state, limit);
+                    }
+                    let actual = bounded.best_random_states(&round, kind, Alpha::Auto, 60, limit);
+                    assert_eq!(actual, expected, "{kind:?} limit {limit}");
+                    // Only the noise round has candidates above the bound.
+                    if round.score > 0 {
+                        assert!(bounded.rejected > 0, "{kind:?} limit {limit}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
