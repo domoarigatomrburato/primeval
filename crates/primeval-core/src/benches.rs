@@ -122,6 +122,7 @@ impl Fixture {
             current: &self.current,
             error_grid: &self.grid,
             score: self.score,
+            coarse: None,
         };
         let mut worker = self.worker();
         (0..SHAPES)

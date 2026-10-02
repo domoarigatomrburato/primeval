@@ -34,6 +34,7 @@ pub(crate) fn make_test_round(
         current,
         error_grid: grid,
         score: score::difference_full_raw(target, current),
+        coarse: None,
     };
     let worker = WorkerCtx::new(width as i32, height as i32, create_rng(seed));
     (worker, round)

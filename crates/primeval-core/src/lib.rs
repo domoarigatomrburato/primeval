@@ -14,6 +14,7 @@ mod alpha;
 #[cfg(feature = "bench")]
 mod benches;
 mod buffer;
+mod coarse;
 mod color;
 mod drawing;
 mod error;

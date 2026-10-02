@@ -1,4 +1,5 @@
 use crate::alpha::Alpha;
+use crate::coarse::Coarse;
 use crate::drawing::{Drawing, DrawnShape};
 use crate::error_grid::ErrorGrid;
 use crate::score;
@@ -56,6 +57,9 @@ pub struct Model {
     score: u64,
     history: Vec<CommittedShape>,
     error_grid: ErrorGrid,
+    /// The half-resolution copy the random phase scores against, for
+    /// targets of at least [`crate::coarse::MIN_SIDE`] on both sides.
+    coarse: Option<Coarse>,
     seed: u64,
     /// Scratch for rasterizing the shape that [`Model::add`] paints.
     scratch: WorkerCtx<ChaCha8Rng>,
@@ -89,6 +93,7 @@ impl Model {
         );
         let current = Buffer::new_from_color(target_width, target_height, background);
         let score = score::difference_full_raw(&target, &current);
+        let coarse = Coarse::new(&target, &current);
         let seed = options.seed.unwrap_or_else(crate::util::system_clock_seed);
         let scratch = WorkerCtx::new(
             target_width as i32,
@@ -108,6 +113,7 @@ impl Model {
                 options.grid_cols,
                 options.grid_rows,
             ),
+            coarse,
             seed,
             scratch,
             #[cfg(test)]
@@ -127,12 +133,17 @@ impl Model {
     /// Returns the number of candidate evaluations the search made.
     pub fn step(&mut self, kind: ShapeKind, alpha: Alpha) -> u64 {
         self.error_grid.compute(&self.target, &self.current);
+        if let Some(coarse) = &mut self.coarse {
+            coarse.prepare();
+        }
 
+        let coarse_round = self.coarse.as_ref().map(Coarse::round);
         let round = SearchRound {
             target: &self.target,
             current: &self.current,
             error_grid: &self.error_grid,
             score: self.score,
+            coarse: coarse_round.as_ref(),
         };
         let (width, height) = (self.target.width() as i32, self.target.height() as i32);
         let seed = self.seed;
@@ -179,6 +190,9 @@ impl Model {
         let score = score::energy(&self.target, &self.current, lines, fit, self.score);
         score::draw_lines(&mut self.current, fit.color, lines);
         self.score = score;
+        if let Some(coarse) = &mut self.coarse {
+            coarse.sync(&self.current);
+        }
         self.history.push(CommittedShape {
             shape,
             color: fit.color,
@@ -345,23 +359,29 @@ mod tests {
         assert!(evaluations > 0);
     }
 
+    /// The small target of the seeded tests, below the coarse minimum.
+    const SMALL: (u32, u32) = (16, 12);
+    /// The smallest seeded target that gets a coarse random phase.
+    const COARSE: (u32, u32) = (40, crate::coarse::MIN_SIDE);
+
     /// Runs `steps` seeded `Any` steps on a 16 x 12 noise target inside a
     /// dedicated rayon pool of `threads` threads.
     fn seeded_drawing(seed: u64, threads: usize, steps: usize) -> Drawing {
-        seeded_drawing_of(seed, threads, steps, ShapeKind::Any, true)
+        seeded_drawing_of(seed, threads, steps, ShapeKind::Any, true, SMALL)
     }
 
-    /// [`seeded_drawing`] for any `kind`, with or without the early exit.
+    /// [`seeded_drawing`] for any `kind` and noise target size, with or
+    /// without the early exit.
     fn seeded_drawing_of(
         seed: u64,
         threads: usize,
         steps: usize,
         kind: ShapeKind,
         pruning: bool,
+        (width, height): (u32, u32),
     ) -> Drawing {
         use rand::{RngExt, SeedableRng};
 
-        let (width, height) = (16, 12);
         let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0x5eed);
         let mut pixels = vec![0_u8; (width * height * 3) as usize];
         rng.fill(&mut pixels[..]);
@@ -399,6 +419,46 @@ mod tests {
         }
     }
 
+    #[test]
+    fn seeded_coarse_output_is_independent_of_the_thread_count() {
+        let drawing = |threads| seeded_drawing_of(42, threads, 2, ShapeKind::Any, true, COARSE);
+        let reference = drawing(1);
+        for threads in [3, 8] {
+            assert_eq!(drawing(threads), reference, "{threads} threads");
+        }
+    }
+
+    /// After every step the coarse canvas is the downsample of the canvas,
+    /// and its score is that canvas's score against the coarse target.
+    #[test]
+    fn coarse_canvas_follows_every_committed_shape() {
+        use rand::{RngExt, SeedableRng};
+
+        let (width, height) = (41, 33);
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0xc0a);
+        let mut pixels = vec![0_u8; (width * height * 3) as usize];
+        rng.fill(&mut pixels[..]);
+        let target = Buffer::from_rgb(width, height, pixels).expect("valid length");
+        let options = ModelOptions {
+            seed: Some(3),
+            ..ModelOptions::default()
+        };
+        let mut model = Model::new(target, Color::new(10, 200, 30, 255), options);
+        for kind in [ShapeKind::Rectangle, ShapeKind::RotatedEllipse] {
+            let before = model.coarse.as_ref().expect("large enough").round().score;
+            model.step(kind, Alpha::Auto);
+            let round = model.coarse.as_ref().expect("large enough").round();
+            let expected = crate::coarse::downsample(&model.current);
+            assert_eq!(round.current.pixels(), expected.pixels(), "{kind:?}");
+            assert_eq!(
+                round.score,
+                score::difference_full_raw(round.target, round.current),
+                "{kind:?}"
+            );
+            assert_ne!(round.score, before, "{kind:?}: the shape changed nothing");
+        }
+    }
+
     /// The early exit skips work without changing which shape any step
     /// commits: the drawings, and so the SVG written from them, are equal.
     #[test]
@@ -406,11 +466,17 @@ mod tests {
         let kinds = [ShapeKind::Any, ShapeKind::Quadratic, ShapeKind::Polygon];
         for (seed, kind) in [7, 8, 9].into_iter().zip(kinds) {
             assert_eq!(
-                seeded_drawing_of(seed, 2, 4, kind, true),
-                seeded_drawing_of(seed, 2, 4, kind, false),
+                seeded_drawing_of(seed, 2, 4, kind, true, SMALL),
+                seeded_drawing_of(seed, 2, 4, kind, false, SMALL),
                 "{kind:?}"
             );
         }
+        // The search tests cover every kind with a coarse round.
+        assert_eq!(
+            seeded_drawing_of(7, 2, 1, ShapeKind::Any, true, COARSE),
+            seeded_drawing_of(7, 2, 1, ShapeKind::Any, false, COARSE),
+            "with a coarse random phase"
+        );
     }
 
     #[test]

@@ -235,6 +235,120 @@ impl Shape {
         }
     }
 
+    /// Rasterizes the shape scaled by one half, onto a canvas of the
+    /// worker's size, which must be the 2× downsample of the canvas the
+    /// shape lives on (see [`crate::coarse`]).
+    ///
+    /// Every continuous coordinate (see [`Shape::geometry`]) maps to half
+    /// its value, and each kind keeps the coverage rule of its own
+    /// rasterizer: the binary kinds fill the coarse pixels whose centres the
+    /// scaled shape covers, the anti-aliased kinds stay anti-aliased.
+    pub(crate) fn rasterize_coarse<'a, R: Rng>(
+        &self,
+        worker: &'a mut WorkerCtx<R>,
+    ) -> &'a [Scanline] {
+        let half = |x: f64| x / 2.0;
+        let centre = |v: i32| half(f64::from(v) + 0.5);
+        let convex = |worker: &'a mut WorkerCtx<R>, vertices: &[(f64, f64)]| {
+            worker.lines.clear();
+            crate::raster::fill_convex_at_pixel_centres(
+                &mut worker.lines,
+                vertices,
+                worker.width,
+                worker.height,
+            );
+            &worker.lines[..]
+        };
+        match self {
+            Self::Triangle(shape) => convex(
+                worker,
+                &[
+                    (centre(shape.x1), centre(shape.y1)),
+                    (centre(shape.x2), centre(shape.y2)),
+                    (centre(shape.x3), centre(shape.y3)),
+                ],
+            ),
+            // Coarse pixel `X` has its centre at full-resolution `2X + 1`,
+            // which lies in `[x1, x2 + 1)` for `X` in
+            // `x1 >> 1..=((x2 + 1) >> 1) - 1`: half-open, as the full
+            // rectangle covers exactly its own pixels.
+            Self::Rectangle(shape) => {
+                let (x1, y1, x2, y2) = shape.bounds();
+                let (x1, x2) = (
+                    (x1 >> 1).max(0),
+                    (((x2 + 1) >> 1) - 1).min(worker.width - 1),
+                );
+                let (y1, y2) = (
+                    (y1 >> 1).max(0),
+                    (((y2 + 1) >> 1) - 1).min(worker.height - 1),
+                );
+                worker.lines.clear();
+                if x1 <= x2 {
+                    worker.lines.extend((y1..=y2).map(|y| Scanline {
+                        y,
+                        x1,
+                        x2,
+                        alpha: 0xFFFF,
+                    }));
+                }
+                &worker.lines
+            }
+            Self::Ellipse(shape) => {
+                let (rx, ry) = (f64::from(shape.rx), f64::from(shape.ry));
+                fill_ellipse_at_pixel_centres(
+                    worker,
+                    centre(shape.x),
+                    centre(shape.y),
+                    half(rx),
+                    half(ry),
+                )
+            }
+            Self::Circle(shape) => {
+                let r = half(f64::from(shape.r));
+                fill_ellipse_at_pixel_centres(worker, centre(shape.x), centre(shape.y), r, r)
+            }
+            Self::RotatedRectangle(shape) => {
+                convex(worker, &shape.corners().map(|(x, y)| (half(x), half(y))))
+            }
+            Self::Quadratic(shape) => crate::raster::stroke_quadratic_direct(
+                worker,
+                half(shape.x1),
+                half(shape.y1),
+                half(shape.x2),
+                half(shape.y2),
+                half(shape.x3),
+                half(shape.y3),
+                half(shape.width) / 2.0,
+            ),
+            Self::RotatedEllipse(shape) => {
+                crate::raster::fill_rotated_ellipse_direct(
+                    &mut worker.lines,
+                    &mut worker.rows,
+                    half(shape.x),
+                    half(shape.y),
+                    half(shape.rx),
+                    half(shape.ry),
+                    radians(shape.angle),
+                    worker.width,
+                    worker.height,
+                );
+                &worker.lines
+            }
+            Self::Polygon(shape) => {
+                let vertices: [(f64, f64); 4] =
+                    std::array::from_fn(|i| (half(shape.x[i]), half(shape.y[i])));
+                crate::raster::fill_polygon_direct(
+                    &mut worker.lines,
+                    &mut worker.rows,
+                    &vertices[..shape.order],
+                    worker.width,
+                    worker.height,
+                );
+                &worker.lines
+            }
+        }
+    }
+
     pub(crate) fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>) {
         match self {
             Self::Triangle(shape) => shape.mutate(worker),
@@ -283,6 +397,19 @@ impl ShapeKind {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         NAMES[self as usize].1
+    }
+
+    /// Whether the random phase of a search for this kind ranks its
+    /// candidates at half resolution (see [`crate::coarse`]). Rectangles,
+    /// rotated rectangles and triangles rasterize so cheaply that it saved
+    /// them almost no time and cost quality, and the random phase of
+    /// quadratic curves is too small a share of their search to gain;
+    /// [`ShapeKind::Any`] ranks candidates of every kind coarsely.
+    pub(crate) const fn ranks_coarsely(self) -> bool {
+        matches!(
+            self,
+            Self::Any | Self::Circle | Self::Ellipse | Self::RotatedEllipse | Self::Polygon
+        )
     }
 
     /// Every kind except [`ShapeKind::Any`], in declaration order.
@@ -1055,6 +1182,36 @@ fn rasterize_ellipse<R>(
         if y2 >= 0 && y2 < worker.height && dy > 0 {
             worker.lines.push(Scanline {
                 y: y2,
+                x1,
+                x2,
+                alpha: 0xFFFF,
+            });
+        }
+    }
+    &worker.lines
+}
+
+/// Fills the pixels whose centres lie inside or on the axis-aligned ellipse
+/// centred on the continuous point `(cx, cy)` with radii `rx` and `ry`, the
+/// rule [`rasterize_ellipse`] applies to an ellipse centred on a pixel.
+fn fill_ellipse_at_pixel_centres<R>(
+    worker: &mut WorkerCtx<R>,
+    cx: f64,
+    cy: f64,
+    rx: f64,
+    ry: f64,
+) -> &[Scanline] {
+    worker.lines.clear();
+    let y1 = ((cy - ry - 0.5).ceil() as i32).max(0);
+    let y2 = ((cy + ry - 0.5).floor() as i32).min(worker.height - 1);
+    for y in y1..=y2 {
+        let dy = (f64::from(y) + 0.5 - cy) / ry;
+        let span = rx * (1.0 - dy * dy).max(0.0).sqrt();
+        let x1 = ((cx - span - 0.5).ceil() as i32).max(0);
+        let x2 = ((cx + span - 0.5).floor() as i32).min(worker.width - 1);
+        if x1 <= x2 {
+            worker.lines.push(Scanline {
+                y,
                 x1,
                 x2,
                 alpha: 0xFFFF,
