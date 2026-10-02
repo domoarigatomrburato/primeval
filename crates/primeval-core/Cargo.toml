@@ -13,10 +13,16 @@ workspace = true
 
 [dependencies]
 divan = { version = "0.1.21", optional = true }
+getrandom = "0.4.3"
 rand = { version = "0.10", default-features = false }
 rand_chacha = "0.10"
 rand_distr = "0.6"
 rayon = "1.10"
+
+# Browsers have no OS entropy source: an unset seed comes from
+# `crypto.getRandomValues` there (also with a shared, threaded memory).
+[target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.4.3", features = ["wasm_js"] }
 
 [dev-dependencies]
 tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }

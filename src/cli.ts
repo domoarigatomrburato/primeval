@@ -6,7 +6,7 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import process from "node:process";
 import { parseArgs } from "node:util";
-
+import { messageOf } from "./errors.js";
 import {
   AbortError,
   approximate,
@@ -145,10 +145,6 @@ function errorCode(error: unknown): string | undefined {
   return error instanceof Error && "code" in error ? String(error.code) : undefined;
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function readFailureMessage(inputPath: string, error: unknown): string {
   switch (errorCode(error)) {
     case "ENOENT":
@@ -159,7 +155,7 @@ function readFailureMessage(inputPath: string, error: unknown): string {
     case "EPERM":
       return `permission denied reading input: ${inputPath}`;
     default:
-      return `cannot read input ${inputPath}: ${errorMessage(error)}`;
+      return `cannot read input ${inputPath}: ${messageOf(error)}`;
   }
 }
 
@@ -208,7 +204,7 @@ async function checkOutput(outputPath: string, force: boolean): Promise<void> {
     if (errorCode(error) === "ENOENT") {
       return;
     }
-    throw runtimeError(`cannot access output ${outputPath}: ${errorMessage(error)}`);
+    throw runtimeError(`cannot access output ${outputPath}: ${messageOf(error)}`);
   }
   const target = await stat(outputPath).catch(() => undefined);
   if (target?.isDirectory()) {
@@ -230,7 +226,7 @@ async function writeOutput(outputPath: string, data: string | Buffer, force: boo
       case "EISDIR":
         throw runtimeError(`output is a directory: ${outputPath}`);
       default:
-        throw runtimeError(`cannot write output ${outputPath}: ${errorMessage(error)}`);
+        throw runtimeError(`cannot write output ${outputPath}: ${messageOf(error)}`);
     }
   }
 }
@@ -299,7 +295,7 @@ function parseCommandLine() {
       },
     });
   } catch (error) {
-    throw usageError(errorMessage(error));
+    throw usageError(messageOf(error));
   }
 }
 
@@ -419,7 +415,7 @@ main().then(
       error instanceof AbortError ||
       errorCode(error) !== undefined
     ) {
-      process.stderr.write(`${errorMessage(error)}\n`);
+      process.stderr.write(`${messageOf(error)}\n`);
     } else {
       process.stderr.write(
         `${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`,

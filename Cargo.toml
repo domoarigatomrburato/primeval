@@ -3,7 +3,9 @@ resolver = "3"
 members = [
     "crates/primeval-core",
     "crates/primeval-render",
+    "crates/primeval-js",
     "binding",
+    "binding-wasm",
 ]
 
 [workspace.package]
@@ -46,3 +48,10 @@ panic = "unwind"
 [profile.profiling]
 inherits = "release"
 debug = 1
+
+# The wasm builds (scripts/build-wasm.mjs). Unlike release, which unwinds for
+# the napi binding, a panic aborts: the instance that panicked is never reused
+# (its Web Worker is terminated), so unwinding would only add code size.
+[profile.wasm-release]
+inherits = "release"
+panic = "abort"

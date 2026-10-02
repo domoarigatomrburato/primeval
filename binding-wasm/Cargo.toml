@@ -1,0 +1,30 @@
+[package]
+name = "primeval-wasm"
+version.workspace = true
+edition = "2024"
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[features]
+# The rayon pool on Web Workers (src/pool.rs). Only the threaded build enables
+# it; it needs the nightly toolchain and flags in scripts/build-wasm.mjs.
+# `web_spin_lock`: rayon's locks spin instead of blocking where a thread may
+# not block.
+threads = ["dep:crossbeam-channel", "rayon/web_spin_lock"]
+
+[dependencies]
+crossbeam-channel = { version = "0.5.17", optional = true }
+js-sys = "0.3.106"
+primeval-js = { path = "../crates/primeval-js" }
+primeval-render = { path = "../crates/primeval-render" }
+rayon = "1.10"
+wasm-bindgen = "0.2.129"

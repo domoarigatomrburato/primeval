@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022", "DOM"],
+    // No Node types: the browser entry and the code it shares with the Node
+    // entry cannot use `Buffer` or `node:*` modules.
+    "types": [],
+    "strict": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "declaration": true,
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "files": ["src/browser.ts", "src/worker-single.ts", "src/worker-threaded.ts", "src/wasm-glue.d.ts"]
+}

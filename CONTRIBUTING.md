@@ -9,7 +9,7 @@ The repository has two public faces that must stay aligned:
 - the Rust engine and render layer
 - the ESM-only Node package and CLI
 
-When behavior changes, keep `crates/primeval-render`, `binding`, `src/index.ts`, and `src/cli.ts` consistent on defaults, accepted values, and error behavior.
+When behavior changes, keep `crates/primeval-render`, `crates/primeval-js`, `binding`, `binding-wasm`, `src/index.ts`, and `src/cli.ts` consistent on defaults, accepted values, and error behavior.
 
 ## Local Setup
 
@@ -25,6 +25,34 @@ npm ci
 npm run build
 npm run build:node
 ```
+
+The WebAssembly builds (`npm run build:wasm`, also part of `npm run verify`) need two more tools, both pinned by `scripts/build-wasm.mjs`: the dated nightly for the threaded build, with rust-src, and wasm-bindgen-cli at the version of the wasm-bindgen crate in `Cargo.lock`. `install-tools` installs both, skipping the CLI when the installed one already matches:
+
+```bash
+node scripts/build-wasm.mjs install-tools
+npm run build:wasm
+```
+
+The single-threaded build uses the pinned stable toolchain, whose `wasm32-unknown-unknown` target `rust-toolchain.toml` installs. `npm run build:wasm` writes `wasm/single/` and `wasm/threaded/` and prints each `.wasm` file's raw and gzip size; `node scripts/build-wasm.mjs build single` builds one variant.
+
+The browser tests (`npm run test:browser`, also part of `npm run verify`) drive Chromium's headless shell through Playwright. Install the shell once per machine, at the version the Playwright in `package-lock.json` pins; on Linux, add `--with-deps` for its system libraries:
+
+```bash
+npx playwright install --only-shell chromium
+npm run build && npm run build:wasm && npm run build:node
+npm run test:browser
+```
+
+## Demo
+
+`demo/` is the browser demo published on GitHub Pages: plain HTML, CSS and ES modules, with no build step. `npm run demo:build` assembles it into `site/` with the package's browser files and the sample images; `npm run demo` builds and serves it on `http://127.0.0.1:8417/`:
+
+```bash
+npm run build && npm run build:wasm
+npm run demo
+```
+
+The server sends no COOP/COEP headers, as on Pages, so the demo's service worker (`demo/coi-sw.js`) isolates the page after one reload. `npm run demo -- --isolated` sends the headers from the server instead. The demo's tests are part of `npm run test:browser`.
 
 ## Project Rules
 
@@ -44,7 +72,7 @@ npm ci
 npm run verify
 ```
 
-`npm run verify` includes `npm run lint`, which runs Biome over `src/`, `scripts/`, and `test/` to check formatting, import order, and lint rules. Run `npm run format` to apply formatting, import order, and safe lint fixes.
+`npm run verify` includes `npm run lint`, which runs Biome over `src/`, `scripts/`, `test/`, and `demo/` to check formatting, import order, and lint rules. Run `npm run format` to apply formatting, import order, and safe lint fixes.
 
 ## Benchmarks
 

@@ -311,7 +311,7 @@ function rustRenderDefaults() {
 
 // The `@default` tag of each field in `export type RenderOptions = { ... }`.
 function jsdocDefaults() {
-  const source = readRepoFile("src", "index.ts");
+  const source = readRepoFile("src", "types.ts");
   const block = source.match(/export type RenderOptions = \{(.*?)\n\};/s);
   assert.ok(block, "missing RenderOptions type");
   const defaults = {};

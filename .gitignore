@@ -2,7 +2,9 @@
 /*.svg
 /dist/
 /output/
+/site/
 /target/
+/wasm/
 
 # Node
 node_modules/

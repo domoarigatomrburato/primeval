@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import type { RequestRenderOptions } from "./request.js";
 
 const require = createRequire(import.meta.url);
 
@@ -17,6 +18,7 @@ export interface NativeProgressInfo {
   step: number;
   total: number;
   score: number;
+  shape: string;
 }
 
 /** Cancels one running render. */
@@ -33,15 +35,7 @@ export interface NativeHandle {
 // `INVALID_OPTION`, `option` (the Node name) and `requirement`; see
 // `mapNativeError`.
 
-export interface NativeRenderOptions {
-  count?: number;
-  shape?: string;
-  alpha?: number | string;
-  seed?: number | bigint;
-  background?: string;
-  resizeInput?: number;
-  outputSize?: number;
-}
+export type NativeRenderOptions = RequestRenderOptions;
 
 export interface NativeExecutionOptions {
   onProgress?: (error: Error | null, info: NativeProgressInfo) => void;

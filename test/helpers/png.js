@@ -1,4 +1,13 @@
+import assert from "node:assert/strict";
 import zlib from "node:zlib";
+
+const SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+
+/** The `{ width, height }` of a PNG file, from its IHDR chunk. */
+export function pngSize(bytes) {
+  assert.deepEqual([...bytes.subarray(0, 8)], SIGNATURE, "a PNG file");
+  return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+}
 
 const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
   let c = n;
@@ -39,7 +48,7 @@ export function rgbPng(width, height, pixel = () => [0x80, 0x80, 0x80]) {
     }
   }
   return Buffer.concat([
-    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.from(SIGNATURE),
     chunk("IHDR", header),
     chunk("IDAT", zlib.deflateSync(raw)),
     chunk("IEND", Buffer.alloc(0)),

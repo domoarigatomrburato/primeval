@@ -5,6 +5,7 @@ import {
   approximate,
   type OutputFormat,
   type PngResult,
+  type ProgressInfo,
   type RenderOptions,
   type Shape,
   type SvgResult,
@@ -46,3 +47,4 @@ export const shapes: Equal<
   | "polygon"
 > = true;
 export const outputFormats: Equal<OutputFormat, "svg" | "png"> = true;
+export const progressShape: Equal<ProgressInfo["shape"], string> = true;
