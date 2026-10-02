@@ -240,8 +240,9 @@ All TOOL items landed in T1. Follow-ups:
 
 ## 10. Documentation and repository content (DOC)
 
-| ID | Severity | Status | `next` | Finding | Fix |
-| --- | --- | --- | --- | --- | --- |
+Done. The last item, DOC-6, landed: the copyrighted images are gone, three public-domain photographs (NPS, NASA) joined the two paintings, and `docs/readme/originals/SOURCES.md` credits every image (a test requires a row per image). The benchmark corpus stays the two paintings.
+
+--- | --- | --- | --- | --- | --- |
 | DOC-6 | Low | Partly done | yes | The copyrighted originals and their images are removed and the gallery is regenerated; only the public-domain Mona Lisa and American Gothic remain, which also form the benchmark corpus (PERF-0). | Add replacement photographs (public-domain, CC0 or the maintainer's own) to `docs/readme/originals/` and run the gallery example (`CONTRIBUTING.md`). |
 
 ---
@@ -326,7 +327,7 @@ Continuous: each ticket updates the README for the behaviour it changes. This ti
 
 - [x] API-6, API-7, DOC-2 (Deploying section, with PERF-11's batch-throughput note), DOC-3, DOC-7 (metadata, badges, repository description and topics), and DOC-6's removal of the copyrighted images
 - [x] Gallery generator (`examples/gallery.rs`) and every image regenerated from the final engine; DOC-4 Benchmarks from the PERF-0 runner
-- [ ] Replacement photographs (DOC-6), the maintainer's
+- [x] Replacement photographs (DOC-6): three public-domain photographs, credited in `docs/readme/originals/SOURCES.md`
 
 ---
 
