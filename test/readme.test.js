@@ -115,10 +115,14 @@ test("the gallery shows every original and every generated image", () => {
   }
 });
 
-test("the Benchmarks section cites the quality runner, not the Go CLI", () => {
+test("the Benchmarks section cites the runner and commit of each table", () => {
   const readme = fs.readFileSync(path.join(repoRoot, "README.md"), "utf8");
   const section = readme.split("\n## Benchmarks\n")[1].split("\n## ")[0];
-  assert.match(section, /cargo run --release -p primeval-render --example quality/);
-  assert.match(section, /commit `[0-9a-f]{7,}`/);
-  assert.doesNotMatch(section, /Go CLI|Go time/);
+  const [runner, versusGo] = section.split("\n### Compared with Go primitive\n");
+  assert.match(runner, /cargo run --release -p primeval-render --example quality/);
+  assert.match(runner, /commit `[0-9a-f]{7,}`/);
+  assert.doesNotMatch(runner, /Go CLI|Go time|primitive/);
+  assert.ok(versusGo, "the Go comparison is missing");
+  assert.match(versusGo, /cargo run --release -p primeval-render --example versus_go/);
+  assert.match(versusGo, /commit `[0-9a-f]{7,}`/);
 });

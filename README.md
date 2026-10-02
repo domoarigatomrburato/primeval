@@ -341,7 +341,11 @@ The options are bounded: `count` ≤ 100000, `resizeInput` ≤ 2048, `outputSize
 
 ### Batch throughput
 
-For many images, such as placeholders generated at build time, throughput matters more than the latency of one image. A single render does not scale linearly with cores: each step does some work over the whole canvas on one thread and then waits for its slowest search task, so cores sit idle. Starting a few `approximate()` calls at once, instead of awaiting each in turn, lets them fill those gaps in the shared pool and finishes the batch sooner. `approximate()` has no per-render thread count; to give each render fewer threads, split the batch across processes and set `RAYON_NUM_THREADS` in each.
+For many images, such as placeholders generated at build time, throughput matters more than the latency of one image. A single render does not scale linearly with cores: each step does some work over the whole canvas on one thread and then waits for its slowest search task, so cores sit idle. Starting a few `approximate()` calls at once, instead of awaiting each in turn, lets them fill those gaps in the shared pool and finishes the batch sooner. `approximate()` has no per-render thread count; to give each render fewer threads, split the batch across processes and set `RAYON_NUM_THREADS` in each. With the CLI, for example, four processes of two threads each write `<name>.svg` next to every JPEG under `images/` (add `-f` to overwrite earlier output):
+
+```bash
+find images -name '*.jpg' -print0 | RAYON_NUM_THREADS=2 xargs -0 -P 4 -n 1 primeval -q
+```
 
 ### Untrusted input
 
@@ -383,6 +387,30 @@ cargo run --release -p primeval-render --example quality -- --no-synthetic --ste
 ```
 
 Times vary between runs and machines. Scores are deterministic for a given commit and platform, whatever the core count. [`CONTRIBUTING.md`](CONTRIBUTING.md#benchmarks) describes the runner and its other columns.
+
+### Compared with Go primitive
+
+The same two photographs through the original Go [`primitive`](https://github.com/fogleman/primitive) and primeval, with the same settings: the shape kind, the step count, alpha 128 (Go's default), working size 256, output size 1024, the average colour as background, and PNG output. Speedup is Go's time over primeval's, summed over both images. RMSE is the RGB error (0–255, lower is better) of each PNG against the original resized to 1024 with Lanczos3, averaged over both images.
+
+| Shape | 200 steps speedup | Go RMSE | primeval RMSE | 1000 steps speedup | Go RMSE | primeval RMSE |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Mixed | 5.0× | 14.93 | 13.63 | 4.9× | 12.65 | 10.44 |
+| Triangle | 5.4× | 15.75 | 14.07 | 4.9× | 13.66 | 10.99 |
+| Rectangle | 7.1× | 15.89 | 14.80 | 6.4× | 13.54 | 11.30 |
+| Ellipse | 10.7× | 14.87 | 14.74 | 11.1× | 11.55 | 11.34 |
+| Circle | 13.1× | 16.23 | 16.17 | 14.3× | 12.48 | 12.28 |
+| Rotated rectangle | 5.4× | 15.54 | 14.02 | 5.0× | 12.87 | 10.73 |
+| Quadratic | 3.8× | 45.46 | 38.90 | 3.9× | 26.43 | 18.81 |
+| Rotated ellipse | 4.9× | 15.30 | 14.06 | 5.3× | 12.95 | 10.48 |
+| Polygon | 2.1× | 14.69 | 13.18 | 2.1× | 12.97 | 10.45 |
+
+In total, 200 steps took 105 s with Go and 22 s with primeval (4.7×), and 1000 steps 592 s and 124 s (4.8×). primeval's RMSE was lower in all 18 image and shape configurations at both step counts, by 8% (200 steps) and 16% (1000 steps) in geometric mean.
+
+Go is timed as a process (decode, search, render, writing PNG and SVG); primeval is timed in-process (decode, search, PNG encode), and the Node CLI adds about 0.1 s of startup on top. Go seeds itself from the clock, so each Go figure is from 3 runs (median time, mean RMSE); primeval used seed 42, with the median of 3 runs as its time. Measured at commit `12814e2` against `primitive` `v0.0.0-20200504002142-0373c216458b` (Go 1.24.6) on the same Apple M3, from:
+
+```bash
+cargo run --release -p primeval-render --example versus_go -- --steps 200,1000 --reps 3
+```
 
 ## Used in Production
 

@@ -68,6 +68,8 @@ cargo run --release -p primeval-render --example quality > baseline.md          
 
 Its corpus is the public-domain images in `docs/readme/originals/` plus generated images. Use `--image PATH` (repeatable), `--no-synthetic`, `--shapes LIST` and `--steps LIST` to change it; the doc comment in `crates/primeval-render/examples/quality.rs` defines the metrics. Diff two tables to compare runs. Quality numbers are reproducible for the same commit on the same platform whatever the thread count; set `RAYON_NUM_THREADS` to measure scaling, which changes only the times.
 
+The README's comparison with the Go [`primitive`](https://github.com/fogleman/primitive) CLI comes from `cargo run --release -p primeval-render --example versus_go > versus-go.md` (about 45 minutes with the defaults on an Apple M3). It needs the Go tool (`go install github.com/fogleman/primitive@latest`), is not part of any gate, and its doc comment in `crates/primeval-render/examples/versus_go.rs` defines the settings and metrics.
+
 ## Gallery Images
 
 The SVGs and thumbnails in `docs/images/`, `docs/gallery.md` and the README's alpha comparison images in `docs/readme/comparisons/` are generated; do not edit them by hand. Regenerate them after an engine change that alters output:
