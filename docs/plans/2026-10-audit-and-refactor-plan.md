@@ -66,7 +66,7 @@ The problems are concentrated at the edges: how binaries are built, how failures
 | 5 | NODE-1, NODE-2 | Some errors are thrown synchronously and skip the error-class mapping; a throwing `onProgress` crashes the process. | High | Reproduced |
 | 6 | RT-5 | Memory is unbounded: a 258 KB PNG (9000×9000) peaks at 951 MB RSS. | High | Reproduced, measured |
 | 7 | ENG-1 | The NEON code inside safe public functions can read out of bounds. Their `// SAFETY:` comments (added in T1) say the invariant is assumed, not checked. | High | Verified |
-| 8 | ENG-2, ENG-3, ENG-4 | Quadratic strokes paint pixels twice (15.4% of shapes). PNG geometry differs from the SVG. "Deterministic" seeds depend on the CPU core count. | Medium | Reproduced, verified |
+| 8 | ENG-2, ENG-3, ENG-4 | Quadratic strokes paint pixels twice (15.4% of shapes). Three engine rasterizers are coarser than the geometry they optimise. "Deterministic" seeds depend on the CPU core count. | Medium | Reproduced, verified |
 | 9 | PERF-* | No benchmarks exist. Polygon and rotated-ellipse take 51% of the total time and are rasterization-bound (10–32 ns/pixel versus 2–4 for rectangles). | Medium | Measured |
 
 **Carry-over:** of the 100 action items the audit identified, 65 carry over unchanged to a redesigned engine and 13 more partially (section 15, a snapshot taken at audit time). This argues for doing the transferable work first and capping the investment in performance tuning of the current engine.
@@ -405,21 +405,15 @@ CLI-1 to CLI-4 landed with RM-7. Deliberate choices: stdout output is SVG only (
   - Property test "no pixel emitted twice" for every rasterizer.
   - Run the add-score parity test for every `ShapeKind`.
 
-### ENG-3: Raster output geometry does not match the SVG
+### ENG-3: Engine rasterizers are coarser than their geometry
 
-- **Severity / status:** Medium. Verified. `next: partial`: the rule "one coordinate convention, plus a PNG-vs-SVG test" carries over.
-- **Where:**
-  - The SVG wraps every shape in `scale(s) translate(0.5 0.5)` (`model.rs:313-316`).
-  - The raster replay (`model.rs:258-296`) offsets Ellipse and Circle by `(v + 0.5) * scale`, but every other kind goes through `shape.scaled(scale).rasterize()`.
-  - `scaled()` uses `scale_i32 = (v * scale).round()` (`shapes.rs:1111-1113`), with no pixel-centre offset and with the inclusive `x2` scaled as a point.
-- **Impact** (reasoned at the default scale 4): a working-resolution rectangle covering columns 1..=3 should be 12 output pixels.
-  - The replay paints 4..=12, i.e. 9 pixels; the SVG covers [6, 18).
-  - Rectangles that touch at working resolution leave 3-pixel gaps in PNG.
-  - Triangles and rotated rectangles sit about 1.5 px off from circles in the same `any` image.
-  - The existing replay test (`model.rs:347`) is circular: it compares against the same `scaled().rasterize()`.
-- **Fix:**
-  - Pick one convention: continuous coordinates, rectangles covering `[x1·s, (x2+1)·s)`, integer vertices mapped to `(v + 0.5)·s`.
-  - Add a test that rasterizes the SVG semantics and compares with the PNG.
+- **Severity / status:** Low–Medium. Measured. `next: no` (the principle, one coordinate convention checked by a test, already holds).
+- **Landed in T2 (API-3):** one convention, in `Shape::geometry` (pixel `(i, j)` is `[i, i+1) × [j, j+1)`); the SVG and PNG writers consume the same `Drawing`, so PNG and SVG agree by construction. `crates/primeval-core/src/shapes/geometry_tests.rs` compares each kind's geometry with the engine's own coverage (mismatched pixels per unit of perimeter, with a half-pixel-offset check).
+- **Remaining:** three engine rasterizers do not cover their own geometry, so they pass only with looser per-kind bounds, and some half-pixel offsets go undetected:
+  - Triangle (0.456 against 0.04–0.05 for ellipses): rows are filled out to rounded-down edge positions (one extra pixel on the left for most rows), and the lower half is drawn one row low.
+  - Rotated rectangle (0.265): corners are rounded towards the centre, then every pixel an edge touches is filled, so the shape comes out fatter.
+  - Quadratic (0.157): each segment is sampled at the left/top edge of its pixels instead of the centre (half a pixel along its main direction). Related to ENG-2.
+- **Fix:** sample edges at pixel centres in these three rasterizers, then tighten their bounds in `geometry_tests.rs` to the 0.1 used by the other kinds and drop the half-pixel exceptions.
 
 ### ENG-4: Seeded output depends on the core count
 
@@ -452,7 +446,7 @@ CLI-1 to CLI-4 landed with RM-7. Deliberate choices: stdout output is SVG only (
 | ENG-11 | Low | Verified | no | `model.rs:67` | A zero dimension gives a NaN or infinite aspect ratio, `random_range(0..0)` panics, and the score becomes NaN. Public API only. | Validate in the constructor. |
 | ENG-13 | Low | Verified | no | `shapes.rs:100-101`, `raster.rs:244`, `score.rs:129`, `state.rs:16` | Public fields with unchecked invariants: `Polygon.order > 4` or `0` panics; `partial_cmp().unwrap()` panics on NaN vertices; `Scanline.alpha > 0xFFFF` overflows `M - sa*ma/M`; `State.cached_energy` is public and mutable. | Restrict visibility (API-1); use `total_cmp`. |
 | ENG-14 | Info | Verified | no | `score.rs` blend | The blend arithmetic is exactly at the overflow bound (`v < M(M+1)`, `div_by_m` exact). Full anti-aliased coverage sums to 65532, not 65535, so "fully covered" pixels are never exactly opaque. | Document the bound, add a `debug_assert`, normalise coverage. |
-| ENG-15 | Nit | Verified | partial | `export.rs:135-137`, `error_grid.rs:37` | `max_size * height / width` and `(cols * rows) as usize` are computed in `u32`. Unreachable with decode limits. | Compute in `u64`. |
+| ENG-15 | Nit | Verified | partial | `primeval-render/src/input.rs` (`thumbnail`), `error_grid.rs:37` | `max_size * height / width` and `(cols * rows) as usize` are computed in `u32`. Unreachable with decode limits. | Compute in `u64`. |
 
 ---
 
@@ -599,7 +593,6 @@ Takeaways:
 | --- | --- | --- | --- | --- | --- |
 | API-1 | Medium | Verified | partial | `crates/primeval-core/src/lib.rs:7-20` makes every module public. That exposes `WorkerCtx` (with public `lines`, `rng`, `rect_*`, `scratch_vertices`), `SearchRound`, `State`, `hill_climb`, `raster::*`, profiling hooks (`worker.rs:93-139`), and mutable `Model.target` / `Model.current` while `score` is private. Because everything is public, the workspace's `unreachable_pub` / `dead_code = "deny"` lints cannot find dead items. | Expose a small surface (shape types, `Color`, `ShapeKind`, a `Model` facade or an engine trait, the committed-shape IR); make the rest `pub(crate)`; `#[non_exhaustive]` on public enums and option structs. |
 | API-2 | Medium | Verified | yes | Errors are stringly typed: `Model::step` returns `Result<u64, String>` (`model.rs:114`, and that error cannot happen); `FromStr` uses `Err = String` (`shapes.rs:238`, `export.rs:50`); encoders return `Box<dyn Error>`, which is not `Send + Sync` (`export.rs:64`, `:78`, `:98`); render's `ApproximateError` (`lib.rs:144-148`) has no `source()` and turns image errors into strings. | One typed error per crate with `std::error::Error` + `source`, `#[non_exhaustive]`, keeping `io::ErrorKind`. |
-| API-3 | Medium | Verified | **yes (key)** | Output concerns live in the engine: `export.rs` (the PNG encoder, `thumbnail`, `average_background`, CLI file naming in `output_paths`) is in core, and `Model` mixes search with `output_size`, `scale`, `svg()`, `render_output()`. | **Define the engine boundary:** the engine takes a target buffer plus options and produces an ordered list of committed shapes (shape, colour, alpha) with canvas metadata. Decode, resize, SVG/PNG writing and replay live in `primeval-render`. This is what lets a future engine replace the current one without touching render, binding, TS or CLI (section 15). Core then drops `image`. |
 | API-4 | Low | Verified | yes | Alpha is a magic number: `alpha: i32` with 0 meaning auto (`model.rs:114`, `state.rs:14-15`), sent as a number from TypeScript, stringified (`src/index.ts` around `:290`) and re-parsed in Rust. | An `Alpha::{Auto, Fixed(u8)}` enum end to end; `alpha?: "auto" \| number` in TypeScript. |
 | API-6 | Low | Verified | partial | `ShapeKind` keeps parallel name tables (`shapes.rs:194-254`: `variants()`, `FromStr`, display). | One `const` table. |
 | API-7 | Low | Measured | partial | 186 public items lack docs (`-W missing_docs`). Some docs are wrong: `difference_full_raw` claims a normalised RMS but returns a raw `u64`; `raster.rs:8` and `:172` mention a "tiny-skia pipeline" that does not exist; `raster.rs:177` says "non-zero winding" while the code uses even-odd. | `#![warn(missing_docs)]` on the public surface and fix the wrong docs. Broken links, module docs and the rustdoc gate landed in T1. |
@@ -695,7 +688,6 @@ Done. Every TOOL item plus REL-3 and REL-4 landed; section 9 lists the follow-up
 
 Removals before hardening, so no effort goes into code that is about to disappear.
 
-- [ ] API-3 **Engine boundary**: engine produces committed shapes; decode, replay and encoders move to render; core drops `image`
 - [ ] API-1 Restrict core visibility; `#[non_exhaustive]`
 - [ ] API-4 Typed alpha end to end
 - [ ] API-9, API-10 Render facade ergonomics, `merge`
@@ -729,7 +721,7 @@ Required in any case, because the current engine becomes the reference and basel
 
 - [ ] ENG-1 Soundness (assertions, visibility, NEON parity test on arm64 CI)
 - [ ] ENG-2 Quadratic duplicates (+ PERF-7)
-- [ ] ENG-3 One coordinate convention; PNG-vs-SVG test
+- [ ] ENG-3 Triangle, rotated-rectangle and quadratic rasterizers sample at pixel centres; tighten the geometry test bounds
 - [ ] ENG-4 Determinism independent of thread count (+ PERF-9)
 - [ ] ENG-5 to ENG-15
 - [ ] TEST-4 Property tests for rasterizers and scoring
