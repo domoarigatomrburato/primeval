@@ -59,8 +59,7 @@ The problems are concentrated at the edges: how binaries are built, how failures
 
 | # | ID | Finding | Severity | Status |
 | --- | --- | --- | --- | --- |
-| 1 | ENG-2, ENG-3 | Quadratic strokes paint pixels twice (15.4% of shapes). Three engine rasterizers are coarser than the geometry they optimise. | Medium | Reproduced, verified |
-| 2 | PERF-* | No benchmarks exist. Polygon and rotated-ellipse take 51% of the total time and are rasterization-bound (10–32 ns/pixel versus 2–4 for rectangles). | Medium | Measured |
+| 1 | PERF-5 | Polygon and rotated-ellipse are rasterization-bound (10–32 ns/pixel versus 2–4 for rectangles) and dominate run time. Benchmarks now exist (PERF-0). | Medium | Measured |
 
 **Carry-over:** of the 100 action items the audit identified, 65 carry over unchanged to a redesigned engine and 13 more partially (section 15, a snapshot taken at audit time). This argues for doing the transferable work first and capping the investment in performance tuning of the current engine.
 
@@ -146,47 +145,12 @@ CLI-1 to CLI-4 landed with RM-7. Deliberate choices: stdout output is SVG only (
 
 ## 5. Engine correctness (ENG)
 
-### ENG-2: Quadratic strokes paint pixels twice
-
-- **Severity / status:** Medium. Reproduced in Rust (Appendix A.6). `next: no`.
-- **Where:** `raster.rs`, quadratic stroke. The curve is subdivided into segments (around `:90-91`), and each segment's columns are emitted as a closed range (around `:136-140`), so neighbouring segments share integer columns.
-- **Evidence:**
-
-  | Shape (5000 random shapes, 256×256) | Shapes with a duplicated pixel | Duplicated / total pixels |
-  | --- | --- | --- |
-  | quadratic | 15.4% | 0.413% |
-  | triangle, rectangle, ellipse, circle, rotated-rectangle, rotated-ellipse, polygon | 0% | 0% |
-
-- **Impact:**
-  - Energy assumes each pixel is blended once, but `draw_lines` blends duplicates twice. The score stored by `Model::add` (`model.rs:177-191`) drifts away from `difference_full_raw`.
-  - A duplicated pixel is subtracted twice from the fused energy's running total, which underflowed in debug builds on tiny canvases. T3 made the total wrap (exact modulo 2^64 as long as the true sum is non-negative, as release builds already behaved); the double count itself remains until this fix.
-  - This affects reported scores and frame selection, and `compute_color` double-weights those pixels.
-  - In debug builds `total -=` can transiently underflow.
-  - The test `add_score_matches_full_recomputation` covers only Rectangle.
-- **Fix:**
-  - Use half-open column ranges per segment and dedupe at joins, or accumulate coverage per row.
-  - Property test "no pixel emitted twice" for every rasterizer.
-  - Run the add-score parity test for every `ShapeKind`.
-
-### ENG-3: Engine rasterizers are coarser than their geometry
-
-- **Severity / status:** Low–Medium. Measured. `next: no` (the principle, one coordinate convention checked by a test, already holds).
-- **Landed in T2 (API-3):** one convention, in `Shape::geometry` (pixel `(i, j)` is `[i, i+1) × [j, j+1)`); the SVG and PNG writers consume the same `Drawing`, so PNG and SVG agree by construction. `crates/primeval-core/src/shapes/geometry_tests.rs` compares each kind's geometry with the engine's own coverage (mismatched pixels per unit of perimeter, with a half-pixel-offset check).
-- **Remaining:** three engine rasterizers do not cover their own geometry, so they pass only with looser per-kind bounds, and some half-pixel offsets go undetected:
-  - Triangle (0.456 against 0.04–0.05 for ellipses): rows are filled out to rounded-down edge positions (one extra pixel on the left for most rows), and the lower half is drawn one row low.
-  - Rotated rectangle (0.265): corners are rounded towards the centre, then every pixel an edge touches is filled, so the shape comes out fatter.
-  - Quadratic (0.157): each segment is sampled at the left/top edge of its pixels instead of the centre (half a pixel along its main direction). Related to ENG-2.
-- **Fix:** sample edges at pixel centres in these three rasterizers, then tighten their bounds in `geometry_tests.rs` to the 0.1 used by the other kinds and drop the half-pixel exceptions.
-
 ### Smaller correctness items
 
 | ID | Severity | Status | `next` | Where | Problem | Fix |
 | --- | --- | --- | --- | --- | --- | --- |
 | ENG-6 | Low | Verified | no | `score.rs:58-76` | `compute_color` ignores `line.alpha` (coverage), so anti-aliased edges and quadratic pixels are fitted as fully covered and the colour comes out under-saturated. This matches Go; the quality impact is unmeasured. | Weighted least squares: `s* = Σw(t−(1−w)c) / Σw²` with `w = (alpha/255)·(ma/65535)`. |
-| ENG-8 | Low | Verified | no | `shapes.rs:600-606` | RotatedRectangle starts `rect_max` at 0, so rows whose edges are all at negative x emit a stray (0..0) pixel. Inherited from Go. | Start at `i32::MIN` / `i32::MAX`. |
-| ENG-9 | Low | Verified | no | `shapes.rs:983-984` | RotatedEllipse clamps `ry` to `width - 1`; Ellipse uses the height. | Clamp to `height - 1`. |
 | ENG-10 | Low | Reported | no | `error_grid.rs:80-97`, `:141-144`, `:172-173` | Biased sampling only covers `cell_w × cell_h` per cell, but the last row/column absorbs the remainder, which is then reached only by the 20% uniform samples. | Sample within each cell's real bounds. |
-| ENG-17 | Low | Verified | no | `shapes.rs` (`RotatedRectangle::mutate`) | Mutation never enforces the rotated rectangle's aspect-ratio limit: Go's `Mutate` loops until `Valid()`, but here `is_valid` was only called by its own test (deleted in T2 as dead code). Quality impact unmeasured. | Restore the validity check with bounded repair, as Quadratic does, or document the divergence. |
 
 ---
 
@@ -289,12 +253,6 @@ Since ENG-4 (T5), runner quality is identical across thread counts; times still 
 - **Severity / status:** Low. Verified. `next: no`.
 - **Where:** `raster.rs:202` `[(f64, usize); 64]` and a `[_; 32]` array around `:248`. That is about 1.8 KB of memset per polygon row for at most 16 hits.
 - **Fix:** size them to `4 * order`, or use a scratch `Vec` in `WorkerCtx`. The unused `scratch_vertices` field suggests this was the intent.
-
-### PERF-7: Quadratic emits one scanline per pixel
-
-- **Severity / status:** Medium. Measured (44 lines for 44 pixels per candidate, 32 ns/pixel). `next: no`.
-- **Where:** `raster.rs`, quadratic band test (around `:134`, `:143-153`). It scans at least 5 rows when about 1.5 have coverage, and per-line overhead (`clamp_line`, offset computation) dominates. The NEON 8-pixel path is never used.
-- **Fix:** compute the exact row range analytically, merge horizontal runs, and fix ENG-2 in the same change.
 
 ### PERF-8: Score the random phase at reduced resolution
 
@@ -428,9 +386,7 @@ REL-1, REL-2, REL-5 and REL-6 landed (section 2 lists what only CI can confirm a
 
 Required in any case, because the current engine becomes the reference and baseline for "next".
 
-- [ ] ENG-2 Quadratic duplicates (+ PERF-7)
-- [ ] ENG-3 Triangle, rotated-rectangle and quadratic rasterizers sample at pixel centres; tighten the geometry test bounds
-- [ ] ENG-6, ENG-8, ENG-9, ENG-10, ENG-17
+- [ ] ENG-6, ENG-10
 - [ ] TEST-4 Property tests for rasterizers and scoring
 
 ### T6: Performance, gated by benchmarks
