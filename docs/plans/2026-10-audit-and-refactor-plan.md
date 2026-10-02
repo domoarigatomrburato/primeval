@@ -61,12 +61,12 @@ The problems are concentrated at the edges: how binaries are built, how failures
 | --- | --- | --- | --- | --- |
 | 1 | REL-1 | `target-cpu=native` leaks into release prebuilds. The Windows x64 DLL contains AVX-512 and the Linux arm64 addon contains SVE, so both crash with an illegal-instruction signal on common CPUs. On ARM the flag gives zero speedup. | Critical | Reproduced, measured |
 | 2 | RT-1 | `panic = "abort"` turns every Rust panic into the death of the host Node process. Switching to `unwind` costs nothing measurable. | Critical | Reproduced, measured |
-| 3 | RT-2, RT-3, RT-4 | Panics reachable from ordinary input: a 1-pixel working side (e.g. a 2000×5 banner), `background: "a€bc"`, a huge `outputSize`, GIF output wider than 65535 px. | Critical | Reproduced |
+| 3 | RT-2, RT-3, RT-4 | Panics reachable from ordinary input: a 1-pixel working side (e.g. a 2000×5 banner), `background: "a€bc"`, a huge `outputSize`. | Critical | Reproduced |
 | 4 | REL-2 | Linux prebuilds require glibc ≥ 2.34 (no Debian 11, Ubuntu 20.04, Amazon Linux 2, RHEL 8). | High | Verified |
 | 5 | NODE-1, NODE-2 | Some errors are thrown synchronously and skip the error-class mapping; a throwing `onProgress` crashes the process. | High | Reproduced |
-| 6 | RT-5 | Memory is unbounded: a 258 KB PNG (9000×9000) peaks at 951 MB RSS; GIF at 2048 px peaks at 585 MB. | High | Reproduced, measured |
+| 6 | RT-5 | Memory is unbounded: a 258 KB PNG (9000×9000) peaks at 951 MB RSS. | High | Reproduced, measured |
 | 7 | ENG-1 | The NEON code inside safe public functions can read out of bounds. Their `// SAFETY:` comments (added in T1) say the invariant is assumed, not checked. | High | Verified |
-| 8 | ENG-2, ENG-3, ENG-4 | Quadratic strokes paint pixels twice (15.4% of shapes). PNG/JPG/GIF geometry differs from the SVG. "Deterministic" seeds depend on the CPU core count. | Medium | Reproduced, verified |
+| 8 | ENG-2, ENG-3, ENG-4 | Quadratic strokes paint pixels twice (15.4% of shapes). PNG geometry differs from the SVG. "Deterministic" seeds depend on the CPU core count. | Medium | Reproduced, verified |
 | 9 | PERF-* | No benchmarks exist. Polygon and rotated-ellipse take 51% of the total time and are rasterization-bound (10–32 ns/pixel versus 2–4 for rectangles). | Medium | Measured |
 
 **Carry-over:** of the 100 action items the audit identified, 65 carry over unchanged to a redesigned engine and 13 more partially (section 15, a snapshot taken at audit time). This argues for doing the transferable work first and capping the investment in performance tuning of the current engine.
@@ -230,13 +230,10 @@ The problems are concentrated at the edges: how binaries are built, how failures
 
 ### RT-4: Output-size overflows panic
 
-- **Severity / status:** High. Reproduced. `next: partial` (output caps carry over; GIF removal makes half of this moot).
-- **Where:**
-  - `buffer.rs:160` `.expect("buffer pixel byte length must not overflow usize")`: `outputSize: 4294967295` with raster output panics on a `tokio-rt-worker` thread.
-  - `export.rs:105`, `:110-111` cast `width() as u16`: a 1000×10 PNG with `outputSize: 70000` resolves for PNG, but GIF hits the gif crate's frame-size assertion, exit 134.
+- **Severity / status:** High. Reproduced. `next: partial` (output caps carry over).
+- **Where:** `buffer.rs:160` `.expect("buffer pixel byte length must not overflow usize")`: `outputSize: 4294967295` with raster output panics on a `tokio-rt-worker` thread. (The GIF `u16` frame-size panic left with RM-1.)
 - **Fix:**
   - Cap `output_size` in `validate_options` (e.g. ≤ 16384).
-  - Use `u16::try_from` with an error, or remove GIF (RM-1).
   - Prefer `try_reserve` for large buffers.
 
 ### RT-5: Unbounded memory and work
@@ -244,14 +241,12 @@ The problems are concentrated at the edges: how binaries are built, how failures
 - **Severity / status:** High. Reproduced, measured. `next: yes`.
 - **Evidence:**
   - A 258,606-byte 9000×9000 PNG with `count: 1` and `resizeInput: 64` peaks at **951 MB RSS**.
-  - GIF output peaks at 152 MB (200 steps at 1024 px) and 585 MB (200 steps at 2048 px).
   - A reviewer probe with 600 steps at 2048 px peaked at 765 MB.
   - A 30000×30000 PNG header bomb is rejected by `image`'s default 512 MiB allocation limit, so that part works.
 - **Causes:**
   - `render::prepare` keeps the full decoded `DynamicImage` alive for the whole optimisation (`crates/primeval-render/src/lib.rs:363` onward).
   - `average_background` (`export.rs:173-174`) makes full-resolution RGBA copies.
   - `thumbnail` returns `to_rgba8()` copies (`export.rs:131`), and `Buffer::from_image` clones again (`buffer.rs:111`).
-  - GIF frames are all materialised before encoding (`model.rs:224-255`, `result.push(output.clone())`). The frame step is applied only afterwards (`lib.rs:468-479`).
   - Nothing caps `count`, `resizeInput`, `outputSize` or `repeat`. The Rust-only `workers` option has no upper bound.
 - **Fix:**
   - Decode with `image::ImageReader` and explicit `image::Limits` (`max_image_width`, `max_image_height`, `max_alloc`).
@@ -259,7 +254,6 @@ The problems are concentrated at the edges: how binaries are built, how failures
   - `drop` the full image right after taking the thumbnail.
   - Take `RgbaImage` by value (`into_raw`).
   - Add upper bounds in `validate_options`, document them, and test them at every layer.
-  - Remove GIF (RM-1) or stream it.
 
 ### RT-6: Path input is a liability
 
@@ -358,16 +352,14 @@ The problems are concentrated at the edges: how binaries are built, how failures
 
 - **Severity / status:** Medium. Reproduced. `next: yes`.
 - **Evidence:**
-  - Rust `OutputFormat::from_str` and the CLI accept `jpeg`, but the API rejects `output: "jpeg"`.
   - Rust `parse_alpha_str` accepts `"auto"`, but CLI `--alpha auto` gives "alpha must be an integer".
-  - GIF input decodes (`primeval-render` enables `image/gif`) although the README says JPEG/PNG only.
   - The same rule is spelled three ways: "resize_input must be at least 1" (Rust), "resizeInput ..." (TypeScript) and "resize-input ..." (CLI).
   - The seed message says "positive integer" although 0 is accepted.
   - `shape: null` is accepted at runtime although the type forbids it.
 - **Fix:**
   - Pick one vocabulary in Rust and make every layer consume it.
   - Report errors with the public (camelCase) field names, mapped in exactly one place.
-  - Most of the drift disappears with RM-1, RM-5 and RM-7.
+  - The CLI part of the drift disappears with RM-7.
 
 ### NODE-8: Typings and packaging details
 
@@ -487,7 +479,7 @@ The problems are concentrated at the edges: how binaries are built, how failures
   - `scaled()` uses `scale_i32 = (v * scale).round()` (`shapes.rs:1111-1113`), with no pixel-centre offset and with the inclusive `x2` scaled as a point.
 - **Impact** (reasoned at the default scale 4): a working-resolution rectangle covering columns 1..=3 should be 12 output pixels.
   - The replay paints 4..=12, i.e. 9 pixels; the SVG covers [6, 18).
-  - Rectangles that touch at working resolution leave 3-pixel gaps in PNG/JPG/GIF.
+  - Rectangles that touch at working resolution leave 3-pixel gaps in PNG.
   - Triangles and rotated rectangles sit about 1.5 px off from circles in the same `any` image.
   - The existing replay test (`model.rs:347`) is circular: it compares against the same `scaled().rasterize()`.
 - **Fix:**
@@ -674,7 +666,7 @@ Takeaways:
 | --- | --- | --- | --- | --- | --- |
 | API-1 | Medium | Verified | partial | `crates/primeval-core/src/lib.rs:7-20` makes every module public. That exposes `WorkerCtx` (with public `lines`, `rng`, `rect_*`, `scratch_vertices`), `SearchRound`, `State`, `hill_climb`, `raster::*`, profiling hooks (`worker.rs:93-139`), and mutable `Model.target` / `Model.current` while `score` is private. Because everything is public, the workspace's `unreachable_pub` / `dead_code = "deny"` lints cannot find dead items. | Expose a small surface (shape types, `Color`, `ShapeKind`, a `Model` facade or an engine trait, the committed-shape IR); make the rest `pub(crate)`; `#[non_exhaustive]` on public enums and option structs. |
 | API-2 | Medium | Verified | yes | Errors are stringly typed: `Model::step` returns `Result<u64, String>` (`model.rs:114`, and that error cannot happen); `FromStr` uses `Err = String` (`shapes.rs:238`, `export.rs:50`); encoders return `Box<dyn Error>`, which is not `Send + Sync` (`export.rs:64`, `:78`, `:98`); render's `ApproximateError` (`lib.rs:144-148`) has no `source()` and turns image errors into strings. | One typed error per crate with `std::error::Error` + `source`, `#[non_exhaustive]`, keeping `io::ErrorKind`. |
-| API-3 | Medium | Verified | **yes (key)** | Output concerns live in the engine: `export.rs` (PNG/JPEG/GIF encoders, `thumbnail`, `average_background`, CLI file naming in `output_paths`) is in core, and `Model` mixes search with `output_size`, `scale`, `svg()`, `render_output()` and `frames()`. | **Define the engine boundary:** the engine takes a target buffer plus options and produces an ordered list of committed shapes (shape, colour, alpha) with canvas metadata. Decode, resize, SVG/PNG writing and replay live in `primeval-render`. This is what lets a future engine replace the current one without touching render, binding, TS or CLI (section 15). Core then drops `image` and `gif`. |
+| API-3 | Medium | Verified | **yes (key)** | Output concerns live in the engine: `export.rs` (the PNG encoder, `thumbnail`, `average_background`, CLI file naming in `output_paths`) is in core, and `Model` mixes search with `output_size`, `scale`, `svg()`, `render_output()`. | **Define the engine boundary:** the engine takes a target buffer plus options and produces an ordered list of committed shapes (shape, colour, alpha) with canvas metadata. Decode, resize, SVG/PNG writing and replay live in `primeval-render`. This is what lets a future engine replace the current one without touching render, binding, TS or CLI (section 15). Core then drops `image`. |
 | API-4 | Low | Verified | yes | Alpha is a magic number: `alpha: i32` with 0 meaning auto (`model.rs:114`, `state.rs:14-15`), sent as a number from TypeScript, stringified (`src/index.ts` around `:290`) and re-parsed in Rust. | An `Alpha::{Auto, Fixed(u8)}` enum end to end; `alpha?: "auto" \| number` in TypeScript. |
 | API-5 | Low | Verified | no | Dead or vestigial code (see RM-9). | Delete. |
 | API-6 | Low | Verified | partial | `ShapeKind` keeps parallel name tables (`shapes.rs:194-254`: `variants()`, `FromStr`, display). | One `const` table. |
@@ -706,7 +698,7 @@ All TOOL items landed in T1. Follow-ups:
 - `napi-prebuilds.yml` calls the quality workflow with `uses: ./...` plus `# zizmor: ignore[self-repository]`. Switch to the `$/...` syntax and drop the ignore once actionlint accepts it (1.7.12 does not).
 - Dependabot does not bump the actionlint `docker://` digest in the hygiene job; update it by hand.
 - Two things only CI can confirm, on the first pull request run: `rustup toolchain install` (no arguments) installs the toolchain and components from `rust-toolchain.toml`, and the pinned actionlint image works as a `docker://` step.
-- `gif` and `approx` leave with RM-1 and RM-9.
+- `approx` leaves with RM-9.
 
 ---
 
@@ -714,7 +706,7 @@ All TOOL items landed in T1. Follow-ups:
 
 | ID | Severity | Status | `next` | Finding | Fix |
 | --- | --- | --- | --- | --- | --- |
-| DOC-1 | Medium | Reproduced | partial | README promises that are false today: "`--seed <N>` for deterministic output" (ENG-4); "accepted input formats are JPEG and PNG" (GIF decodes, NODE-7); errors "are mapped to `ValidationError`, `NotFoundError`, and `AbortError`" (NODE-1); an abort "rejects with `AbortError`" (NODE-4); `repeat` described as "extra random mutations to try per step" when it actually adds up to N extra shapes per step (RM-3). | Fix each claim in the same change as its code fix, as `AGENTS.md` requires. |
+| DOC-1 | Medium | Reproduced | partial | README promises that are false today: "`--seed <N>` for deterministic output" (ENG-4); errors "are mapped to `ValidationError`, `NotFoundError`, and `AbortError`" (NODE-1); an abort "rejects with `AbortError`" (NODE-4); `repeat` described as "extra random mutations to try per step" when it actually adds up to N extra shapes per step (RM-3). | Fix each claim in the same change as its code fix, as `AGENTS.md` requires. |
 | DOC-2 | Medium | Verified | yes | Missing operational documentation: minimum glibc, CPU baseline, memory sizing (per-format peaks), concurrency guidance for servers, untrusted-input guidance, the limits introduced by RT-5. | A "Deploying" section in the README. |
 | DOC-3 | Low | Verified | yes | The README examples read `docs/readme/originals/monalisa.jpg`, which does not exist for npm consumers. | Use `photo.jpg` with a note, or `process.argv[2]`. |
 | DOC-4 | Low | Verified | yes | The Benchmarks section cannot be reproduced (the script was removed in `e24492d`). | Replace with the PERF-0 script and its output, or remove the section. |
@@ -729,14 +721,11 @@ The project has never been published, so every removal is free.
 
 | ID | `next` | Remove | Why | What it simplifies |
 | --- | --- | --- | --- | --- |
-| RM-1 | yes | **GIF output** | 50× the peak memory and about 2× the time of SVG/PNG (Appendix A.4); 256 colours; 2.3 MB files against 27 KB SVG; source of the `u16` panic (RT-4). | Drops the `gif` dependency, `gif_frame_step`, `Model::frames`, `encode_gif`, NeuQuant and most of RT-5. If animation is wanted later, an **animated SVG** (CSS `animation-delay` per shape, in insertion order) is a few KB, vector, and costs no memory. That would be a deliberate new feature. |
 | RM-2 | yes | **Path input** (`{ kind: "path" }` in the Node API, `InputSource::Path` in render) | RT-6: unbounded reads, FIFO hangs, file-existence oracle, all IO errors reported as NotFound, UTF-8-only paths. Node's `fs` does this better. | `NotFoundError` disappears; input becomes plain bytes (`approximate(bytes, options)` or `{ input: Uint8Array }`); the CLI uses `fs.readFile` with precise errors. |
 | RM-3 | yes | **`repeat`** | It actually adds up to N extra shapes per step (`model.rs:157-171`), so the shape count stops matching `count` and progress `total` is wrong; it is documented incorrectly; it is a niche upstream knob ("mostly good for beziers"); its loop is fragile (ENG-12). | One option fewer and a clean meaning: `count` = number of shapes. |
 | RM-4 | yes (accepted) | **Alpha channel in the engine**: work in RGB, composite transparent inputs onto the background at decode time, accept only opaque backgrounds (`RGB` / `RRGGBB`) | ENG-16 inconsistency; about 25% of per-pixel work (PERF-4); simpler kernels; transparent output has little value for this product. PERF-0 measures the gain when PERF-4 lands. | 3-byte buffers, RGB-only NEON (`vld3_u8`), one background rule across SVG and PNG. |
-| RM-5 | yes | **GIF input decoding** (the `gif` feature of `image` in `primeval-render/Cargo.toml`) | Undocumented and untested. | Smaller decode surface. **WebP input** is added (accepted; pure-Rust decoder in `image`): it is the format users will most often bring. |
-| RM-6 | yes | **Rust-only knobs not exposed to Node**: `prepare()` / `ApproximationRun`, `gif_frame_step`, public `workers` | They break the "layers stay aligned" rule; the binding uses only `approximate`. | `workers` becomes an internal performance knob once ENG-4 makes output independent of it. |
+| RM-6 | yes | **Rust-only knobs not exposed to Node**: `prepare()` / `ApproximationRun`, public `workers` | They break the "layers stay aligned" rule; the binding uses only `approximate`. | `workers` becomes an internal performance knob once ENG-4 makes output independent of it. |
 | RM-7 | yes | **CLI extras**: `--format`, the `jpeg` alias, `--progress auto\|plain\|off`, defaulting the output format to the input's | `--format svg -o x.png` writes SVG into a `.png`; three spellings of one thing. | Format comes from the `--output` extension only; the **default output is SVG** (the flagship format); `--quiet` replaces `--progress`; revisit the `_primitive` suffix. |
-| RM-8 | yes (accepted) | **JPG output** | Lossy over flat shapes (ringing at edges); the size gain (140 KB against 218 KB for PNG at 1024 px, 200 shapes) does not justify a third encoder. | SVG + PNG only; the `jpeg` dependency stays only as an input decoder. |
 | RM-9 | no | **Dead code in core** | Profiling hooks (`profile_quadratic` is always false, `QuadraticProfileStats`, `worker.rs:93-139`); `export::output_paths` (`export.rs:153`, CLI file naming); `util::number_string` (`util.rs:42`); `util::rotate` (tests only); `ShapeKind::variants` and `OutputFormat::variants` (used only by regex tests); `Polygon.convex` (always false, so the convexity check is dead); `Quadratic.width` (never mutated); `WorkerCtx::scratch_vertices`; `parse_alpha_u32`; the unused `_round` parameter in `Shape::mutate`; the `approx` dev-dependency. | Less surface; lets the workspace dead-code lints work once API-1 lands. |
 
 ---
@@ -781,13 +770,10 @@ Done. Every TOOL item plus REL-3 and REL-4 landed; section 9 lists the follow-up
 
 Removals before hardening, so no effort goes into code that is about to disappear.
 
-- [ ] RM-1 Remove GIF output
 - [ ] RM-2 Remove path input; the CLI reads files itself
 - [ ] RM-3 Remove `repeat`
-- [ ] RM-5 Remove GIF input decoding; add WebP input
 - [ ] RM-6 Remove Rust-only knobs
 - [ ] RM-7 CLI simplification (format from extension, SVG default, `--quiet`)
-- [ ] RM-8 Remove JPG output
 - [ ] RM-9 Delete dead code
 - [ ] API-3 **Engine boundary**: engine produces committed shapes; decode, replay and encoders move to render; core drops `image`
 - [ ] API-1 Restrict core visibility; `#[non_exhaustive]`
