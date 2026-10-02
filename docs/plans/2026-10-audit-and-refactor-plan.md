@@ -61,10 +61,9 @@ The problems are concentrated at the edges: how binaries are built, how failures
 | --- | --- | --- | --- | --- |
 | 1 | REL-1 | `target-cpu=native` leaks into release prebuilds. The Windows x64 DLL contains AVX-512 and the Linux arm64 addon contains SVE, so both crash with an illegal-instruction signal on common CPUs. On ARM the flag gives zero speedup. | Critical | Reproduced, measured |
 | 2 | REL-2 | Linux prebuilds require glibc ≥ 2.34 (no Debian 11, Ubuntu 20.04, Amazon Linux 2, RHEL 8). | High | Verified |
-| 3 | NODE-1, NODE-2 | Some errors are thrown synchronously and skip the error-class mapping; a throwing `onProgress` crashes the process. | High | Reproduced |
-| 4 | ENG-1 | The NEON code inside safe public functions can read out of bounds. Their `// SAFETY:` comments (added in T1) say the invariant is assumed, not checked. | High | Verified |
-| 5 | ENG-2, ENG-3, ENG-4 | Quadratic strokes paint pixels twice (15.4% of shapes). Three engine rasterizers are coarser than the geometry they optimise. "Deterministic" seeds depend on the CPU core count. | Medium | Reproduced, verified |
-| 6 | PERF-* | No benchmarks exist. Polygon and rotated-ellipse take 51% of the total time and are rasterization-bound (10–32 ns/pixel versus 2–4 for rectangles). | Medium | Measured |
+| 3 | ENG-1 | The NEON code inside safe public functions can read out of bounds. Their `// SAFETY:` comments (added in T1) say the invariant is assumed, not checked. | High | Verified |
+| 4 | ENG-2, ENG-3, ENG-4 | Quadratic strokes paint pixels twice (15.4% of shapes). Three engine rasterizers are coarser than the geometry they optimise. "Deterministic" seeds depend on the CPU core count. | Medium | Reproduced, verified |
+| 5 | PERF-* | No benchmarks exist. Polygon and rotated-ellipse take 51% of the total time and are rasterization-bound (10–32 ns/pixel versus 2–4 for rectangles). | Medium | Measured |
 
 **Carry-over:** of the 100 action items the audit identified, 65 carry over unchanged to a redesigned engine and 13 more partially (section 15, a snapshot taken at audit time). This argues for doing the transferable work first and capping the investment in performance tuning of the current engine.
 
@@ -185,71 +184,7 @@ All RT items landed in T3: release builds unwind and the binding maps panics to 
 
 ## 4. Node binding, TypeScript wrapper and CLI (NODE, CLI)
 
-### NODE-1: Errors thrown synchronously and left unmapped
-
-- **Severity / status:** High. Reproduced. `next: yes`.
-- **Where:**
-  - `src/index.ts:305` `const handle = nativeBinding.startApproximate(nativeRequest);` runs outside the `.catch(mapNativeError)` at `:341`.
-  - `approximate()` (`:351`) is not `async`.
-- **Evidence:**
-  - Errors thrown synchronously by `startApproximate` are now mapped (T2), but they are still thrown synchronously rather than rejected.
-  - `count: 0` (checked in TypeScript): a synchronous `ValidationError`.
-  - `background: 123`: an unmapped napi conversion error that leaks internal names (`... on NativeRenderOptions.background on NativeApproximateRequest.render`).
-  - A native-load failure also throws synchronously.
-  - So `approximate(x).catch(...)` misses whole classes of errors, and the README promise that errors map to the typed classes is false.
-- **Fix:**
-  - Make `approximate` `async`, or wrap the whole body so every failure becomes a rejected promise passed through `mapNativeError`.
-  - Validate `background`'s type in TypeScript.
-
-### NODE-2: A throwing `onProgress` crashes the process
-
-- **Severity / status:** High. Reproduced. `next: yes`.
-- **Where:** `src/index.ts`; the user callback is invoked directly from the threadsafe-function callback.
-- **Evidence:** `onProgress() { throw new Error("boom") }` ends the process with `Error: boom at 1`, exit 1. With an `uncaughtException` handler the render still resolves.
-- **Fix:** catch inside the wrapper. On error, cancel the task and reject the promise with that error as `cause`.
-
-### NODE-4: Abort is not guaranteed
-
-- **Severity / status:** Medium–High. Reproduced. `next: yes`.
-- **Evidence:**
-  - With the main thread busy for 200 ms after `controller.abort()`, 40 of 40 renders **resolved** instead of rejecting. The wrapper never re-checks `signal.aborted` when the native promise settles.
-  - An already-aborted signal still starts native work: decoding happens before the first flag check.
-  - Cancellation latency is one optimization step (a reviewer measured 640 ms for `polygon` at `resizeInput: 1024`).
-  - Decoding cannot be cancelled.
-- **Fix:**
-  - Reject immediately when `signal.aborted`.
-  - On settle, reject with `AbortError` (`cause: signal.reason`) if the signal fired.
-  - Check the flag before and after decoding and before encoding.
-
-### NODE-7: Vocabulary drift between layers
-
-- **Severity / status:** Medium. Reproduced. `next: yes`.
-- **Evidence:**
-  - The same rule is spelled three ways: "resize_input must be at least 1" (Rust), "resizeInput ..." (TypeScript) and "resize-input ..." (CLI).
-  - The seed message says "positive integer" although 0 is accepted.
-  - `shape: null` is accepted at runtime although the type forbids it.
-- **Fix:**
-  - Pick one vocabulary in Rust and make every layer consume it.
-  - Report errors with the public (camelCase) field names, mapped in exactly one place.
-
-### NODE-8: Typings and packaging details
-
-- **Severity / status:** Low. Verified. `next: yes`.
-- **Items:**
-  - No JSDoc in `dist/index.d.ts`; defaults and meanings live only in the README.
-  - No per-output overloads, so callers must narrow `result.format` to get `data: string`.
-  - `background?: "auto" | string` collapses to `string`; `"auto" | (string & {})` keeps autocomplete.
-  - `Uint8Array` input is copied twice (`Buffer.from` at `src/index.ts:171`, then into a `Vec`).
-  - `ArrayBuffer` input is rejected with the misleading "bytes input requires data".
-  - The hand-written native types in `src/native-binding.ts` duplicate the generated `binding.d.ts`, which is neither used nor shipped, with no drift check.
-  - `dist/cli.d.ts` and `dist/native-binding.d.ts` ship as noise.
-  - No source maps or declaration maps.
-  - The exports map is correct (`types` before `import`).
-
-### NODE-10: Loader detail
-
-- **Severity / status:** Low. Reported, speculative. `next: yes`.
-- **Detail:** on Linux the loader calls `process.report.getReport()` without first setting `process.report.excludeNetwork = true`, which the napi-rs template sets for speed. Otherwise the diagnostics are good: musl detection, combined load errors, install guidance, sandboxed unit tests.
+All NODE items landed in T3: `approximate()` only rejects (typed `PrimevalError` subclasses with `code`, `cause`, and `option`/`requirement` for invalid options); a throwing `onProgress` cancels and rejects with its error; abort is checked before any native work and on settle; numbers are range-checked in Rust; renders run on `spawn_blocking` and cancel through a `NativeTask`; JSDoc, per-output overloads and a native-type drift check are in place.
 
 ### CLI decisions (T2)
 
@@ -491,7 +426,6 @@ Takeaways:
 | ID | Severity | Status | `next` | Finding | Fix |
 | --- | --- | --- | --- | --- | --- |
 | TEST-1 | Medium | Verified | yes | `test/contracts.test.js` checks contracts by regex over source files. It compares `src/index.ts` arrays with `variants()`, which is used nowhere else and can drift from `FromStr`. It greps for `?? 100`-style defaults but misses `\|\|`, destructuring, `cli.ts` and the README. It checks binding parsers by name only. It missed real drift: the `jpeg` alias, `--alpha auto`, NODE-1. | Replace with **runtime, table-driven** tests that run one table of inputs and expected outcomes through the API, the binding and the CLI (omitted = explicit default, boundaries, error class and code). No code generation (section 13). Then delete `ShapeKind::variants()` and `OutputFormat::variants()`, which only the regex tests still use. |
-| TEST-2 | Medium | Reproduced | yes | The abort test (`test/native.test.js:115-134`) aborts at step 1 of only 32 cheap steps (~62 ms). A 200 ms main-thread stall makes 40/40 runs resolve instead of reject. | Use a large `count` or an already-aborted signal, plus a deterministic late-abort test once NODE-4 is fixed. |
 | TEST-3 | Medium | Reproduced | yes | Missing negative tests, each of which corresponds to a bug in this plan: invalid `background` mapping, throwing `onProgress`, thin/1×1/multi-byte/huge inputs, u32 overflow, JPG via the API, concurrency, already-aborted signals, CLI `--background` / `--version` / unknown option / write failure, README examples. | Add them with the fixes (red-green per `AGENTS.md`). |
 | TEST-4 | Medium | Verified | partial | Engine tests (112) have gaps: some are weak or circular (`worker.rs:521-548` asserts nothing; a "keeps radius equal" test only checks r ≥ 1; the replay test in `model.rs` is circular; a score test only checks > 0). Missing: tiny images, per-shape score parity, NEON vs scalar parity, seed determinism, PNG vs SVG geometry. | Add `proptest`: rasterizer invariants (in bounds, `x1 ≤ x2`, alpha ≤ 0xFFFF, no duplicate pixels, odd and tiny sizes), fused energy = full recomputation after drawing, the blend bound, `clamp_line` vs `crop_scanlines`, hex colour round-trip, error-grid samples in bounds. |
 | TEST-5 | Medium | Verified absent | yes | No fuzzing. RT-2 and RT-3 are exactly what a fuzzer finds in minutes. | `cargo-fuzz` targets for `Color::from_hex` / background parsing and for render on small arbitrary images and options (bounded `count`). |
@@ -574,12 +508,9 @@ Done. GIF/JPG output, GIF input, path input, `repeat` and the Rust-only knobs ar
 
 ### T3: Runtime robustness
 
-Landed: RT-1, RT-2, RT-4, RT-5, API-2, NODE-3, NODE-5, NODE-6, NODE-9.
+Landed: every RT and NODE item, API-2, TEST-2.
 
-- [ ] NODE-1, NODE-2, NODE-4 Async-only errors, safe progress, reliable abort
-- [ ] NODE-7 One vocabulary (Node camelCase, CLI flag names, from the typed option identifier)
-- [ ] NODE-8, NODE-10 Typings, loader detail
-- [ ] TEST-1, TEST-2, TEST-3, TEST-5, TEST-6
+- [ ] TEST-1, TEST-3, TEST-5, TEST-6
 
 ### T4: Portable native builds and release
 
