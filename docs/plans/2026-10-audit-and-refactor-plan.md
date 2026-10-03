@@ -757,6 +757,15 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
        - **Time.** B's extra time is only 0.10–0.16× greedy's for these kinds, since greedy is slower on them, so the iteration rule calibrated on triangles leaves most of the budget unused.
        - **Outlier.** synthetic-shapes has large model–export gaps in every variant, greedy included; on polygons B loses to A1 there.
        - The browser tripwire's shape list lacks `polygon`, which now runs B.
+       - **More iterations do not help** (K = 200 / 320 / 480 against the default, 8 threads). B levels off fast on these kinds, while A1 keeps gaining with each pass. B's lead over equal-time A1 shrinks:
+         - polygon at 100 shapes: +5.2 → +3.1 / +2.4 / +2.0;
+         - `any` at 100 shapes: +2.5 → +1.3 / 0.0 / −0.7.
+
+         The iteration rule stays as it is for every kind.
+       - **R refit passes, then B, on `any`** (R = 1–4): +0.5 to +2.5 points over equal-time A1, all below B alone at 100 and 200 shapes. The fixed layers' geometry is what limits B on `any`.
+     - **4b, next:** rectangles and rotated rectangles in B, both for their own kinds and inside `any`, where they raise B's share of the layers from about 52% to 65%. Then `any` is measured again.
+       - A rotated rectangle is parametrised without trigonometry: centre, half-side vector and half-width, with corners computed by `sqrt` only.
+       - Both kinds get the 1:8 aspect cap. It is new for axis-aligned rectangles, for consistency, and its cost is measured before it is adopted.
   5. **A1 then B** at equal time. Keep only if it gains at least 0.5 points.
   6. **Scale guard** at `resizeInput` 1024 and 2048 and counts of 500 and 2000: peak memory and time ratio. This sets the fallback threshold.
   7. **Curved kinds** with their own smooth coverage: later, and perhaps never for `quadratic`.
