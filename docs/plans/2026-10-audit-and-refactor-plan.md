@@ -765,6 +765,19 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
 
          The iteration rule stays as it is for every kind.
        - **R refit passes, then B, on `any`** (R = 1–4): +0.5 to +2.5 points over equal-time A1, all below B alone at 100 and 200 shapes. The fixed layers' geometry is what limits B on `any`.
+     - **4b, rectangles and rotated rectangles** (`de99d66`):
+       - **Axis-aligned rectangles.** Their coverage is the exact separable product of four ramps. The slope at a ramp's kink is the mean of its one-sided slopes, since greedy's sides sit on pixel boundaries and the open-interval slope there is zero. They snap to 0.5 px: 0.25 px cost +6–7% SVG bytes, and 1 px cost up to 1.7 points.
+       - **Rotated rectangles.** They are parametrised by centre, half-side vector and half-width, with corners computed by `sqrt` only. They snap in parameters, so they stay exact rectangles. Greedy's integer angle is converted by a libm-free polynomial `sin_cos`.
+       - **Rule.** Both kinds keep sides of at least 1 px and at most 1:8, by an exact projection.
+       - **Results.** Points over equal-time A1 (+6.3 / +7.8 / +8.6 for rectangle, +5.0 / +6.3 / +8.8 for rotated rectangle) at 8 threads, with B's extra time at 0.40–0.48× greedy's. Zero violations. SVG is +1.7–2.5% against greedy for rectangles and −1.2 to −2.0% for rotated rectangles. `approximate` runs B for both kinds.
+       - **The greedy 1:8 cap on axis-aligned rectangles.**
+         - Median cost: rectangle +2.2 / +2.0 / +1.0 points.
+         - `any` gains: −2.3 / −0.5 / −1.4.
+         - One image loses badly: synthetic-shapes in `any`, +7 / +35 / +72%, because it was fitted with thin bars. Kept, for consistency with the needle rule.
+       - **`any`** (B now covers about 65% of its layers): B alone gains +3.2 / +3.7 points over equal-time A1 at 100 / 200 shapes, which passes the original bar.
+         - The best absolute result is `joint:2` (two refit passes, then B): 0.048368 / 0.036495 / 0.028124, or 16.2 points under greedy at 200.
+         - B on synthetic-shapes in `any` stays worse than greedy, the outlier already seen in 4a.
+         - Left for the quality-first pipeline to decide.
      - **Quality-first final stage, after 4b.** For each kind, search the final stage for the best absolute quality: R refit passes, then B with K iterations, or refit passes alone for kinds B does not cover. Stop at diminishing returns, by a deterministic rule rather than a time budget. Check triangles at K above 150. With time free, the iteration rule and `any`'s pipeline are revisited.
        - **First sweep** (`4e0c49f`, 8 threads, median rmse256 against today's final stage; times only indicative, since 4b ran at the same time):
          - B iterations: triangles gain at most −0.4 / −1.3 / −0.8% at K = 300, and refit passes before B add nothing. Polygons gain −1.1 / −1.2 / −0.9% at K = 480 and little beyond.
