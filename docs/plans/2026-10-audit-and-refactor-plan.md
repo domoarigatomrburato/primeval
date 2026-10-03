@@ -696,7 +696,18 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
     - only 36–44% of the `polygon` kind's quads are convex; 23–27% are concave and 32–37% cross themselves, and 13–16% of the convex ones have an angle under 15°;
     - inside `any` the shares are about the same, and polygons are 38–42% of `any`'s layers;
     - rotated rectangles have a median aspect of 2.7–3.0, but 8–13% exceed 1:8, up to 1:97.
-  - The polygon rule therefore changes much of `any`'s output. Its quality cost is measured before it is adopted.
+  - The polygon rule therefore changes much of `any`'s output, so its quality cost was measured before adopting it.
+- **Rules adopted in greedy and the refit pass** (`40eb6d9`, committed by mistake under the plan's message):
+  - polygons are strictly convex with every angle above 15°, and rotated rectangles have their long side at most 8× the short side;
+  - the checks are libm-free (cross and dot products against a `tan 15°` literal), `Triangle::is_valid` included, which changed no output;
+  - a move that breaks a rule is undone and drawn again from the original shape, and polygons lose the vertex-swap move, which on a convex quad either crosses it or changes nothing.
+  - Median rmse256 change at 50 / 100 / 200 shapes, in points (refit pass included):
+    - polygon +1.4 / +2.9 / +2.0;
+    - rotated rectangle +0.3 / +1.2 / +0.7;
+    - `any` −0.8 / −1.3 / +0.4.
+  - The synthetic texture's rotated rectangles lose 39% / 23% / 7%, because its stripes were fitted with needles. The paintings lose 0.3–5.5%.
+  - Time is unchanged (0.96–1.08× on an idle machine), and there are zero violations in the exported drawings.
+  - Open (user's call): 21% of polygons at 200 shapes have an angle of 165° or more and read as triangles.
   - The half-plane kinds B can cover are 63–67% of `any`'s layers at 100 and 200 shapes.
   - Tiny triangles: no rule needed. B's output at 100 and 200 shapes has no triangle under 4 px² (greedy with A1 at 500 shapes had 18 of 2,481).
   - A silent "Refining" phase of 1–2 s in the single-threaded browser is acceptable, as long as it stays cancellable. `onProgress` does not change.
