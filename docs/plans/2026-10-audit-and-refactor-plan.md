@@ -691,7 +691,7 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
   - the curved kinds (ellipses, circles, `quadratic`) and `any`, the default, whose layers mix every kind;
   - whether B replaces the A1 pass or follows it.
 
-**Before merging the branch:**
+**Before merging the branch** (user decision: it merges once, when B's productisation is done too, with no intermediate merge):
 - regenerate the gallery, the README comparison images and the versus-Go numbers (`CONTRIBUTING.md`), which output changes make stale;
 - check by hand in the demo that "Refining" stays visible during a long single-threaded pass, and that Stop during it keeps the preview.
 
