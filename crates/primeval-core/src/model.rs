@@ -314,6 +314,12 @@ impl Model {
         })
     }
 
+    /// The target, the background and the committed shapes, in paint
+    /// order: what [`crate::joint::optimise`] optimises.
+    pub(crate) fn joint_parts(&self) -> (&Buffer, Color, &[CommittedShape]) {
+        (&self.target, self.background, &self.history)
+    }
+
     /// The committed shapes in paint order, as engine-independent geometry
     /// on the working-resolution canvas.
     #[must_use]

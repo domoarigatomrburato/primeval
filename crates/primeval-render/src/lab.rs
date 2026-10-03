@@ -37,10 +37,9 @@ pub fn working_image(input: &[u8], render: &RenderOptions) -> Result<RgbImage, A
 }
 
 /// Runs [`crate::approximate`]'s final stage on `model`, a search after
-/// its last greedy step on `target`, the working target from
-/// [`working_target`], exactly as [`crate::approximate`] runs it: for
-/// triangles the joint optimisation of every shape, which leaves `model`
-/// unchanged, otherwise one refit pass of `model`. `iterations`, if set,
+/// its last greedy step, exactly as [`crate::approximate`] runs it: for
+/// triangles and polygons the joint optimisation of every shape, which
+/// leaves `model` unchanged, otherwise one refit pass of `model`. `iterations`, if set,
 /// overrides the joint optimisation's iteration count, which otherwise
 /// follows the number of shapes ([`joint::Settings::iterations`]).
 ///
@@ -50,20 +49,40 @@ pub fn working_image(input: &[u8], render: &RenderOptions) -> Result<RgbImage, A
 /// [`Model::score_f64`].
 pub fn final_stage(
     model: &mut Model,
-    target: &Buffer,
     render: &RenderOptions,
     iterations: Option<u32>,
 ) -> (Drawing, f64) {
     let mut settings = joint::Settings::default();
     settings.iterations = iterations;
-    let joint_target = crate::runs_joint(render.shape).then_some(target);
-    let drawing = crate::final_stage(model, joint_target, render.alpha, settings, || false)
+    let drawing = crate::final_stage(model, render.shape, render.alpha, settings, || false)
         .expect("a stage that is never cancelled finishes");
-    let score = if joint_target.is_some() {
-        joint::score(&drawing, target)
+    let score = if crate::runs_joint(render.shape) {
+        joint::score(model, &drawing)
     } else {
         model.score_f64()
     };
+    (drawing, score)
+}
+
+/// An experimental final stage for any shape kind: `refits` refit passes
+/// of `model` ([`Model::refine`]), then the joint optimisation of its
+/// triangles and polygons with every other shape fixed in geometry
+/// ([`joint::optimise`]), with `iterations` overriding its count. Returns
+/// the drawing and its model's RMSE ([`joint::score`]).
+pub fn joint_stage(
+    model: &mut Model,
+    render: &RenderOptions,
+    iterations: Option<u32>,
+    refits: u32,
+) -> (Drawing, f64) {
+    for _ in 0..refits {
+        model.refine(render.alpha);
+    }
+    let mut settings = joint::Settings::default();
+    settings.iterations = iterations;
+    let drawing = joint::optimise(model, render.alpha, settings, || false)
+        .expect("a stage that is never cancelled finishes");
+    let score = joint::score(model, &drawing);
     (drawing, score)
 }
 
@@ -224,23 +243,24 @@ mod tests {
         let (target, background) = working_target(input, render).expect("working target");
         let mut options = ModelOptions::default();
         options.seed = render.seed;
-        let mut model = Model::new(target.clone(), background, options);
+        let mut model = Model::new(target, background, options);
         for _ in 0..render.count {
             model.step(render.shape, render.alpha);
         }
-        let (drawing, _) = final_stage(&mut model, &target, render, None);
+        let (drawing, _) = final_stage(&mut model, render, None);
         encode(&drawing, render.output_size, output)
             .expect("encode")
             .into_bytes()
     }
 
     /// The final stage's score is the joint optimisation's model RMSE of
-    /// its drawing for triangles, and the refitted model's score for the
-    /// other kinds; an iteration count overrides the joint optimisation's.
+    /// its drawing for triangles and polygons, and the refitted model's
+    /// score for the other kinds; an iteration count overrides the joint
+    /// optimisation's.
     #[test]
     fn the_final_stage_scores_its_drawing() {
         let input = png_bytes(&fixture());
-        for shape in [ShapeKind::Triangle, ShapeKind::Ellipse] {
+        for shape in [ShapeKind::Triangle, ShapeKind::Polygon, ShapeKind::Ellipse] {
             let render = RenderOptions {
                 count: 5,
                 seed: Some(11),
@@ -251,21 +271,21 @@ mod tests {
             let (target, background) = working_target(&input, &render).expect("working target");
             let mut options = ModelOptions::default();
             options.seed = render.seed;
-            let mut model = Model::new(target.clone(), background, options);
+            let mut model = Model::new(target, background, options);
             for _ in 0..render.count {
                 model.step(render.shape, render.alpha);
             }
             let greedy = model.clone();
-            let (drawing, score) = final_stage(&mut model, &target, &render, None);
-            if shape == ShapeKind::Triangle {
-                assert_eq!(score, primeval_core::joint::score(&drawing, &target));
-                let (fewer, _) = final_stage(&mut greedy.clone(), &target, &render, Some(1));
+            let (drawing, score) = final_stage(&mut model, &render, None);
+            if shape != ShapeKind::Ellipse {
+                assert_eq!(score, primeval_core::joint::score(&model, &drawing));
+                let (fewer, _) = final_stage(&mut greedy.clone(), &render, Some(1));
                 assert_ne!(fewer, drawing);
-                // Without an override, 5 triangles run the rule's 80
+                // Without an override, 5 shapes run the rule's 80
                 // iterations.
-                let (rule, _) = final_stage(&mut greedy.clone(), &target, &render, Some(80));
+                let (rule, _) = final_stage(&mut greedy.clone(), &render, Some(80));
                 assert_eq!(rule, drawing);
-                let (fifty, _) = final_stage(&mut greedy.clone(), &target, &render, Some(50));
+                let (fifty, _) = final_stage(&mut greedy.clone(), &render, Some(50));
                 assert_ne!(fifty, drawing);
             } else {
                 assert_eq!(score, model.score_f64());
@@ -288,6 +308,10 @@ mod tests {
         let option_sets = [
             RenderOptions {
                 shape: ShapeKind::Triangle,
+                ..base
+            },
+            RenderOptions {
+                shape: ShapeKind::Polygon,
                 ..base
             },
             RenderOptions {

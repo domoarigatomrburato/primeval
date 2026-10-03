@@ -22,17 +22,17 @@
 /// `tan 15.000001°`: [`is_valid`]'s bound, a millionth of a degree above
 /// the rule's 15° so that an `acos`-based check of the same triangle, whose
 /// rounding errors are around `1e-14`°, agrees with it.
-const TAN_VALID: f64 = 0.267_949_211_137_505_3;
+pub(super) const TAN_VALID: f64 = 0.267_949_211_137_505_3;
 
 /// `tan 1°`, for the rebuild's base angles of `τ + 1°`.
 const TAN_ONE_DEGREE: f64 = 0.017_455_064_928_217_585;
 
 /// Gauss–Newton steps before [`project`] falls back to [`rebuild`].
-const MAX_STEPS: usize = 32;
+pub(super) const MAX_STEPS: usize = 32;
 /// How far above zero a projection step aims each residual it lifts,
 /// relative to `|u|² + |w|²` at that corner (about `1e-9` rad), so that it
 /// ends at or above `τ` despite rounding.
-const OVERSHOOT: f64 = 1e-9;
+pub(super) const OVERSHOOT: f64 = 1e-9;
 /// `√3 / 2`, the height of a unit equilateral triangle.
 const HALF_SQRT_3: f64 = 0.866_025_403_784_438_6;
 

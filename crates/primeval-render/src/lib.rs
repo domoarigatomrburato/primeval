@@ -286,14 +286,14 @@ pub struct ProgressInfo {
     /// The shapes of every step, in order, draw a live preview. After the
     /// last step the render runs a final stage that can move, resize and
     /// recolour any shape, so the result's shape lines can differ from the
-    /// preview. For triangles it is a joint gradient optimisation of every
-    /// shape at once, whose vertices are multiples of a quarter of a
-    /// working pixel, so the result's coordinates can be fractional; for
-    /// the other kinds it is one refit pass, which re-optimises one shape at
-    /// a time. The stage keeps the shapes' number, their order and each
-    /// shape's kind; an ellipse whose radii the pass makes equal (or
-    /// unequal) is written as a `<circle>` (or an `<ellipse>`), so those
-    /// two element names can swap.
+    /// preview. For triangles and polygons it is a joint gradient
+    /// optimisation of every shape at once, whose vertices are multiples of
+    /// a quarter of a working pixel, so the result's coordinates can be
+    /// fractional; for the other kinds it is one refit pass, which
+    /// re-optimises one shape at a time. The stage keeps the shapes'
+    /// number, their order and each shape's kind; an ellipse whose radii
+    /// the pass makes equal (or unequal) is written as a `<circle>` (or an
+    /// `<ellipse>`), so those two element names can swap.
     pub shape: String,
 }
 
@@ -302,7 +302,7 @@ pub struct ProgressInfo {
 /// Clones share the same flag. The render checks it before and after
 /// decoding, before every step, during the final stage (between the layers
 /// of a refit pass, or before every iteration of the joint optimisation of
-/// triangles and before its snap), and before encoding.
+/// triangles or polygons and before its snap), and before encoding.
 #[derive(Clone, Debug, Default)]
 pub struct CancellationToken(Arc<AtomicBool>);
 
@@ -441,10 +441,11 @@ impl ApproximateResult {
 /// The search runs [`RenderOptions::count`] greedy steps, each adding the
 /// best shape it finds and reporting it through `execution`'s progress
 /// callback, then a final stage that revises every shape and reports no
-/// progress. For [`ShapeKind::Triangle`] the final stage is a joint
-/// gradient optimisation of every vertex, opacity (with [`Alpha::Auto`])
-/// and colour at once, against a model of the anti-aliased output, with
-/// vertices snapped to quarter pixels that keep every angle above 15°
+/// progress. For [`ShapeKind::Triangle`] and [`ShapeKind::Polygon`] the
+/// final stage is a joint gradient optimisation of every vertex, opacity
+/// (with [`Alpha::Auto`]) and colour at once, against a model of the
+/// anti-aliased output, with vertices snapped to quarter pixels that keep
+/// every angle above 15° and every polygon strictly convex
 /// ([`primeval_core::joint`]). For the other kinds it is one refit pass
 /// that re-optimises every shape at its own layer, with the others fixed,
 /// and keeps the result only if it lowers the score. The result is encoded
@@ -468,8 +469,6 @@ pub fn approximate(
         render,
     } = request;
     let (target, background) = working_target(input, &render, || execution.check_cancelled())?;
-    // The joint optimisation needs the target after the model takes it.
-    let joint_target = runs_joint(render.shape).then(|| target.clone());
     let mut options = ModelOptions::default();
     options.seed = render.seed;
     let mut model = Model::new(target, background, options);
@@ -497,7 +496,7 @@ pub fn approximate(
     execution.check_cancelled()?;
     let drawing = final_stage(
         &mut model,
-        joint_target.as_ref(),
+        render.shape,
         render.alpha,
         joint::Settings::default(),
         || execution.is_cancelled(),
@@ -511,32 +510,36 @@ pub fn approximate(
 /// Whether [`approximate`]'s final stage for `shape` is the joint
 /// optimisation of every shape ([`primeval_core::joint`]) rather than one
 /// refit pass ([`Model::refine`]).
+///
+/// [`ShapeKind::Any`] keeps the refit pass: on the engine runner's corpus,
+/// the joint optimisation of its triangles and polygons, with the other
+/// shapes fixed, lowered the median RMSE of the export at 100 shapes by
+/// only 2.5% of greedy's more than a refit pass that took longer, under
+/// the 3% that would justify it.
 fn runs_joint(shape: ShapeKind) -> bool {
-    shape == ShapeKind::Triangle
+    matches!(shape, ShapeKind::Triangle | ShapeKind::Polygon)
 }
 
-/// [`approximate`]'s final stage, after the greedy steps of `model`: with
-/// `joint_target`, the working target, which [`approximate`] passes
-/// exactly when [`runs_joint`], the joint optimisation of every shape of
-/// `model`'s drawing with `settings`, which leaves `model` unchanged;
-/// without, one refit pass of `model`. Returns the drawing to encode, or
-/// `None` once `cancelled` returns true.
+/// [`approximate`]'s final stage, after the greedy steps of `model` of
+/// `shape`: when [`runs_joint`], the joint optimisation of `model`'s shapes
+/// with `settings`, which leaves `model` unchanged; otherwise one refit
+/// pass of `model`. Returns the drawing to encode, or `None` once
+/// `cancelled` returns true.
 ///
 /// `lab::final_stage` calls this too, so the evaluation runner cannot
 /// drift from [`approximate`].
 fn final_stage(
     model: &mut Model,
-    joint_target: Option<&Buffer>,
+    shape: ShapeKind,
     alpha: Alpha,
     settings: joint::Settings,
     mut cancelled: impl FnMut() -> bool,
 ) -> Option<Drawing> {
-    match joint_target {
-        Some(target) => joint::optimise(&model.drawing(), target, alpha, settings, cancelled),
-        None => {
-            model.refine_unless(alpha, &mut cancelled)?;
-            Some(model.drawing())
-        }
+    if runs_joint(shape) {
+        joint::optimise(model, alpha, settings, cancelled)
+    } else {
+        model.refine_unless(alpha, &mut cancelled)?;
+        Some(model.drawing())
     }
 }
 
@@ -866,10 +869,10 @@ mod tests {
         }
     }
 
-    /// Renders a 100 × 80 gradient as SVG with triangles inside a
-    /// dedicated pool of `threads` threads: several bands of the joint
-    /// optimisation's passes.
-    fn triangle_svg_on_threads(threads: usize) -> String {
+    /// Renders a 100 × 80 gradient as SVG with `shape` inside a dedicated
+    /// pool of `threads` threads: several bands of the joint optimisation's
+    /// passes.
+    fn joint_svg_on_threads(shape: ShapeKind, threads: usize) -> String {
         let image = RgbaImage::from_fn(100, 80, |x, y| {
             let ring = (x as i32 - 40).pow(2) + (y as i32 - 35).pow(2) < 600;
             Rgba([
@@ -884,6 +887,7 @@ mod tests {
             .write_to(&mut input, ImageFormat::Png)
             .expect("fixture png");
         let mut request = request(input.into_inner(), OutputFormat::Svg);
+        request.render.shape = shape;
         request.render.alpha = Alpha::Auto;
         request.render.count = 8;
         request.render.resize_input = 100;
@@ -899,14 +903,14 @@ mod tests {
         }
     }
 
-    /// The joint optimisation of triangles gives the same SVG whatever the
-    /// number of threads, and writes quarter-pixel coordinates.
-    #[test]
-    fn same_seed_triangle_svg_is_identical_across_thread_counts() {
-        let reference = triangle_svg_on_threads(1);
+    /// The joint optimisation of `shape`, whose shapes are polygons of
+    /// `vertices` points, gives the same SVG whatever the number of
+    /// threads, and writes quarter-pixel coordinates.
+    fn assert_joint_svg_is_identical_across_thread_counts(shape: ShapeKind, vertices: usize) {
+        let reference = joint_svg_on_threads(shape, 1);
         for threads in [2, 4, 8] {
             assert!(
-                triangle_svg_on_threads(threads) == reference,
+                joint_svg_on_threads(shape, threads) == reference,
                 "{threads} threads changed the SVG"
             );
         }
@@ -923,7 +927,7 @@ mod tests {
                     .map(|value| value.parse::<f64>().expect("a number"))
                     .collect::<Vec<_>>()
             })
-            .inspect(|points| assert_eq!(points.len(), 6))
+            .inspect(|points| assert_eq!(points.len(), 2 * vertices))
             .flatten()
             .collect();
         assert!(coordinates.iter().all(|value| (value * 4.0).fract() == 0.0));
@@ -931,6 +935,16 @@ mod tests {
             coordinates.iter().any(|value| (value * 2.0).fract() != 0.0),
             "no quarter-pixel coordinate"
         );
+    }
+
+    #[test]
+    fn same_seed_triangle_svg_is_identical_across_thread_counts() {
+        assert_joint_svg_is_identical_across_thread_counts(ShapeKind::Triangle, 3);
+    }
+
+    #[test]
+    fn same_seed_polygon_svg_is_identical_across_thread_counts() {
+        assert_joint_svg_is_identical_across_thread_counts(ShapeKind::Polygon, 4);
     }
 
     /// The final stage polls `cancelled` during the joint optimisation of
@@ -943,16 +957,15 @@ mod tests {
             working_target(fixture_bytes(), &render, || Ok(())).expect("target");
         let mut options = ModelOptions::default();
         options.seed = render.seed;
-        let mut model = Model::new(target.clone(), background, options);
+        let mut model = Model::new(target, background, options);
         for _ in 0..render.count {
             model.step(render.shape, render.alpha);
         }
-        let joint_target = runs_joint(render.shape).then_some(&target);
-        assert!(joint_target.is_some());
+        assert!(runs_joint(render.shape));
         let mut polls = 0;
         let finished = final_stage(
             &mut model.clone(),
-            joint_target,
+            render.shape,
             render.alpha,
             joint::Settings::default(),
             || {
@@ -967,7 +980,7 @@ mod tests {
             let mut count = 0;
             let stopped = final_stage(
                 &mut model.clone(),
-                joint_target,
+                render.shape,
                 render.alpha,
                 joint::Settings::default(),
                 || {

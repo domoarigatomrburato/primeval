@@ -16,23 +16,27 @@
 //!                       `end:P` runs P passes at each checkpoint,
 //!                       `every:K` one pass after every K-th step,
 //!                       `final` runs `approximate`'s final stage at each
-//!                       checkpoint
-//!   --iterations K      with `--refine final`: the joint optimisation's
-//!                       iteration count (default: `approximate`'s,
-//!                       which grows with the shape count: 80 up to 50
-//!                       triangles, 160 from 500)
+//!                       checkpoint, `joint:R` (lab only) R refit passes
+//!                       then the joint optimisation of the triangles and
+//!                       polygons, every other shape fixed in geometry, at
+//!                       each checkpoint, whatever `approximate` runs for
+//!                       the kind
+//!   --iterations K      with `--refine final` or `joint:R`: the joint
+//!                       optimisation's iteration count (default:
+//!                       `approximate`'s, which grows with the shape
+//!                       count: 80 up to 50 shapes, 160 from 500)
 //! ```
 //!
 //! For every image × shape kind it runs one greedy search to the largest
 //! checkpoint, with seed 42 and default options otherwise. It drives
 //! [`primeval_core::Model`] itself through `primeval_render::lab`, which
 //! reproduces `approximate`'s search and encoding exactly. `approximate`
-//! ends with its final stage: for triangles the joint gradient
+//! ends with its final stage: for triangles and polygons the joint gradient
 //! optimisation of every shape (`primeval_core::joint`), for every other
 //! kind one refit pass. The rows of `--refine final` are what it returns
-//! for that step count (and of `--refine end:1` too, for the kinds other
-//! than triangles); rows without `--refine` are the greedy search alone. At
-//! each checkpoint it records one row.
+//! for that step count (and of `--refine end:1` too, for the other kinds);
+//! rows without `--refine` are the greedy search alone. At each checkpoint
+//! it records one row.
 //!
 //! With `--refine end:P`, each checkpoint clones the model, runs `P` refit
 //! passes on the clone and records the clone, while the search itself goes
@@ -40,7 +44,9 @@
 //! `--refine final`, each checkpoint runs `approximate`'s final stage on a
 //! clone (`lab::final_stage`) and records its drawing, in the same way.
 //! With `--refine every:K` the search itself runs one pass after every
-//! `K`-th step, so later steps build on the refitted shapes. Passes and the
+//! `K`-th step, so later steps build on the refitted shapes. With `--refine
+//! joint:R`, each checkpoint runs `lab::joint_stage` on a clone: `R` refit
+//! passes (none with `joint:0`), then the joint optimisation. Passes and the
 //! final stage get the render's alpha.
 //!
 //! Progress goes to stderr; stdout gets a header with the commit, the
@@ -86,9 +92,10 @@
 //! - `score`: `Model::score_f64`, the normalised RGB RMSE between the
 //!   engine's own canvas and the working target. Most shape kinds draw on
 //!   that canvas with binary (not anti-aliased) coverage. With `--refine
-//!   final`, the score `lab::final_stage` returns: for triangles, the joint
-//!   optimisation's model RMSE of its exported drawing (`joint::score`), so
-//!   `gap` measures how well that model agrees with the export.
+//!   final` or `joint:R`, the score `lab::final_stage` or `lab::joint_stage`
+//!   returns: after the joint optimisation, its model's RMSE of its exported
+//!   drawing (`joint::score`), so `gap` measures how well that model agrees
+//!   with the export.
 //! - `rmse256`: the normalised RGB RMSE between the PNG at the working
 //!   target's longer side, which has exactly the working target's
 //!   dimensions (scale 1 against the drawing's view box; the runner
@@ -103,6 +110,11 @@
 //!   column of earlier runs).
 //! - `svg_bytes`: the length in bytes of the SVG output at the default
 //!   output size.
+//! - `violations`, in the per-kind summary only: the drawing's shapes that
+//!   break the legibility rules, checked independently with `acos` angles:
+//!   triangles with an angle of 15° or less, and quadrilaterals (polygons
+//!   and rotated rectangles) whose diagonals do not cross strictly, that is
+//!   not strictly convex, or with an angle of 15° or less.
 //!
 //! Summaries. The median of an even number of values is the mean of the two
 //! middle ones.
@@ -115,7 +127,8 @@
 //!   kinds in the order `any`, `triangle`, `rectangle`, `ellipse`, `circle`,
 //!   `rotated-rectangle`, `quadratic`, `rotated-ellipse`, `polygon`: the
 //!   medians of `score`, `rmse256`, `gap` and `ssim128`, the mean of
-//!   `svg_bytes` and the sum of `search_s`.
+//!   `svg_bytes`, the sum of `search_s` (and of `refine_s` with
+//!   `--refine`), and the sum of `violations`.
 //!
 //! Times vary between runs. Every other column is deterministic for a given
 //! commit and platform, whatever the thread count (the search runs one
@@ -126,7 +139,7 @@ mod common;
 
 use common::{ALL_SHAPES, BoxError, SEED, rgb_rmse};
 use image::{ImageFormat, RgbImage, imageops};
-use primeval_core::{Drawing, Model, ModelOptions};
+use primeval_core::{Drawing, Geometry, Model, ModelOptions};
 use primeval_render::{OutputFormat, RenderOptions, ShapeKind, lab};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -156,16 +169,23 @@ enum Refine {
     Every(u32),
     /// `approximate`'s final stage on a clone at each checkpoint.
     Final,
+    /// This many refit passes, then the joint optimisation, on a clone at
+    /// each checkpoint.
+    Joint(u32),
 }
 
 impl Refine {
     fn parse(value: &str) -> Result<Self, BoxError> {
-        let invalid = || format!("--refine: expected end:P, every:K or final, got {value}");
+        let invalid =
+            || format!("--refine: expected end:P, every:K, final or joint:R, got {value}");
         if value == "final" {
             return Ok(Self::Final);
         }
         let (schedule, count) = value.split_once(':').ok_or_else(invalid)?;
         let count: u32 = count.parse().map_err(|_| invalid())?;
+        if schedule == "joint" {
+            return Ok(Self::Joint(count));
+        }
         if count == 0 {
             return Err(invalid().into());
         }
@@ -182,6 +202,10 @@ impl Refine {
             Self::End(passes) => format!("end:{passes} ({passes} passes at each checkpoint)"),
             Self::Every(steps) => format!("every:{steps} (one pass after every {steps} steps)"),
             Self::Final => "final (approximate's final stage at each checkpoint)".to_owned(),
+            Self::Joint(refits) => format!(
+                "joint:{refits} ({refits} refit passes, then the joint optimisation of the \
+                 triangles and polygons, at each checkpoint)"
+            ),
         }
     }
 }
@@ -198,6 +222,7 @@ struct Row {
     ssim128: f64,
     ssim1024: f64,
     svg_bytes: usize,
+    violations: usize,
 }
 
 fn main() -> Result<(), BoxError> {
@@ -234,6 +259,7 @@ fn main() -> Result<(), BoxError> {
                     ssim128: lab::ssim(&checkpoint.small, small_reference),
                     ssim1024: lab::ssim(&checkpoint.output, output_reference),
                     svg_bytes: checkpoint.svg_bytes,
+                    violations: checkpoint.violations,
                 });
             }
         }
@@ -277,7 +303,7 @@ fn main() -> Result<(), BoxError> {
     println!();
     print_summary(&rows, &config.checkpoints, refined);
     println!();
-    print_kind_summary(&rows, &config.checkpoints);
+    print_kind_summary(&rows, &config.checkpoints, refined);
     Ok(())
 }
 
@@ -348,8 +374,8 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
     if checkpoints.first() == Some(&0) {
         return Err("--steps: checkpoints must be positive".into());
     }
-    if iterations.is_some() && refine != Refine::Final {
-        return Err("--iterations needs --refine final".into());
+    if iterations.is_some() && !matches!(refine, Refine::Final | Refine::Joint(_)) {
+        return Err("--iterations needs --refine final or joint:R".into());
     }
     Ok(Config {
         photos,
@@ -373,6 +399,7 @@ struct Checkpoint {
     /// The PNG at the default output size.
     output: RgbImage,
     svg_bytes: usize,
+    violations: usize,
 }
 
 /// Runs one search of `shape` to the last of `checkpoints` (sorted, unique
@@ -397,7 +424,7 @@ fn search(
     let working_size = working.width().max(working.height());
     let mut options = ModelOptions::default();
     options.seed = render.seed;
-    let mut model = Model::new(target.clone(), background, options);
+    let mut model = Model::new(target, background, options);
 
     let mut search = Duration::ZERO;
     let mut refined = Duration::ZERO;
@@ -438,7 +465,14 @@ fn search(
             Refine::Final => {
                 let mut clone = model.clone();
                 let start = Instant::now();
-                let (drawing, score) = lab::final_stage(&mut clone, &target, &render, iterations);
+                let (drawing, score) = lab::final_stage(&mut clone, &render, iterations);
+                let elapsed = start.elapsed();
+                (drawing, score, search + elapsed, elapsed)
+            }
+            Refine::Joint(refits) => {
+                let mut clone = model.clone();
+                let start = Instant::now();
+                let (drawing, score) = lab::joint_stage(&mut clone, &render, iterations, refits);
                 let elapsed = start.elapsed();
                 (drawing, score, search + elapsed, elapsed)
             }
@@ -464,9 +498,56 @@ fn search(
             small: png(&drawing, SMALL_SIZE)?,
             output: png(&drawing, render.output_size)?,
             svg_bytes,
+            violations: violations(&drawing),
         });
     }
     Ok(recorded)
+}
+
+/// The shapes of `drawing` that break the legibility rules: triangles
+/// with an angle of 15° or less, and quadrilaterals that are not strictly
+/// convex (their diagonals do not cross strictly inside both) or have an
+/// angle of 15° or less. Angles by `acos`, independently of the engine's
+/// checks.
+fn violations(drawing: &Drawing) -> usize {
+    drawing
+        .shapes
+        .iter()
+        .filter(|shape| {
+            let Geometry::Polygon(points) = &shape.geometry else {
+                return false;
+            };
+            let n = points.len();
+            let sharp = (0..n).any(|p| {
+                let (a, b, c) = (points[(p + n - 1) % n], points[p], points[(p + 1) % n]);
+                let (ux, uy, wx, wy) = (c.x - b.x, c.y - b.y, a.x - b.x, a.y - b.y);
+                let lengths = ux.hypot(uy) * wx.hypot(wy);
+                lengths == 0.0
+                    || ((ux * wx + uy * wy) / lengths)
+                        .clamp(-1.0, 1.0)
+                        .acos()
+                        .to_degrees()
+                        <= 15.0
+            });
+            let convex = n != 4 || {
+                let (p, r) = (
+                    points[0],
+                    (points[2].x - points[0].x, points[2].y - points[0].y),
+                );
+                let (q, s) = (
+                    points[1],
+                    (points[3].x - points[1].x, points[3].y - points[1].y),
+                );
+                let denominator = r.0 * s.1 - r.1 * s.0;
+                denominator != 0.0 && {
+                    let t = ((q.x - p.x) * s.1 - (q.y - p.y) * s.0) / denominator;
+                    let u = ((q.x - p.x) * r.1 - (q.y - p.y) * r.0) / denominator;
+                    t > 0.0 && t < 1.0 && u > 0.0 && u < 1.0
+                }
+            };
+            sharp || !convex
+        })
+        .count()
 }
 
 /// `drawing` encoded as a PNG at `output_size` and decoded again.
@@ -540,14 +621,19 @@ fn print_summary(rows: &[Row], checkpoints: &[u32], refined: bool) {
     }
 }
 
-fn print_kind_summary(rows: &[Row], checkpoints: &[u32]) {
+fn print_kind_summary(rows: &[Row], checkpoints: &[u32], refined: bool) {
     println!("Summary per shape kind and checkpoint:");
     println!();
+    let (refine_head, refine_rule) = if refined {
+        (" total refine_s |", " ---: |")
+    } else {
+        ("", "")
+    };
     println!(
         "| shape | steps | median score | median rmse256 | median gap | median ssim128 \
-         | mean svg_bytes | total search_s |"
+         | mean svg_bytes | total search_s |{refine_head} violations |"
     );
-    println!("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
+    println!("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |{refine_rule} ---: |");
     for shape in ALL_SHAPES.map(ShapeKind::as_str) {
         for &steps in checkpoints {
             let group: Vec<&Row> = rows
@@ -558,14 +644,21 @@ fn print_kind_summary(rows: &[Row], checkpoints: &[u32]) {
                 continue;
             }
             let search: Duration = group.iter().map(|row| row.search).sum();
+            let refine = if refined {
+                let refine: Duration = group.iter().map(|row| row.refine).sum();
+                format!(" {:.3} |", refine.as_secs_f64())
+            } else {
+                String::new()
+            };
             println!(
-                "| {shape} | {steps} | {:.6} | {:.6} | {:+.4} | {:.6} | {:.1} | {:.3} |",
+                "| {shape} | {steps} | {:.6} | {:.6} | {:+.4} | {:.6} | {:.1} | {:.3} |{refine} {} |",
                 median(&group, |row| row.score),
                 median(&group, |row| row.rmse256),
                 median(&group, |row| row.gap),
                 median(&group, |row| row.ssim128),
                 mean(&group, |row| row.svg_bytes as f64),
                 search.as_secs_f64(),
+                group.iter().map(|row| row.violations).sum::<usize>(),
             );
         }
     }
