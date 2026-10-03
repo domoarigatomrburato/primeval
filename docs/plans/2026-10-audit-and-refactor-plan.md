@@ -707,7 +707,7 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
     - `any` −0.8 / −1.3 / +0.4.
   - The synthetic texture's rotated rectangles lose 39% / 23% / 7%, because its stripes were fitted with needles. The paintings lose 0.3–5.5%.
   - Time is unchanged (0.96–1.08× on an idle machine), and there are zero violations in the exported drawings.
-  - Open (user's call): 21% of polygons at 200 shapes have an angle of 165° or more and read as triangles.
+  - **No upper angle bound** (decided): 21% of polygons at 200 shapes have an angle of 165° or more and read as triangles. A near-triangle is still a legible polygon, unlike a sliver, so a bound would cost quality for no legibility.
   - The half-plane kinds B can cover are 63–67% of `any`'s layers at 100 and 200 shapes.
   - Tiny triangles: no rule needed. B's output at 100 and 200 shapes has no triangle under 4 px² (greedy with A1 at 500 shapes had 18 of 2,481).
   - A silent "Refining" phase of 1–2 s in the single-threaded browser is acceptable, as long as it stays cancellable. `onProgress` does not change.
