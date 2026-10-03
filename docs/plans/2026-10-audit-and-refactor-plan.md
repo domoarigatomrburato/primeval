@@ -766,6 +766,21 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
          The iteration rule stays as it is for every kind.
        - **R refit passes, then B, on `any`** (R = 1–4): +0.5 to +2.5 points over equal-time A1, all below B alone at 100 and 200 shapes. The fixed layers' geometry is what limits B on `any`.
      - **Quality-first final stage, after 4b.** For each kind, search the final stage for the best absolute quality: R refit passes, then B with K iterations, or refit passes alone for kinds B does not cover. Stop at diminishing returns, by a deterministic rule rather than a time budget. Check triangles at K above 150. With time free, the iteration rule and `any`'s pipeline are revisited.
+       - **First sweep** (`4e0c49f`, 8 threads, median rmse256 against today's final stage; times only indicative, since 4b ran at the same time):
+         - B iterations: triangles gain at most −0.4 / −1.3 / −0.8% at K = 300, and refit passes before B add nothing. Polygons gain −1.1 / −1.2 / −0.9% at K = 480 and little beyond.
+         - Refit passes for the kinds B does not cover: 4 passes give −1.0% to −4.1%, and 16 give −1.2% to −6.1%. Rotated ellipses gain most.
+         - **Refit passes during the search** (`--refine every:K`, no final stage): every 10 steps gives:
+           - `any` −5.3 / −5.6 / −7.4%;
+           - circle −9.5 / −4.5 / −6.6%;
+           - ellipse −3.0 / −4.2 / −5.8%;
+           - rotated ellipse −4.4 / −5.6 / −8.7%;
+           - quadratic up to −1.6%.
+
+           That beats B on `any`. It is worse on triangles and polygons only because it replaces B there.
+       - **Next, the quality-first pipeline:** refit passes during the search, combined with the final stage.
+         - The final stage is B for the half-plane kinds, with its iteration count raised where it pays. For the others it is refit passes until a pass gains less than a relative threshold, with a cap.
+         - Also: greedy effort (candidates per step, climb age) at a fixed shape count, and `any`'s pipeline.
+         - Every stop rule depends only on deterministic scores, never on time or thread count.
      - **4b, next:** rectangles and rotated rectangles in B, both for their own kinds and inside `any`, where they raise B's share of the layers from about 52% to 65%. Then `any` is measured again.
        - A rotated rectangle is parametrised without trigonometry: centre, half-side vector and half-width, with corners computed by `sqrt` only.
        - Both kinds get the 1:8 aspect cap. It is new for axis-aligned rectangles, for consistency, and its cost is measured before it is adopted.
