@@ -598,7 +598,7 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
   - 3 px would fit better still (−26% and −54% at 100 and 200), but changes the look more.
 - **Still open:** `quadratic`'s ssim128 still falls from 50 to 100 shapes.
 
-**B pilot (step 7, branch `lab/b-pilot`, `90ca491`; not for merging).**
+**B pilot (step 7, branch `lab/b-pilot`, `ed099c8`; not for merging).**
 - **Method.**
   - Triangles only, from greedy.
   - Adam on every vertex and alpha jointly (learning rate 1 px and 10 levels, cosine decay), for K iterations.
@@ -623,6 +623,26 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
   - B costs 5.5–9.6 ms per iteration per image at 50–200 shapes, single-threaded.
 - **Open question.** B combines three advantages: joint gradient search, anti-aliased coverage (what the export draws) and sub-pixel coordinates. The pilot does not separate them. Step 3 and the literature suggest that a step-adapted search could capture the first.
 
+**Ablation (step 8, `lab/b-pilot`, `63adb24`).**
+- **Arms.** `S-A1` runs the engine refit's search (4 step-adapted climbs per layer, age 25, closed-form colour) on B's smooth model with continuous coordinates. Its per-layer energy is exact and was checked against the forward render. `S-A1-int` is the same with integer coordinates.
+- **Results** (triangles, single-threaded, points of greedy's median rmse256 at 100 / 200 shapes; lower is better):
+
+| Arm | 100 | 200 | Extra s at 100 / 200 |
+| --- | ---: | ---: | ---: |
+| `end:4` (engine, binary, integer) | −9.4 | −10.9 | 3.4 / 3.7 |
+| `S-A1-int:4` | −12.7 | −15.8 | 11.3 / 12.5 |
+| `S-A1:4` | −14.4 | −18.8 | 18.8 / 21.4 |
+| B, K = 50 | −14.1 | −19.1 | 1.8 / 2.5 |
+| B, K = 150 | −16.1 | −20.8 | 5.7 / 7.2 |
+
+- **Decomposition, at equal passes:**
+  - coverage is worth 3.3–4.9 points (`S-A1-int` against `end`);
+  - precision is worth 1.7–3.3 points (`S-A1` against `S-A1-int`);
+  - gradients add about 2 points over the same search on the same model, while B with K = 150 takes a third of `S-A1:4`'s time.
+- **At equal time** the search cannot finish one pass within B's budget, so B leads by 12–19 points. Climbs barely stop on a smooth energy, because tiny moves keep improving, and an evaluation costs 6–50 µs against 3–15 ms for a whole B iteration.
+- **Confound:** B has no minimum-angle rule and makes slivers, 1–22% of its triangles. Part of the 2 points may come from that larger space.
+- **Verdict:** gradients matter at equal time. Coverage and precision are most of B's quality, but only B reaches them cheaply.
+
 **Done:**
 1. The measurement fix (runner metrics and summaries).
 2. A1 in `approximate` (`192714e`).
@@ -630,15 +650,22 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
 4. Engine and export agreement (`8c1ee09`).
 5. Remove and re-add (killed).
 6. Fix `quadratic` (`0a28286`).
-7. B pilot (succeeded; `lab/b-pilot`).
+7. B pilot (succeeded).
+8. Ablation (gradients matter at equal time).
 
-**Next.**
-
-8. **Ablation: gradients, or coverage and precision?**
-   - In the pilot's harness, run A1's step-adapted top-down climbs (1/5th rule, scales down to 0.25 px) against the same smooth forward model and continuous coordinates, at B's time. Add a variant with integer coordinates.
-   - **If A1 on the smooth model comes within about 1 point of B:** the gain is the coverage and the precision. Productise by giving the engine anti-aliased coverage and sub-pixel coordinates for every kind, keeping today's search, which already handles every kind.
-   - **If B leads by 3 points or more:** productise B as the final stage, exporting its drawing directly. That needs smooth coverage and gradients per kind, real multi-threading, and cancellation.
-   - **In between:** compare the two productisation costs.
+**Next: decide how to productise B** (the user decides; an independent review is advisable first). Candidate shape:
+- B becomes the final stage of `approximate` and exports its 0.25 px drawing directly, with no A1 pass after it.
+- It starts with the polygonal kinds (triangle, then rectangle, rotated rectangle and convex polygon, which share the half-plane coverage). Layers of other kinds stay fixed in the composite.
+- **Needed:**
+  - cancellation between iterations;
+  - multi-threading by image bands;
+  - a sliver rule (keep the 15° minimum, or a penalty);
+  - deterministic reductions, which the pilot already has;
+  - a time budget per shape count that stays within 2× greedy in single-threaded wasm.
+- **Open questions:**
+  - whether the engine's greedy search should also get anti-aliased coverage;
+  - the curved kinds (ellipses, circles, `quadratic`) and `any`, the default, whose layers mix every kind;
+  - whether B replaces the A1 pass or follows it.
 
 **Before merging the branch:**
 - regenerate the gallery, the README comparison images and the versus-Go numbers (`CONTRIBUTING.md`), which output changes make stale;
