@@ -691,14 +691,24 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
   - Budget: B's extra time is at most 0.5× greedy at 1 thread and at most 1× at 8 threads, at 100–200 shapes. The pilot runs at 1.0× greedy at 8 threads with K = 50, because it barely uses threads.
 - **User decisions.**
   - Polygons must be convex, with the 15° minimum interior angle, in every optimiser, greedy included. A crossed quad reads as two triangles.
-  - Rotated rectangles get an aspect-ratio cap, set from the distribution of greedy's current output.
-  - Tiny triangles (sub-pixel but angle-valid): count them first, then decide.
+  - Rotated rectangles get an aspect-ratio cap of 1:8, close to the flattest triangle the 15° rule allows (15°, 15°, 150°: about 1:7.5).
+  - Today's greedy output, at 100 and 200 shapes over the five README images:
+    - only 36–44% of the `polygon` kind's quads are convex; 23–27% are concave and 32–37% cross themselves, and 13–16% of the convex ones have an angle under 15°;
+    - inside `any` the shares are about the same, and polygons are 38–42% of `any`'s layers;
+    - rotated rectangles have a median aspect of 2.7–3.0, but 8–13% exceed 1:8, up to 1:97.
+  - The polygon rule therefore changes much of `any`'s output. Its quality cost is measured before it is adopted.
+  - The half-plane kinds B can cover are 63–67% of `any`'s layers at 100 and 200 shapes.
+  - Tiny triangles: no rule needed. B's output at 100 and 200 shapes has no triangle under 4 px² (greedy with A1 at 500 shapes had 18 of 2,481).
   - A silent "Refining" phase of 1–2 s in the single-threaded browser is acceptable, as long as it stays cancellable. `onProgress` does not change.
-  - `ApproximateResult.score` may become B's model RMSE, which is closer to the exported PNG's.
   - Native–wasm identity is a requirement for B.
   - Killed: anti-aliased coverage in the greedy search. Binary coverage costs no fidelity there, and B fixes coverage at the end.
 - **Experiments, in order:**
-  1. **Port the pilot (triangle only)** into the module, wired into `approximate` for `triangle`. Success: within 0.3 points of the pilot's `Bp50`/`Bp150` at 100 and 200 shapes, and native and wasm SVG identical.
+  1. **Port the pilot (triangle only)** into the module, wired into `approximate` for `triangle`. Success: within 0.3 points of the pilot's `Bp50`/`Bp150` at 100 and 200 shapes, and native and wasm SVG identical. **Passed** (`8a1eab3`, `primeval_core::joint`):
+     - median rmse256 at 50 / 100 / 200 shapes: K = 50 gives 0.050894 / 0.038609 / 0.029079, against the pilot's 0.050898 / 0.038616 / 0.029079; K = 150 gives 0.050451 / 0.037903 / 0.028473, against 0.050456 / 0.037844 / 0.028474. The largest difference is +0.13 points;
+     - extra time against greedy at 1 thread: 0.29× / 0.25× / 0.19× with K = 50 and 0.88× / 0.75× / 0.57× with K = 150;
+     - zero angle violations in 1,750 exported triangles (smallest angle 15.004°), and SVG bytes 1.5–3.2% below greedy's;
+     - the arithmetic is libm-free, and the native–wasm tripwire passes on both wasm builds.
+     - Open, for experiment 6: only the checkpoints are capped, not the buffers that hold the canvas under each layer of a segment. B always replaces the greedy drawing; it is not kept only if better.
   2. **Band-parallel sweep** (fixed bands, one fork-join per pass, colours refitted together, Jacobi). Success: at least 3× faster at 8 threads, at most 0.5 points lost, identical output at 1, 4 and 8 threads. Kill: Jacobi loses more than 1 point; then fall back to per-layer barriers and accept about 1× greedy at 8 threads with K = 50.
   3. **K per shape count**, from {32, 64, 100, 150} at 50 to 500 shapes: the smallest K within 0.5 points of 150 that meets the budget.
   4. **`any`**: curved layers fixed, plus rectangle, rotated rectangle and convex polygon, each with its legibility rule. Success: at least 3 points over equal-time A1 at 100 and 200 shapes, zero violations, SVG bytes at most +3%. Kill: under 2 points; then B covers triangles and rectangles only, and the plan is revisited.
