@@ -1,4 +1,5 @@
-//! B pilot: joint gradient-based refinement of greedy triangles.
+//! B pilot: joint gradient-based refinement of greedy triangles, and the
+//! ablation that separates its search from its model (S-A1).
 //!
 //! Usage:
 //!
@@ -10,7 +11,7 @@
 //!   --only NAME         run only the corpus image NAME
 //!   --steps LIST        checkpoints, in greedy steps (default 50,100,200)
 //!   --iterations LIST   B iteration counts K (default 50,150)
-//!   --passes P          A1 baseline: end:1 .. end:P (default 8)
+//!   --passes P          at most P passes per time-matched arm (default 100)
 //!   --lr-vertex X       Adam step of the vertices, px (default 1)
 //!   --lr-alpha X        Adam step of alpha, levels (default 10)
 //!   --filter-start X    initial filter width, annealed to 1 (default 1)
@@ -23,34 +24,43 @@
 //! checkpoint. At each checkpoint it records:
 //!
 //! - `greedy`: the greedy drawing;
-//! - `end:P`: a clone after `P` refit passes (`Model::refine`), for every
-//!   `P` up to `--passes`;
 //! - `B<K>@0.25`: `K` Adam iterations on every vertex and alpha jointly
 //!   (`diff::optimise`), then vertices snapped to 0.25 px, alphas to
 //!   integers, one colour refit and the colours rounded; the export takes
 //!   these coordinates as they are, the engine cannot;
-//! - `B<K>@1`: the same snapped to whole pixels, painted by the engine
-//!   (`Model::from_drawing`);
-//! - `B<K>@1+A1`: that model after one refit pass.
+//! - `end@B<K>`: the engine's refit passes (`Model::refine`), as many as
+//!   fit `B<K>@0.25`'s time;
+//! - `S-A1@B<K>`: the engine's refit search on B's forward model with
+//!   continuous coordinates (`search::pass`), as many passes as fit the
+//!   time of `B<K>`'s Adam iterations, then the snap of `B<K>@0.25`;
+//! - `S-A1-int@B<K>`: the same with integer coordinates and a snap to whole
+//!   pixels, at the smallest `K` only;
+//! - `end:P`, `S-A1:P`, `S-A1-int:P`: the same arms after `P` passes, for
+//!   `P` in `FIXED_PASSES`, whatever their time.
 //!
 //! Times are wall time: `time` is the greedy search to the checkpoint plus
-//! the variant's own work (`extra`). Metrics are those of `examples/engine.rs`:
-//! `score` on the engine's canvas (none for `@0.25`), `rmse256` of the PNG at
-//! the working size, `ssim128`, `svg_bytes` at the default output size.
+//! the variant's own work (`extra`); `passes` is the refit arms' count.
+//! Metrics are those of `examples/engine.rs`: `score` on the engine's
+//! canvas (none for `@0.25` and `S-A1`), `rmse256` of the PNG at the working
+//! size, `ssim128`, `svg_bytes` at the default output size.
 
 #[path = "../common/mod.rs"]
 mod common;
 mod diff;
+mod search;
 
 use common::{ALL_SHAPES, BoxError, SEED, rgb_rmse};
 use diff::{Scene, Settings, Tri};
 use image::{ImageFormat, RgbImage, imageops};
 use primeval_core::{Drawing, DrawnShape, Geometry, Model, ModelOptions, Point};
 use primeval_render::{Color, OutputFormat, RenderOptions, ShapeKind, lab};
+use search::Search;
 use std::time::{Duration, Instant};
 
 /// Output size of the `ssim128` column.
 const SMALL_SIZE: u32 = 128;
+/// Pass counts recorded for the refit arms whatever the time.
+const FIXED_PASSES: [usize; 3] = [1, 2, 4];
 /// How far outside the canvas the engine keeps triangle vertices.
 const MARGIN: f64 = 16.0;
 
@@ -70,6 +80,10 @@ struct Row {
     time: Duration,
     extra: Duration,
     score: Option<f64>,
+    /// Refit passes of the matched arms.
+    passes: Option<usize>,
+    /// Candidate evaluations of the S-A1 arms.
+    evaluations: Option<u64>,
     rmse256: f64,
     ssim128: f64,
     svg_bytes: usize,
@@ -91,7 +105,7 @@ fn main() -> Result<(), BoxError> {
     common::print_commit_and_machine();
     println!(
         "- triangles, seed {SEED}, default options, {} threads; checkpoints {:?}; \
-         K {:?}; passes up to {}",
+         K {:?}; at most {} passes per matched arm",
         rayon::current_num_threads(),
         config.checkpoints,
         config.iterations,
@@ -105,22 +119,27 @@ fn main() -> Result<(), BoxError> {
         run_image(&input.name, &input.bytes, &config, &mut rows)?;
     }
     println!(
-        "| image | variant | steps | time_s | extra_s | score | rmse256 | ssim128 | svg_bytes |"
+        "| image | variant | steps | passes | time_s | extra_s | score | rmse256 | ssim128 \
+         | svg_bytes | evaluations |"
     );
-    println!("| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
+    println!("| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
     for row in &rows {
         println!(
-            "| {} | {} | {} | {:.3} | {:.3} | {} | {:.6} | {:.6} | {} |",
+            "| {} | {} | {} | {} | {:.3} | {:.3} | {} | {:.6} | {:.6} | {} | {} |",
             row.image,
             row.variant,
             row.steps,
+            row.passes
+                .map_or("-".to_owned(), |passes| passes.to_string()),
             row.time.as_secs_f64(),
             row.extra.as_secs_f64(),
             row.score
                 .map_or("-".to_owned(), |score| format!("{score:.6}")),
             row.rmse256,
             row.ssim128,
-            row.svg_bytes
+            row.svg_bytes,
+            row.evaluations
+                .map_or("-".to_owned(), |evaluations| evaluations.to_string()),
         );
     }
     println!();
@@ -194,6 +213,8 @@ fn run_image(
                       greedy: Duration,
                       extra: Duration,
                       score: Option<f64>,
+                      passes: Option<usize>,
+                      evaluations: Option<u64>,
                       drawing: &Drawing|
      -> Result<(), BoxError> {
         let (rmse256, ssim128, svg_bytes) = measure.measure(drawing)?;
@@ -204,6 +225,8 @@ fn run_image(
             time: greedy + extra,
             extra,
             score,
+            passes,
+            evaluations,
             rmse256,
             ssim128,
             svg_bytes,
@@ -218,84 +241,176 @@ fn run_image(
             continue;
         }
         eprintln!("  {step} steps");
+        let drawing = model.drawing();
         record(
             "greedy".into(),
             step,
             greedy,
             Duration::ZERO,
             Some(model.score_f64()),
-            &model.drawing(),
+            None,
+            None,
+            &drawing,
         )?;
+        let start_tris: Vec<Tri> = drawing.shapes.iter().map(to_tri).collect();
 
-        let mut refined = model.clone();
-        let mut extra = Duration::ZERO;
-        for pass in 1..=config.passes {
-            let start = Instant::now();
-            refined.refine(render.alpha);
-            extra += start.elapsed();
-            record(
-                format!("end:{pass}"),
-                step,
-                greedy,
-                extra,
-                Some(refined.score_f64()),
-                &refined.drawing(),
-            )?;
-        }
-
+        // B at every K: its time, without and with the snap, is the
+        // budget of the matched arms.
+        let mut budgets: Vec<(usize, Duration, Duration)> = Vec::new();
         for &iterations in &config.iterations {
             let settings = Settings {
                 iterations,
                 ..config.settings
             };
             let start = Instant::now();
-            let drawing = model.drawing();
-            let mut tris: Vec<Tri> = drawing.shapes.iter().map(to_tri).collect();
+            let mut tris = start_tris.clone();
             let losses = diff::optimise(&mut scene, &mut tris, &settings, true, MARGIN);
             let optimised = start.elapsed();
-            eprintln!(
-                "    B{iterations}: model rmse {:.6} -> {:.6} in {:.2}s",
-                model_rmse(losses[0], &scene),
-                model_rmse(*losses.last().expect("a final loss"), &scene),
-                optimised.as_secs_f64()
-            );
-
             let start = Instant::now();
             let quarter = snap(&mut scene, &tris, 0.25, background);
             let snapped = start.elapsed();
+            eprintln!(
+                "    B{iterations}: model rmse {:.6} -> {:.6} in {:.3}s (+{:.3}s snap), \
+                 {:.2} ms/iteration; {} of {} triangles with an angle <= 15°",
+                model_rmse(losses[0], &scene),
+                model_rmse(*losses.last().expect("a final loss"), &scene),
+                optimised.as_secs_f64(),
+                snapped.as_secs_f64(),
+                1e3 * optimised.as_secs_f64() / iterations as f64,
+                tris.iter()
+                    .filter(|tri| search::min_angle(&tri.vertices) <= 15.0)
+                    .count(),
+                tris.len()
+            );
             record(
                 format!("B{iterations}@0.25"),
                 step,
                 greedy,
                 optimised + snapped,
                 None,
+                None,
+                None,
                 &quarter,
             )?;
+            budgets.push((iterations, optimised, optimised + snapped));
+        }
+        let longest = budgets.iter().map(|budget| budget.2).max().ok_or("no K")?;
 
+        // The engine's refit passes, matched to B's time with its snap.
+        let mut refined = model.clone();
+        let mut ends = vec![(Duration::ZERO, model.score_f64(), drawing.clone())];
+        let mut extra = Duration::ZERO;
+        let fixed = *FIXED_PASSES.last().expect("fixed pass counts");
+        while (extra <= longest || ends.len() <= fixed) && ends.len() <= config.passes as usize {
             let start = Instant::now();
-            let whole = snap(&mut scene, &tris, 1.0, background);
-            let mut rebuilt =
-                Model::from_drawing(target.clone(), options, &whole).ok_or("not triangles")?;
-            let snapped = start.elapsed();
+            refined.refine(render.alpha);
+            extra += start.elapsed();
+            ends.push((extra, refined.score_f64(), refined.drawing()));
+        }
+        let mut selected: Vec<(String, usize)> = budgets
+            .iter()
+            .map(|&(iterations, _, budget)| {
+                let passes = ends
+                    .iter()
+                    .rposition(|end| end.0 <= budget)
+                    .expect("zero passes fit");
+                (format!("end@B{iterations}"), passes)
+            })
+            .collect();
+        selected.extend(
+            FIXED_PASSES
+                .iter()
+                .filter(|&&p| p < ends.len())
+                .map(|&p| (format!("end:{p}"), p)),
+        );
+        for (variant, passes) in selected {
+            let (extra, score, drawing) = &ends[passes];
             record(
-                format!("B{iterations}@1"),
+                variant,
                 step,
                 greedy,
-                optimised + snapped,
-                Some(rebuilt.score_f64()),
-                &rebuilt.drawing(),
+                *extra,
+                Some(*score),
+                Some(passes),
+                None,
+                drawing,
             )?;
-            let start = Instant::now();
-            rebuilt.refine(render.alpha);
-            let pass = start.elapsed();
-            record(
-                format!("B{iterations}@1+A1"),
-                step,
-                greedy,
-                optimised + snapped + pass,
-                Some(rebuilt.score_f64()),
-                &rebuilt.drawing(),
-            )?;
+        }
+
+        // S-A1, continuous and integer, matched to B's time without the
+        // snap, since they pay their own.
+        let smallest = budgets[0];
+        for (arm, search, budgets) in [
+            ("S-A1", Search::continuous(MARGIN, SEED), budgets.as_slice()),
+            (
+                "S-A1-int",
+                Search::integer(MARGIN, SEED),
+                std::slice::from_ref(&smallest),
+            ),
+        ] {
+            let longest = budgets.iter().map(|budget| budget.1).max().ok_or("no K")?;
+            let mut tris = start_tris.clone();
+            let mut states = vec![(Duration::ZERO, 0_u64, tris.clone())];
+            let (mut elapsed, mut evaluations) = (Duration::ZERO, 0);
+            let fixed = *FIXED_PASSES.last().expect("fixed pass counts");
+            while (elapsed <= longest || states.len() <= fixed)
+                && states.len() <= config.passes as usize
+            {
+                let number = states.len() as u64 - 1;
+                let start = Instant::now();
+                let result = search::pass(&scene, &mut tris, &search, number);
+                elapsed += start.elapsed();
+                evaluations += result.evaluations;
+                eprintln!(
+                    "    {arm} pass {}: model rmse {:.6} -> {:.6}, {} layers changed, \
+                     {} evaluations, {:.3}s, {:.2} µs/evaluation",
+                    number + 1,
+                    model_rmse(result.before, &scene),
+                    model_rmse(result.after, &scene),
+                    result.changed,
+                    result.evaluations,
+                    elapsed.as_secs_f64(),
+                    1e6 * elapsed.as_secs_f64() / evaluations as f64,
+                );
+                states.push((elapsed, evaluations, tris.clone()));
+            }
+            let mut selected: Vec<(String, usize)> = budgets
+                .iter()
+                .map(|&(iterations, budget, _)| {
+                    let passes = states
+                        .iter()
+                        .rposition(|state| state.0 <= budget)
+                        .expect("zero passes fit");
+                    (format!("{arm}@B{iterations}"), passes)
+                })
+                .collect();
+            selected.extend(FIXED_PASSES.iter().map(|&p| (format!("{arm}:{p}"), p)));
+            for (variant, passes) in selected {
+                let (passes_time, evaluations, tris) = &states[passes];
+                let start = Instant::now();
+                let quantum = if search.integer { 1.0 } else { 0.25 };
+                let drawing = snap(&mut scene, tris, quantum, background);
+                let snapped = start.elapsed();
+                let score = if search.integer {
+                    Some(
+                        Model::from_drawing(target.clone(), options, &drawing)
+                            .ok_or("not integer triangles")?
+                            .score_f64(),
+                    )
+                } else {
+                    None
+                };
+                record(
+                    variant,
+                    step,
+                    greedy,
+                    *passes_time + snapped,
+                    score,
+                    Some(passes),
+                    Some(*evaluations),
+                    &drawing,
+                )?;
+            }
         }
     }
     Ok(())
@@ -385,9 +500,10 @@ fn summary(rows: &[Row], checkpoints: &[u32]) {
     println!();
     println!(
         "| steps | variant | median score | median rmse256 | median ssim128 | mean svg_bytes \
-         | total time_s | total extra_s | mean Δrmse256 vs greedy |"
+         | total time_s | total extra_s | passes | median vs greedy, points | mean Δrmse256 vs \
+         greedy |"
     );
-    println!("| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
+    println!("| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
     for &steps in checkpoints {
         let mut variants: Vec<&str> = Vec::new();
         for row in rows.iter().filter(|row| row.steps == steps) {
@@ -423,13 +539,28 @@ fn summary(rows: &[Row], checkpoints: &[u32]) {
                 / group.len() as f64;
             let time: Duration = group.iter().map(|row| row.time).sum();
             let extra: Duration = group.iter().map(|row| row.extra).sum();
+            let passes: Vec<usize> = group.iter().filter_map(|row| row.passes).collect();
+            let passes = match (passes.iter().min(), passes.iter().max()) {
+                (Some(low), Some(high)) if low == high => low.to_string(),
+                (Some(low), Some(high)) => format!("{low}–{high}"),
+                _ => "-".to_owned(),
+            };
+            let rmse = median(group.iter().map(|row| row.rmse256).collect());
+            let greedy = median(
+                rows.iter()
+                    .filter(|row| row.steps == steps && row.variant == "greedy")
+                    .map(|row| row.rmse256)
+                    .collect(),
+            );
             println!(
-                "| {steps} | {variant} | {score} | {:.6} | {:.6} | {:.1} | {:.3} | {:.3} | {:+.2}% |",
-                median(group.iter().map(|row| row.rmse256).collect()),
+                "| {steps} | {variant} | {score} | {:.6} | {:.6} | {:.1} | {:.3} | {:.3} | {passes} \
+                 | {:+.2} | {:+.2}% |",
+                rmse,
                 median(group.iter().map(|row| row.ssim128).collect()),
                 group.iter().map(|row| row.svg_bytes as f64).sum::<f64>() / group.len() as f64,
                 time.as_secs_f64(),
                 extra.as_secs_f64(),
+                100.0 * (rmse / greedy - 1.0),
                 100.0 * change,
             );
         }
@@ -574,7 +705,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
         only: None,
         checkpoints: vec![50, 100, 200],
         iterations: vec![50, 150],
-        passes: 8,
+        passes: 100,
         settings: Settings {
             iterations: 0,
             lr_vertex: 1.0,

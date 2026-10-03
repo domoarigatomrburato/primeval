@@ -207,12 +207,12 @@ impl<F: Real> Edge<F> {
 #[derive(Clone, Copy)]
 pub(crate) struct Prepared<F> {
     edges: [Edge<F>; 3],
-    x0: usize,
-    x1: usize,
-    y0: usize,
-    y1: usize,
-    opacity: F,
-    color: [F; 3],
+    pub(crate) x0: usize,
+    pub(crate) x1: usize,
+    pub(crate) y0: usize,
+    pub(crate) y1: usize,
+    pub(crate) opacity: F,
+    pub(crate) color: [F; 3],
 }
 
 impl<F: Real> Prepared<F> {
@@ -310,7 +310,7 @@ impl<F: Real> Prepared<F> {
         }
     }
 
-    fn area(&self) -> usize {
+    pub(crate) fn area(&self) -> usize {
         (self.x1 - self.x0) * (self.y1 - self.y0)
     }
 
@@ -368,7 +368,7 @@ const ROWS: usize = 4;
 const PARALLEL_PIXELS: usize = 4096;
 
 /// Composites `layer` onto `canvas`.
-fn paint<F: Real>(canvas: &mut [F], width: usize, layer: &Prepared<F>) {
+pub(crate) fn paint<F: Real>(canvas: &mut [F], width: usize, layer: &Prepared<F>) {
     if layer.area() == 0 {
         return;
     }
@@ -419,7 +419,7 @@ pub(crate) struct Sweep {
 }
 
 /// The smallest `k` with `k² ≥ n`, at least 1.
-fn ceil_sqrt(n: usize) -> usize {
+pub(crate) fn ceil_sqrt(n: usize) -> usize {
     let mut root = n.isqrt();
     if root * root < n {
         root += 1;
