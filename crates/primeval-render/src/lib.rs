@@ -961,7 +961,8 @@ mod tests {
             },
         );
         assert!(finished.is_some());
-        assert!(polls > 50, "{polls} polls");
+        // 3 triangles run 80 iterations, each polled before it starts.
+        assert!(polls > 80, "{polls} polls");
         for cancel_at in [1, polls / 2, polls] {
             let mut count = 0;
             let stopped = final_stage(

@@ -41,7 +41,8 @@ pub fn working_image(input: &[u8], render: &RenderOptions) -> Result<RgbImage, A
 /// [`working_target`], exactly as [`crate::approximate`] runs it: for
 /// triangles the joint optimisation of every shape, which leaves `model`
 /// unchanged, otherwise one refit pass of `model`. `iterations`, if set,
-/// overrides the joint optimisation's iteration count.
+/// overrides the joint optimisation's iteration count, which otherwise
+/// follows the number of shapes ([`joint::Settings::iterations`]).
 ///
 /// Returns the drawing [`crate::approximate`] would encode and its score:
 /// for the joint optimisation, its model's RMSE of that drawing
@@ -54,9 +55,7 @@ pub fn final_stage(
     iterations: Option<u32>,
 ) -> (Drawing, f64) {
     let mut settings = joint::Settings::default();
-    if let Some(iterations) = iterations {
-        settings.iterations = iterations;
-    }
+    settings.iterations = iterations;
     let joint_target = crate::runs_joint(render.shape).then_some(target);
     let drawing = crate::final_stage(model, joint_target, render.alpha, settings, || false)
         .expect("a stage that is never cancelled finishes");
@@ -262,6 +261,12 @@ mod tests {
                 assert_eq!(score, primeval_core::joint::score(&drawing, &target));
                 let (fewer, _) = final_stage(&mut greedy.clone(), &target, &render, Some(1));
                 assert_ne!(fewer, drawing);
+                // Without an override, 5 triangles run the rule's 80
+                // iterations.
+                let (rule, _) = final_stage(&mut greedy.clone(), &target, &render, Some(80));
+                assert_eq!(rule, drawing);
+                let (fifty, _) = final_stage(&mut greedy.clone(), &target, &render, Some(50));
+                assert_ne!(fifty, drawing);
             } else {
                 assert_eq!(score, model.score_f64());
                 assert_eq!(drawing, model.drawing());

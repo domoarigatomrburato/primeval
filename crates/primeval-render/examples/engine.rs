@@ -18,7 +18,9 @@
 //!                       `final` runs `approximate`'s final stage at each
 //!                       checkpoint
 //!   --iterations K      with `--refine final`: the joint optimisation's
-//!                       iteration count (default: `approximate`'s, 50)
+//!                       iteration count (default: `approximate`'s,
+//!                       which grows with the shape count: 80 up to 50
+//!                       triangles, 160 from 500)
 //! ```
 //!
 //! For every image × shape kind it runs one greedy search to the largest

@@ -40,8 +40,25 @@ mod diff;
 use crate::{Alpha, Buffer, Color, Drawing, DrawnShape, Geometry, Point};
 use diff::{PARAMS, Real, Scene, Tri, Workspace};
 
-/// The default number of Adam iterations, [`Settings::iterations`].
-const DEFAULT_ITERATIONS: u32 = 50;
+/// The default number of Adam iterations for a drawing of `shapes`
+/// triangles, used when [`Settings::iterations`] is `None`: 80 up to 50
+/// triangles, linear to 120 at 200 and to 160 at 500, then 160, rounded
+/// down.
+///
+/// Each count is the largest that keeps the optimisation's extra time near
+/// 0.5× the greedy search's at 1 thread, measured on the default corpus;
+/// quality keeps improving up to 150 iterations, so the time budget
+/// decides. Integer arithmetic keeps native and wasm builds in agreement.
+fn default_iterations(shapes: usize) -> u32 {
+    let shapes = u32::try_from(shapes).unwrap_or(u32::MAX);
+    match shapes {
+        0..=50 => 80,
+        51..=200 => 80 + (shapes - 50) * 40 / 150,
+        201..=500 => 120 + (shapes - 200) * 40 / 300,
+        _ => 160,
+    }
+}
+
 /// `tan 15.5°`: the projection keeps every angle at least 15.5°, half a
 /// degree inside the rule, so that the snap rarely needs a repair.
 const TAN_PROJECTION: f64 = 0.277_324_544_059_838_4;
@@ -50,20 +67,18 @@ const TAN_PROJECTION: f64 = 0.277_324_544_059_838_4;
 ///
 /// Construct with [`Settings::default`] and set the fields you need.
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Settings {
-    /// Adam iterations; default 50. Each costs a colour fit (about two
-    /// renders of the drawing) and a gradient (a render, its replay and the
-    /// reverse pass). `0` only projects, snaps and refits the colours.
-    pub iterations: u32,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            iterations: DEFAULT_ITERATIONS,
-        }
-    }
+    /// Adam iterations. Each costs a colour fit (about two renders of the
+    /// drawing) and a gradient (a render, its replay and the reverse pass).
+    /// `Some(0)` only projects, snaps and refits the colours.
+    ///
+    /// `None`, the default, follows the number of triangles: 80 up to 50,
+    /// linear to 120 at 200 and to 160 at 500, then 160, rounded down. Each
+    /// count is the largest that keeps the optimisation's extra time near
+    /// 0.5× the greedy search's at 1 thread on the default corpus; quality
+    /// keeps improving up to 150 iterations, so the time budget decides.
+    pub iterations: Option<u32>,
 }
 
 /// Optimises every triangle of `drawing` jointly against `target`, on
@@ -71,7 +86,8 @@ impl Default for Settings {
 /// `cancelled` returns true.
 ///
 /// See the module documentation for the method.
-/// [`Settings::iterations`] Adam iterations move the vertices, and the
+/// [`Settings::iterations`] Adam iterations, by default a number that
+/// grows with the number of triangles, move the vertices, and the
 /// opacities when `alpha` is [`Alpha::Auto`]; with [`Alpha::Fixed`] every
 /// opacity stays at the fixed value. Every colour is refitted at each
 /// iteration. The result keeps the number and order of the triangles. Its
@@ -97,7 +113,9 @@ pub fn optimise(
     let scene = scene::<f32>(drawing, target);
     let mut tris = triangles(drawing);
     let auto_alpha = alpha == Alpha::Auto;
-    let iterations = settings.iterations as usize;
+    let iterations = settings
+        .iterations
+        .unwrap_or_else(|| default_iterations(drawing.shapes.len())) as usize;
     run(
         &scene,
         &mut tris,
@@ -406,12 +424,32 @@ mod tests {
     }
 
     fn settings(iterations: u32) -> Settings {
-        Settings { iterations }
+        Settings {
+            iterations: Some(iterations),
+        }
     }
 
+    /// By default the iteration count follows the number of triangles: 80
+    /// up to 50, linear to 120 at 200 and to 160 at 500, then 160, rounded
+    /// down.
     #[test]
-    fn the_default_runs_fifty_iterations() {
-        assert_eq!(Settings::default().iterations, 50);
+    fn the_default_iterations_follow_the_shape_count() {
+        assert_eq!(Settings::default().iterations, None);
+        for (shapes, iterations) in [
+            (0, 80),
+            (1, 80),
+            (50, 80),
+            (51, 80),
+            (100, 93),
+            (200, 120),
+            (201, 120),
+            (350, 140),
+            (500, 160),
+            (501, 160),
+            (100_000, 160),
+        ] {
+            assert_eq!(default_iterations(shapes), iterations, "{shapes} shapes");
+        }
     }
 
     /// B lowers its own model's error against the greedy drawing, keeps
