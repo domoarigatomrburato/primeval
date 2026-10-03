@@ -5,15 +5,19 @@
 //! opacity under [`Alpha::Auto`], at once: Adam on the gradient of the
 //! squared error between the composite and the target, through a smooth
 //! model of the export's anti-aliased rendering, with every colour refitted
-//! in closed form at each iteration. Its result is snapped to a quarter
-//! pixel and keeps the engine's minimum angle of 15°.
+//! at each iteration. Its result is snapped to a quarter pixel and keeps the
+//! engine's minimum angle of 15°.
 //!
 //! The forward model (`diff.rs`) covers each pixel by the product of the
 //! three edges' exact half-plane areas in the pixel square, and composites
 //! in `f32`. Reverse-mode gradients replay the layer stack from canvas
 //! checkpoints, about `√N` of them for `N` layers, capped in memory as the
-//! refit pass's are. The minimum angle is kept by a projection after every
-//! step and by the snap (`angle.rs`).
+//! refit pass's are. Every pass runs as one task per fixed band of rows,
+//! with one fork and join, and its sums are reduced in band order, so the
+//! result does not depend on the number of threads. The colours are
+//! refitted together, each by a step towards its closed-form fit that can
+//! only lower the loss. The minimum angle is kept by a projection after
+//! every step and by the snap (`angle.rs`).
 //!
 //! # Arithmetic
 //!
@@ -48,9 +52,9 @@ const TAN_PROJECTION: f64 = 0.277_324_544_059_838_4;
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Settings {
-    /// Adam iterations; default 50. Each costs about one render of the
-    /// drawing and its reverse pass. `0` only projects, snaps and refits
-    /// the colours.
+    /// Adam iterations; default 50. Each costs a colour fit (about two
+    /// renders of the drawing) and a gradient (a render, its replay and the
+    /// reverse pass). `0` only projects, snaps and refits the colours.
     pub iterations: u32,
 }
 
@@ -188,11 +192,11 @@ fn decay(t: usize, iterations: usize) -> f64 {
 }
 
 /// Runs `iterations` Adam steps on the vertices and opacities of `tris`
-/// (opacities only with `auto_alpha`), each after one [`diff::sweep`] that
-/// refits every colour; then one more sweep refits the colours of the
-/// final geometry. `cancelled` is polled before every step; `None` once it
-/// returns true. Vertices stay within [`MARGIN`] of the canvas unless a
-/// projection moves them out.
+/// (opacities only with `auto_alpha`), each on the [`diff::gradients`]
+/// taken after one [`diff::fit`] of every colour; then one more fit
+/// refits the colours of the final geometry. `cancelled` is polled before
+/// every step; `None` once it returns true. Vertices stay within
+/// [`MARGIN`] of the canvas unless a projection moves them out.
 ///
 /// Every triangle is projected onto angles of at least `atan tan_tau`
 /// ([`angle::project`]) before the first step and after every step, after
@@ -234,7 +238,8 @@ fn run<F: Real>(
         if cancelled() {
             return None;
         }
-        let gradients = diff::sweep(scene, tris, true, true, &mut work);
+        diff::fit(scene, tris, &mut work);
+        let gradients = diff::gradients(scene, tris, &mut work);
         let decay = decay(t, iterations);
         power1 *= BETA1;
         power2 *= BETA2;
@@ -269,7 +274,7 @@ fn run<F: Real>(
             }
         }
     }
-    diff::sweep(scene, tris, true, false, &mut work);
+    diff::fit(scene, tris, &mut work);
     Some(())
 }
 
@@ -285,7 +290,7 @@ fn export<F: Real>(scene: &Scene<F>, tris: &[Tri], background: Color) -> Drawing
             color: tri.color,
         })
         .collect();
-    diff::sweep(scene, &mut snapped, true, false, &mut Workspace::default());
+    diff::fit(scene, &mut snapped, &mut Workspace::default());
     Drawing {
         width: scene.width as u32,
         height: scene.height as u32,
@@ -473,7 +478,7 @@ mod tests {
 
     #[test]
     fn the_result_does_not_depend_on_the_thread_count() {
-        // Large triangles, so that the sweeps take their parallel path.
+        // One large triangle, which crosses every band.
         let target = target(120, 100);
         let mut start = greedy(&target, 6, Alpha::Auto);
         let big = [-10.0, -10.0, 130.0, 5.0, 40.0, 110.0];
@@ -491,7 +496,7 @@ mod tests {
                 .expect("not cancelled")
         };
         let one = run(1);
-        for threads in [2, 4] {
+        for threads in [2, 4, 8] {
             assert_eq!(run(threads), one, "{threads} threads");
         }
     }

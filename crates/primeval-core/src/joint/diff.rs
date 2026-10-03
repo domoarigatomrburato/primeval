@@ -1,13 +1,13 @@
 //! Differentiable compositing of triangles: the smooth forward model,
-//! reverse-mode gradients through the layer stack and the per-shape colour
-//! fit. The arithmetic rule of [`super`] applies to everything here.
+//! reverse-mode gradients through the layer stack and the colour fit. The
+//! arithmetic rule of [`super`] applies to everything here.
 //!
 //! Coordinates are the engine's: the centre of pixel `(i, j)` is `(i, j)`,
 //! so a vertex `v` is the drawing's `v + 0.5`.
 
 use crate::refine::checkpoint_interval;
 use rayon::prelude::*;
-use std::ops::{Add, AddAssign, Div, Mul, Neg, Sub};
+use std::ops::{Add, AddAssign, Div, Mul, Neg, Range, Sub};
 
 /// The float the canvas is composited in: `f32` in production, `f64` for
 /// the finite-difference checks.
@@ -49,6 +49,11 @@ impl Real for f64 {
         self
     }
 }
+
+/// The over-relaxation `ω` of [`fit`]'s step, in `(0, 2)`, where the step
+/// cannot raise the loss. Chosen against `1.0`, `1.3`, `1.7` and `1.9` on
+/// the engine runner's corpus.
+pub(super) const OVER_RELAXATION: f64 = 1.5;
 
 /// Gradient entries per triangle: the six vertex coordinates, then alpha.
 pub(super) const PARAMS: usize = 7;
@@ -319,8 +324,9 @@ impl<F: Real> Prepared<F> {
         }
     }
 
-    fn area(&self) -> usize {
-        (self.x1 - self.x0) * (self.y1 - self.y0)
+    /// The rows of `y0..y1` the bounding box reaches, empty if none.
+    fn rows(&self, y0: usize, y1: usize) -> Range<usize> {
+        self.y0.max(y0)..self.y1.min(y1).max(self.y0.max(y0))
     }
 
     /// The coverage of the pixel centred at `(x, y)`: the product of the
@@ -369,332 +375,387 @@ impl<F: Real> Prepared<F> {
     }
 }
 
-/// Rows per parallel task. Tasks and their partial sums do not depend on
-/// the thread count, and the sums are reduced in task order, so every
-/// result is the same whatever the number of threads.
-const ROWS: usize = 4;
-/// Bounding boxes smaller than this many pixels run on the calling thread.
-const PARALLEL_PIXELS: usize = 4096;
+/// Rows per band. Every pass splits the canvas into bands of this many
+/// rows, the last one shorter, whatever the number of threads; each band
+/// is one task, and the bands' partial sums are reduced in band order, so
+/// every result is the same whatever the number of threads.
+///
+/// Measured against 8 and 32 rows on the engine runner's corpus: 8 runs
+/// slightly faster on 8 threads and slower on 1.
+const BAND_ROWS: usize = 16;
 
-/// Composites `layer` onto `canvas`.
-fn paint<F: Real>(canvas: &mut [F], width: usize, layer: &Prepared<F>) {
-    if layer.area() == 0 {
-        return;
-    }
-    let row = 3 * width;
-    let rows = &mut canvas[layer.y0 * row..layer.y1 * row];
-    let task = |(index, chunk): (usize, &mut [F])| {
-        for (local, line) in chunk.chunks_exact_mut(row).enumerate() {
-            let y = F::of((layer.y0 + index * ROWS + local) as f64);
-            for x in layer.x0..layer.x1 {
-                let cov = layer.coverage(F::of(x as f64), y);
-                if cov > F::of(0.0) {
-                    let w = layer.opacity * cov;
-                    for c in 0..3 {
-                        let value = &mut line[3 * x + c];
-                        *value += w * (layer.color[c] - *value);
-                    }
-                }
-            }
-        }
-    };
-    if layer.area() >= PARALLEL_PIXELS {
-        rows.par_chunks_mut(ROWS * row).enumerate().for_each(task);
-    } else {
-        rows.chunks_mut(ROWS * row).enumerate().for_each(task);
-    }
+/// In a fit pass, the entry of a layer's partial sums that holds its
+/// weight `Σ g · (1 − T)`; entries `0..3` hold `Σ g · R_c`.
+const FIT_WEIGHT: usize = 3;
+
+/// What a pass computes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    /// The colour fit's sums, from the transmittance alone.
+    Fit,
+    /// The gradient, which also needs the canvas below each layer.
+    Gradient,
 }
 
-/// Reusable buffers of [`sweep`] and [`loss`]: the canvas, the
-/// checkpoints, the canvas below each layer of one segment within its
-/// bounding box, the residual and the transmittance from above.
+/// One band's rows of the canvas, its checkpoints, the canvas below each
+/// layer of one segment, the residual and the transmittances, and its
+/// partial sums per layer.
 #[derive(Default)]
-pub(super) struct Workspace<F> {
+struct Band<F> {
+    /// The band's rows, `y0..y1`.
+    y0: usize,
+    y1: usize,
     canvas: Vec<F>,
-    checkpoints: Vec<Vec<F>>,
+    /// The band's canvas before every `interval`-th layer, one after the
+    /// other.
+    checkpoints: Vec<F>,
+    /// The canvas below each layer of the segment being replayed, inside
+    /// the layer's bounding box and the band.
     below: Vec<Vec<F>>,
     residual: Vec<F>,
+    /// The transmittance of the layers above the current one.
     transmittance: Vec<F>,
+    /// The transmittance `T` of the whole stack, `Π (1 − w)` over every
+    /// layer; only for a fit.
+    uncovered: Vec<F>,
+    /// The gradient per layer, or the fit's sums ([`FIT_WEIGHT`]).
+    sums: Vec<[f64; PARAMS]>,
+    /// `Σ r²` over the band's residual, in `f64`, in order.
+    squares: f64,
 }
 
-/// Composites `layers` from the background into `work.canvas`, keeping
-/// the canvas before every `interval`-th layer in `work.checkpoints` (none
-/// with `interval` 0), then sets `work.residual` to `X − T`.
-fn forward<F: Real>(
-    scene: &Scene<F>,
-    layers: &[Prepared<F>],
-    interval: usize,
-    work: &mut Workspace<F>,
-) {
-    let pixels = scene.width * scene.height;
-    work.canvas.clear();
-    work.canvas
-        .extend((0..pixels).flat_map(|_| scene.background));
-    if interval > 0 {
-        work.checkpoints
-            .resize_with(layers.len().div_ceil(interval), Vec::new);
-    }
-    for (index, layer) in layers.iter().enumerate() {
-        if interval > 0 && index % interval == 0 {
-            let checkpoint = &mut work.checkpoints[index / interval];
-            checkpoint.clear();
-            checkpoint.extend_from_slice(&work.canvas);
+/// Reusable buffers of [`fit`], [`gradients`] and [`loss`]: one [`Band`]
+/// per band.
+#[derive(Default)]
+pub(super) struct Workspace<F> {
+    bands: Vec<Band<F>>,
+}
+
+impl<F: Real> Workspace<F> {
+    /// The bands of a canvas `height` rows high.
+    fn bands(&mut self, height: usize) -> &mut [Band<F>] {
+        self.bands
+            .resize_with(height.div_ceil(BAND_ROWS), Band::default);
+        for (index, band) in self.bands.iter_mut().enumerate() {
+            band.y0 = index * BAND_ROWS;
+            band.y1 = (band.y0 + BAND_ROWS).min(height);
         }
-        paint(&mut work.canvas, scene.width, layer);
+        &mut self.bands
     }
-    work.residual.clear();
-    work.residual
-        .extend(work.canvas.iter().zip(&scene.target).map(|(&x, &t)| x - t));
 }
 
-/// `Σ r²` over a residual, in `f64`, in order.
-fn sum_of_squares<F: Real>(residual: &[F]) -> f64 {
-    residual.iter().map(|r| r.get() * r.get()).sum()
+/// Composites `layer` onto `canvas`, the rows from `top` on, within `rows`,
+/// and folds it into `uncovered` if given.
+fn paint<F: Real>(
+    canvas: &mut [F],
+    width: usize,
+    top: usize,
+    rows: Range<usize>,
+    layer: &Prepared<F>,
+    mut uncovered: Option<&mut [F]>,
+) {
+    for y in rows {
+        let line = &mut canvas[3 * width * (y - top)..][..3 * width];
+        let fy = F::of(y as f64);
+        for x in layer.x0..layer.x1 {
+            let cov = layer.coverage(F::of(x as f64), fy);
+            if cov > F::of(0.0) {
+                let w = layer.opacity * cov;
+                for c in 0..3 {
+                    let value = &mut line[3 * x + c];
+                    *value += w * (layer.color[c] - *value);
+                }
+                if let Some(uncovered) = uncovered.as_deref_mut() {
+                    let p = width * (y - top) + x;
+                    uncovered[p] = uncovered[p] * (F::of(1.0) - w);
+                }
+            }
+        }
+    }
 }
 
-/// `Σ (X − T)²` over every pixel and channel of the composite of `tris`.
-pub(super) fn loss<F: Real>(scene: &Scene<F>, tris: &[Tri], work: &mut Workspace<F>) -> f64 {
-    let layers: Vec<Prepared<F>> = tris
-        .iter()
+impl<F: Real> Band<F> {
+    /// Composites `layers` from the background into the band's canvas,
+    /// keeping the canvas before every `interval`-th layer (none with
+    /// `interval` 0) and, with `uncovered`, the transmittance of the whole
+    /// stack; then sets the residual to `X − T`.
+    fn forward(
+        &mut self,
+        scene: &Scene<F>,
+        layers: &[Prepared<F>],
+        interval: usize,
+        uncovered: bool,
+    ) {
+        let width = scene.width;
+        let (y0, y1) = (self.y0, self.y1);
+        self.canvas.clear();
+        self.canvas
+            .extend((0..width * (y1 - y0)).flat_map(|_| scene.background));
+        self.checkpoints.clear();
+        self.uncovered.clear();
+        if uncovered {
+            self.uncovered.resize(width * (y1 - y0), F::of(1.0));
+        }
+        for (index, layer) in layers.iter().enumerate() {
+            if interval > 0 && index % interval == 0 {
+                self.checkpoints.extend_from_slice(&self.canvas);
+            }
+            let rows = layer.rows(y0, y1);
+            let uncovered = uncovered.then_some(self.uncovered.as_mut_slice());
+            paint(&mut self.canvas, width, y0, rows, layer, uncovered);
+        }
+        let target = &scene.target[3 * width * y0..3 * width * y1];
+        self.residual.clear();
+        self.residual
+            .extend(self.canvas.iter().zip(target).map(|(&x, &t)| x - t));
+    }
+
+    /// One band's part of [`fit`] or [`gradients`]: the forward pass, then
+    /// the top-down reverse pass, which sets `sums` to the band's partial
+    /// sums per layer.
+    fn pass(&mut self, scene: &Scene<F>, layers: &[Prepared<F>], interval: usize, pass: Pass) {
+        let width = scene.width;
+        let n = layers.len();
+        let (y0, y1) = (self.y0, self.y1);
+        let fit = pass == Pass::Fit;
+        // The fit needs only the transmittances, which need no canvas below
+        // each layer.
+        self.forward(scene, layers, if fit { 0 } else { interval }, fit);
+        self.sums.clear();
+        self.sums.resize(n, [0.0; PARAMS]);
+        self.transmittance.clear();
+        self.transmittance.resize(width * (y1 - y0), F::of(1.0));
+        if fit {
+            for (layer, sums) in layers.iter().zip(&mut self.sums).rev() {
+                let rows = layer.rows(y0, y1);
+                if !rows.is_empty() {
+                    let reverse = Reverse {
+                        layer,
+                        width,
+                        top: y0,
+                        rows,
+                    };
+                    reverse.fit(
+                        &self.residual,
+                        &self.uncovered,
+                        &mut self.transmittance,
+                        sums,
+                    );
+                }
+            }
+            return;
+        }
+        let size = self.canvas.len();
+        self.below.resize_with(interval, Vec::new);
+        for segment in (0..n.div_ceil(interval)).rev() {
+            let start = segment * interval;
+            let end = (start + interval).min(n);
+            // Replay the segment, keeping the canvas below each layer
+            // inside its bounding box.
+            self.canvas
+                .copy_from_slice(&self.checkpoints[segment * size..][..size]);
+            for (layer, below) in layers[start..end].iter().zip(&mut self.below) {
+                below.clear();
+                let rows = layer.rows(y0, y1);
+                for y in rows.clone() {
+                    let row = 3 * width * (y - y0);
+                    below.extend_from_slice(&self.canvas[row + 3 * layer.x0..row + 3 * layer.x1]);
+                }
+                paint(&mut self.canvas, width, y0, rows, layer, None);
+            }
+            for index in (start..end).rev() {
+                let layer = &layers[index];
+                let rows = layer.rows(y0, y1);
+                if !rows.is_empty() {
+                    let reverse = Reverse {
+                        layer,
+                        width,
+                        top: y0,
+                        rows,
+                    };
+                    reverse.gradient(
+                        &self.below[index - start],
+                        &self.residual,
+                        &mut self.transmittance,
+                        &mut self.sums[index],
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The reverse step through `layer` on the rows `rows` of a band whose
+/// first row is `top`. Each pixel's `A` is the transmittance of the layers
+/// above, `w` the layer's opacity times its coverage, and `g = A · w` the
+/// weight of the layer's colour in the final composite.
+struct Reverse<'a, F> {
+    layer: &'a Prepared<F>,
+    width: usize,
+    top: usize,
+    rows: Range<usize>,
+}
+
+impl<F: Real> Reverse<'_, F> {
+    /// Accumulates the colour fit's `Σ g · R_c` and `Σ g · (1 − T)` into
+    /// `sums` ([`FIT_WEIGHT`]), then folds the layer into the
+    /// transmittance (`A ← A · (1 − w)`).
+    fn fit(
+        &self,
+        residual: &[F],
+        uncovered: &[F],
+        transmittance: &mut [F],
+        sums: &mut [f64; PARAMS],
+    ) {
+        let layer = self.layer;
+        for y in self.rows.clone() {
+            let fy = F::of(y as f64);
+            for x in layer.x0..layer.x1 {
+                let cov = layer.coverage(F::of(x as f64), fy);
+                if cov <= F::of(0.0) {
+                    continue;
+                }
+                let p = self.width * (y - self.top) + x;
+                let transmitted = transmittance[p];
+                let w = layer.opacity * cov;
+                let g = (transmitted * w).get();
+                for c in 0..3 {
+                    sums[c] += g * residual[3 * p + c].get();
+                }
+                sums[FIT_WEIGHT] += g * (F::of(1.0) - uncovered[p]).get();
+                transmittance[p] = transmitted * (F::of(1.0) - w);
+            }
+        }
+    }
+
+    /// Accumulates the gradient `∂L/∂w = 2 A Σ_c R_c (s_c − X_{i−1,c})`
+    /// into the vertices and alpha in `sums`, with `below` the canvas
+    /// below the layer inside its bounding box and the band, then folds
+    /// the layer into the transmittance.
+    fn gradient(
+        &self,
+        below: &[F],
+        residual: &[F],
+        transmittance: &mut [F],
+        sums: &mut [f64; PARAMS],
+    ) {
+        let layer = self.layer;
+        let box_width = layer.x1 - layer.x0;
+        for (local, y) in self.rows.clone().enumerate() {
+            let fy = F::of(y as f64);
+            for x in layer.x0..layer.x1 {
+                let Some((cov, cov_grad)) = layer.coverage_grad(F::of(x as f64), fy) else {
+                    continue;
+                };
+                let p = self.width * (y - self.top) + x;
+                let transmitted = transmittance[p];
+                let w = layer.opacity * cov;
+                let pixel = &residual[3 * p..3 * p + 3];
+                let x_below = &below[3 * (local * box_width + x - layer.x0)..][..3];
+                let mut dot = F::of(0.0);
+                for c in 0..3 {
+                    dot += pixel[c] * (layer.color[c] - x_below[c]);
+                }
+                let dl_dw = (F::of(2.0) * transmitted * dot).get();
+                if dl_dw != 0.0 {
+                    let opacity = layer.opacity.get();
+                    for (sum, d) in sums.iter_mut().zip(cov_grad) {
+                        *sum += dl_dw * opacity * d.get();
+                    }
+                    sums[6] += dl_dw * cov.get() / 255.0;
+                }
+                transmittance[p] = transmitted * (F::of(1.0) - w);
+            }
+        }
+    }
+}
+
+/// The layers of `tris`, ready to composite.
+fn prepare<F: Real>(scene: &Scene<F>, tris: &[Tri]) -> Vec<Prepared<F>> {
+    tris.iter()
         .map(|tri| Prepared::new(tri, scene.filter, scene.width, scene.height))
-        .collect();
-    forward(scene, &layers, 0, work);
-    sum_of_squares(&work.residual)
+        .collect()
 }
 
-/// One forward pass and one top-down reverse pass over `tris`; returns the
-/// gradient of the loss `Σ (X − T)²` per triangle, empty without
-/// `gradient`.
+/// `Σ (X − T)²` over every pixel and channel of the composite of `tris`,
+/// in `f64`: in order within each band, then over the bands in order.
+pub(super) fn loss<F: Real>(scene: &Scene<F>, tris: &[Tri], work: &mut Workspace<F>) -> f64 {
+    let layers = prepare(scene, tris);
+    let bands = work.bands(scene.height);
+    bands.par_iter_mut().for_each(|band| {
+        band.forward(scene, &layers, 0, false);
+        band.squares = band.residual.iter().map(|r| r.get() * r.get()).sum();
+    });
+    bands.iter().map(|band| band.squares).sum()
+}
+
+/// Runs `pass` over `tris` as one task per band of [`BAND_ROWS`] rows,
+/// with a single fork and join, and returns the bands' partial sums per
+/// layer reduced in band order.
 ///
-/// With `fit`, each layer's colour is first replaced, on the way down, by
-/// its closed-form least-squares fit with every other layer fixed (one
-/// Gauss–Seidel sweep, top layer first), and the residual is updated in
-/// place. With `gradient`, the gradient of each layer is then taken with
-/// the colours of the layers at and above it already refitted, those below
-/// not yet: the gradient of the loss at that point, colours held constant.
-///
-/// The reverse pass needs, at layer `i`, the transmittance `A_i` of the
-/// layers above (`final = A_i · X_i + B_i`), folded in as it goes down,
-/// the final residual `R`, and the canvas `X_{i−1}` below the layer. The
-/// latter comes from canvas checkpoints every `interval` layers
-/// ([`checkpoint_interval`]: `⌈√N⌉` unless memory caps them), replayed one
-/// segment at a time and kept only inside each layer's bounding box.
-pub(super) fn sweep<F: Real>(
+/// Each band composites every layer that reaches it, then runs the
+/// top-down reverse pass over its own rows. The reverse pass needs, at
+/// layer `i`, the transmittance `A_i` of the layers above
+/// (`final = A_i · X_i + B_i`), folded in as it goes down, the final
+/// residual `R`, and, for the gradient, the canvas `X_{i−1}` below the
+/// layer. The latter comes from each band's canvas checkpoints every
+/// `interval` layers ([`checkpoint_interval`]: `⌈√N⌉` unless memory caps
+/// them; the bands' checkpoints together hold as many canvases as one set
+/// of whole-canvas checkpoints would), replayed one segment at a time and
+/// kept only inside each layer's bounding box.
+fn run<F: Real>(
     scene: &Scene<F>,
-    tris: &mut [Tri],
-    fit: bool,
-    gradient: bool,
+    tris: &[Tri],
+    pass: Pass,
     work: &mut Workspace<F>,
 ) -> Vec<[f64; PARAMS]> {
-    let width = scene.width;
-    let pixels = width * scene.height;
     let n = tris.len();
-    let mut layers: Vec<Prepared<F>> = tris
-        .iter()
-        .map(|tri| Prepared::new(tri, scene.filter, width, scene.height))
-        .collect();
-    let interval = checkpoint_interval(n, 3 * pixels * size_of::<F>());
-    let segments = n.div_ceil(interval);
-    forward(scene, &layers, interval, work);
-
-    work.transmittance.clear();
-    work.transmittance.resize(pixels, F::of(1.0));
-    work.below.resize_with(interval, Vec::new);
-    let mut gradients = vec![[0.0; PARAMS]; if gradient { n } else { 0 }];
-    for segment in (0..segments).rev() {
-        let start = segment * interval;
-        let end = (start + interval).min(n);
-        // Replay the segment, keeping the canvas below each layer inside
-        // its bounding box.
-        work.canvas.copy_from_slice(&work.checkpoints[segment]);
-        for (offset, layer) in layers[start..end].iter().enumerate() {
-            let below = &mut work.below[offset];
-            below.clear();
-            for y in layer.y0..layer.y1 {
-                let row = 3 * (y * width);
-                below.extend_from_slice(&work.canvas[row + 3 * layer.x0..row + 3 * layer.x1]);
+    let layers = prepare(scene, tris);
+    let interval = checkpoint_interval(n, 3 * scene.width * scene.height * size_of::<F>());
+    let bands = work.bands(scene.height);
+    bands
+        .par_iter_mut()
+        .for_each(|band| band.pass(scene, &layers, interval, pass));
+    let mut totals = vec![[0.0; PARAMS]; n];
+    for band in bands.iter() {
+        for (total, sums) in totals.iter_mut().zip(&band.sums) {
+            for (total, value) in total.iter_mut().zip(sums) {
+                *total += value;
             }
-            paint(&mut work.canvas, width, layer);
-        }
-        for index in (start..end).rev() {
-            let layer = &mut layers[index];
-            if layer.area() == 0 {
-                continue;
-            }
-            let delta = if fit {
-                fit_color(layer, &work.residual, &work.transmittance, width)
-            } else {
-                None
-            };
-            if let Some(delta) = delta {
-                let tri = &mut tris[index];
-                for ((color, prepared), change) in
-                    tri.color.iter_mut().zip(&mut layer.color).zip(delta)
-                {
-                    *color += change;
-                    *prepared = F::of(*color);
-                }
-            }
-            descend(
-                layer,
-                &work.below[index - start],
-                &mut work.residual,
-                &mut work.transmittance,
-                width,
-                delta,
-                gradient.then(|| &mut gradients[index]),
-            );
         }
     }
-    gradients
+    totals
 }
 
-/// The change of `layer`'s colour that minimises the loss with every
-/// other layer fixed, clamped to `0..=255`: with `g = A · w`,
-/// `Δs = −Σ g · R / Σ g²` per channel. `None` if the layer has no weight.
-fn fit_color<F: Real>(
-    layer: &Prepared<F>,
-    residual: &[F],
-    transmittance: &[F],
-    width: usize,
-) -> Option<[f64; 3]> {
-    let row = 3 * width;
-    let task = |(index, (r, a)): (usize, (&[F], &[F]))| {
-        let mut sums = [0.0_f64; 4];
-        for local in 0..a.len() / width {
-            let y = layer.y0 + index * ROWS + local;
-            for x in layer.x0..layer.x1 {
-                let cov = layer.coverage(F::of(x as f64), F::of(y as f64));
-                if cov > F::of(0.0) {
-                    let g = (a[local * width + x] * layer.opacity * cov).get();
-                    for c in 0..3 {
-                        sums[c] += g * r[local * row + 3 * x + c].get();
-                    }
-                    sums[3] += g * g;
-                }
-            }
-        }
-        sums
-    };
-    let r = &residual[layer.y0 * row..layer.y1 * row];
-    let a = &transmittance[layer.y0 * width..layer.y1 * width];
-    let partials: Vec<[f64; 4]> = if layer.area() >= PARALLEL_PIXELS {
-        r.par_chunks(ROWS * row)
-            .zip(a.par_chunks(ROWS * width))
-            .enumerate()
-            .map(task)
-            .collect()
-    } else {
-        r.chunks(ROWS * row)
-            .zip(a.chunks(ROWS * width))
-            .enumerate()
-            .map(task)
-            .collect()
-    };
-    let mut sums = [0.0; 4];
-    for partial in partials {
-        for (sum, value) in sums.iter_mut().zip(partial) {
-            *sum += value;
-        }
-    }
-    (sums[3] > 0.0).then(|| {
-        std::array::from_fn(|c| {
-            let old = layer.color[c].get();
-            (old - sums[c] / sums[3]).clamp(0.0, 255.0) - old
-        })
-    })
+/// The gradient of the loss `Σ (X − T)²` per triangle of `tris`, the
+/// colours held constant.
+pub(super) fn gradients<F: Real>(
+    scene: &Scene<F>,
+    tris: &[Tri],
+    work: &mut Workspace<F>,
+) -> Vec<[f64; PARAMS]> {
+    run(scene, tris, Pass::Gradient, work)
 }
 
-/// One task of [`descend`]: its index, and its rows of the residual, the
-/// transmittance and the canvas below.
-type DescendTask<'a, F> = (usize, ((&'a mut [F], &'a mut [F]), &'a [F]));
-
-/// The reverse step through `layer`: applies the colour change `delta` to
-/// the residual (`R += g · Δs`), accumulates the gradient
-/// `∂L/∂w = 2 A Σ_c R_c (s_c − X_{i−1,c})` into the vertices and alpha, and
-/// folds the layer into the transmittance (`A ← A · (1 − w)`).
-fn descend<F: Real>(
-    layer: &Prepared<F>,
-    below: &[F],
-    residual: &mut [F],
-    transmittance: &mut [F],
-    width: usize,
-    delta: Option<[f64; 3]>,
-    gradient: Option<&mut [f64; PARAMS]>,
-) {
-    let row = 3 * width;
-    let box_width = layer.x1 - layer.x0;
-    let want_gradient = gradient.is_some();
-    let delta = delta.map(|delta| delta.map(F::of));
-    let task = |(index, ((r, a), below)): DescendTask<'_, F>| {
-        let mut sums = [0.0_f64; PARAMS];
-        for local in 0..a.len() / width {
-            let y = F::of((layer.y0 + index * ROWS + local) as f64);
-            for x in layer.x0..layer.x1 {
-                let fx = F::of(x as f64);
-                let (cov, cov_grad) = if want_gradient {
-                    match layer.coverage_grad(fx, y) {
-                        Some(value) => value,
-                        None => continue,
-                    }
-                } else {
-                    let cov = layer.coverage(fx, y);
-                    if cov <= F::of(0.0) {
-                        continue;
-                    }
-                    (cov, [F::of(0.0); 6])
-                };
-                let p = local * width + x;
-                let transmitted = a[p];
-                let w = layer.opacity * cov;
-                let pixel = &mut r[local * row + 3 * x..local * row + 3 * x + 3];
-                if let Some(delta) = delta {
-                    let g = transmitted * w;
-                    for c in 0..3 {
-                        pixel[c] += g * delta[c];
-                    }
-                }
-                if want_gradient {
-                    let x_below = &below[3 * (local * box_width + x - layer.x0)..][..3];
-                    let mut dot = F::of(0.0);
-                    for c in 0..3 {
-                        dot += pixel[c] * (layer.color[c] - x_below[c]);
-                    }
-                    let dl_dw = (F::of(2.0) * transmitted * dot).get();
-                    if dl_dw != 0.0 {
-                        let opacity = layer.opacity.get();
-                        for (sum, d) in sums.iter_mut().zip(cov_grad) {
-                            *sum += dl_dw * opacity * d.get();
-                        }
-                        sums[6] += dl_dw * cov.get() / 255.0;
-                    }
-                }
-                a[p] = transmitted * (F::of(1.0) - w);
-            }
-        }
-        sums
-    };
-    let r = &mut residual[layer.y0 * row..layer.y1 * row];
-    let a = &mut transmittance[layer.y0 * width..layer.y1 * width];
-    let partials: Vec<[f64; PARAMS]> = if layer.area() >= PARALLEL_PIXELS {
-        r.par_chunks_mut(ROWS * row)
-            .zip(a.par_chunks_mut(ROWS * width))
-            .zip(below.par_chunks(ROWS * 3 * box_width))
-            .enumerate()
-            .map(task)
-            .collect()
-    } else {
-        r.chunks_mut(ROWS * row)
-            .zip(a.chunks_mut(ROWS * width))
-            .zip(below.chunks(ROWS * 3 * box_width))
-            .enumerate()
-            .map(task)
-            .collect()
-    };
-    if let Some(gradient) = gradient {
-        for partial in partials {
-            for (sum, value) in gradient.iter_mut().zip(partial) {
-                *sum += value;
+/// Refits every colour of `tris` together, from the residual of the stack
+/// as it is (one Jacobi step), so that the pass needs no barrier per layer.
+///
+/// The loss is quadratic in the colours, with Hessian `2 Gᵀ G` where
+/// `G[p][i] = g_i(p)`, per channel. Every `g` is non-negative and, at each
+/// pixel, the weights of all layers add up to `1 − T`, with `T` the
+/// transmittance of the whole stack, so the diagonal
+/// `D_i = Σ_p g_i · (1 − T)` (each row's sum) majorises the Hessian. Each
+/// channel then moves to `s − ω Σ g · R / D_i`, clamped to `0..=255`, with
+/// `ω` the [`OVER_RELAXATION`]: for `ω < 2` this projected step on a
+/// majorised quadratic never raises the loss, however much the layers
+/// overlap, where a plain Jacobi step (`Σ g²` for `D`) can diverge.
+pub(super) fn fit<F: Real>(scene: &Scene<F>, tris: &mut [Tri], work: &mut Workspace<F>) {
+    let totals = run(scene, tris, Pass::Fit, work);
+    for (tri, total) in tris.iter_mut().zip(&totals) {
+        let weight = total[FIT_WEIGHT];
+        if weight > 0.0 {
+            for (c, color) in tri.color.iter_mut().enumerate() {
+                *color = (*color - OVER_RELAXATION * total[c] / weight).clamp(0.0, 255.0);
             }
         }
     }
@@ -747,13 +808,7 @@ pub(super) mod tests {
         let mut scene = random_scene::<f64>(&mut rng, 32, 32);
         scene.filter = filter;
         let tris = random_tris(&mut rng, count, 32.0);
-        let analytic = sweep(
-            &scene,
-            &mut tris.clone(),
-            false,
-            true,
-            &mut Workspace::default(),
-        );
+        let analytic = gradients(&scene, &tris, &mut Workspace::default());
         let mut numeric = vec![[0.0; PARAMS]; count];
         for (index, grads) in numeric.iter_mut().enumerate() {
             for (k, grad) in grads.iter_mut().enumerate() {
@@ -984,28 +1039,145 @@ pub(super) mod tests {
         }
     }
 
-    /// The residual the colour fit updates in place is the residual of
-    /// the refitted stack, the fit never raises the loss, and `f32`
-    /// compositing agrees with `f64`.
+    /// Every layer's colour after one Jacobi step from `tris`, computed
+    /// pixel by pixel from [`Prepared::coverage`] alone: each layer moves
+    /// against the residual of the stack as it is, with every other layer
+    /// at its colour, to `s − ω Σ g R / D` clamped to `0..=255`, with
+    /// `g = A · opacity · coverage`. `D` is `Σ g Σ_j g_j` (the sum over
+    /// every layer `j` at the pixel) with `majorised`, and `Σ g²` (the
+    /// closed-form fit of the layer alone) without.
+    fn jacobi_colours(scene: &Scene<f64>, tris: &[Tri], majorised: bool, omega: f64) -> Vec<Tri> {
+        let layers: Vec<Prepared<f64>> = tris
+            .iter()
+            .map(|tri| Prepared::new(tri, scene.filter, scene.width, scene.height))
+            .collect();
+        let mut sums = vec![[0.0; 4]; tris.len()];
+        for y in 0..scene.height {
+            for x in 0..scene.width {
+                let (fx, fy) = (x as f64, y as f64);
+                // The model composites each layer inside its bounding box
+                // only.
+                let weights: Vec<f64> = layers
+                    .iter()
+                    .map(|layer| {
+                        let inside =
+                            (layer.x0..layer.x1).contains(&x) && (layer.y0..layer.y1).contains(&y);
+                        if inside {
+                            layer.opacity * layer.coverage(fx, fy)
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect();
+                let mut canvas = scene.background;
+                for (layer, w) in layers.iter().zip(&weights) {
+                    for (value, color) in canvas.iter_mut().zip(layer.color) {
+                        *value += w * (color - *value);
+                    }
+                }
+                let p = 3 * (y * scene.width + x);
+                let residual: [f64; 3] = std::array::from_fn(|c| canvas[c] - scene.target[p + c]);
+                let mut g = vec![0.0; layers.len()];
+                let mut above = 1.0;
+                for (g, w) in g.iter_mut().zip(&weights).rev() {
+                    *g = above * w;
+                    above *= 1.0 - w;
+                }
+                let all: f64 = g.iter().sum();
+                for (sum, g) in sums.iter_mut().zip(&g) {
+                    for c in 0..3 {
+                        sum[c] += g * residual[c];
+                    }
+                    sum[3] += g * if majorised { all } else { *g };
+                }
+            }
+        }
+        tris.iter()
+            .zip(sums)
+            .map(|(tri, sum)| Tri {
+                color: std::array::from_fn(|c| {
+                    let old = tri.color[c];
+                    if sum[3] > 0.0 {
+                        (old - omega * sum[c] / sum[3]).clamp(0.0, 255.0)
+                    } else {
+                        old
+                    }
+                }),
+                ..*tri
+            })
+            .collect()
+    }
+
+    /// A fit refits every colour together from the residual of the stack
+    /// as it is (one Jacobi step), with the majorised weights. The scene's
+    /// 40 rows are not a multiple of the band height.
     #[test]
-    fn colour_fit_updates_the_residual_exactly_and_lowers_the_loss() {
+    fn colours_are_refitted_together_from_the_same_residual() {
+        let mut rng = ChaCha8Rng::seed_from_u64(21);
+        let scene = random_scene::<f64>(&mut rng, 48, 40);
+        let tris = random_tris(&mut rng, 9, 48.0);
+        let expected = jacobi_colours(&scene, &tris, true, OVER_RELAXATION);
+        let mut fitted = tris.clone();
+        fit(&scene, &mut fitted, &mut Workspace::default());
+        for (index, (tri, expected)) in fitted.iter().zip(&expected).enumerate() {
+            for c in 0..3 {
+                assert!(
+                    (tri.color[c] - expected.color[c]).abs() <= 1e-9,
+                    "layer {index}: {:?} vs {:?}",
+                    tri.color,
+                    expected.color
+                );
+            }
+        }
+        assert_ne!(fitted, tris);
+        assert_eq!(
+            fitted
+                .iter()
+                .map(|tri| (tri.vertices, tri.alpha))
+                .collect::<Vec<_>>(),
+            tris.iter()
+                .map(|tri| (tri.vertices, tri.alpha))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// On a deep stack of large translucent layers, where a plain Jacobi
+    /// step raises the loss, every fit lowers it.
+    #[test]
+    fn colour_fits_lower_the_loss_where_plain_jacobi_raises_it() {
+        let mut rng = ChaCha8Rng::seed_from_u64(23);
+        let scene = random_scene::<f64>(&mut rng, 48, 40);
+        let mut tris: Vec<Tri> = (0..30)
+            .map(|_| Tri {
+                vertices: std::array::from_fn(|k| {
+                    let size = if k % 2 == 0 { 48.0 } else { 40.0 };
+                    rng.random_range(-0.5 * size..1.5 * size)
+                }),
+                alpha: rng.random_range(60.0..200.0),
+                color: [128.0; 3],
+            })
+            .collect();
+        let start = fresh_loss(&scene, &tris);
+        let plain = fresh_loss(&scene, &jacobi_colours(&scene, &tris, false, 1.0));
+        assert!(plain > start, "plain Jacobi: {start} -> {plain}");
+        let mut work = Workspace::default();
+        let mut previous = start;
+        for _ in 0..5 {
+            fit(&scene, &mut tris, &mut work);
+            let fresh = fresh_loss(&scene, &tris);
+            assert!(fresh <= previous * (1.0 + 1e-12), "{fresh} vs {previous}");
+            previous = fresh;
+        }
+        assert!(previous < start, "{start} -> {previous}");
+    }
+
+    /// `f32` compositing agrees with `f64`.
+    #[test]
+    fn single_precision_agrees_with_double() {
         let mut rng = ChaCha8Rng::seed_from_u64(21);
         let scene = random_scene::<f64>(&mut rng, 48, 40);
         let mut tris = random_tris(&mut rng, 9, 48.0);
-        let mut work = Workspace::default();
-        let mut previous = fresh_loss(&scene, &tris);
-        for _ in 0..3 {
-            sweep(&scene, &mut tris, true, true, &mut work);
-            let fitted = work.residual.clone();
-            let fresh = fresh_loss(&scene, &tris);
-            assert!(fresh <= previous * (1.0 + 1e-12), "{fresh} vs {previous}");
-            let mut fresh_work = Workspace::default();
-            loss(&scene, &tris, &mut fresh_work);
-            for (a, b) in fitted.iter().zip(&fresh_work.residual) {
-                assert!((a - b).abs() <= 1e-9, "{a} vs {b}");
-            }
-            previous = fresh;
-        }
+        fit(&scene, &mut tris, &mut Workspace::default());
         let single = Scene::<f32> {
             width: scene.width,
             height: scene.height,
@@ -1013,14 +1185,8 @@ pub(super) mod tests {
             background: scene.background.map(|v| v as f32),
             filter: 1.0,
         };
-        let wide = sweep(&scene, &mut tris.clone(), false, true, &mut work);
-        let narrow = sweep(
-            &single,
-            &mut tris.clone(),
-            false,
-            true,
-            &mut Workspace::default(),
-        );
+        let wide = gradients(&scene, &tris, &mut Workspace::default());
+        let narrow = gradients(&single, &tris, &mut Workspace::default());
         let (wide_loss, narrow_loss) = (
             fresh_loss(&scene, &tris),
             loss(&single, &tris, &mut Workspace::default()),
@@ -1031,10 +1197,10 @@ pub(super) mod tests {
         }
     }
 
-    /// Large triangles take the parallel path; the result does not depend
-    /// on the number of threads.
+    /// The loss, the gradients and the fit do not depend on the number of
+    /// threads.
     #[test]
-    fn sweeps_do_not_depend_on_the_thread_count() {
+    fn passes_do_not_depend_on_the_thread_count() {
         let run = |threads: usize| {
             let mut rng = ChaCha8Rng::seed_from_u64(33);
             let scene = random_scene::<f32>(&mut rng, 120, 100);
@@ -1043,16 +1209,21 @@ pub(super) mod tests {
                 .num_threads(threads)
                 .build()
                 .expect("pool");
-            let gradients =
-                pool.install(|| sweep(&scene, &mut tris, true, true, &mut Workspace::default()));
-            let loss = pool.install(|| loss(&scene, &tris, &mut Workspace::default()));
-            (loss, gradients, tris)
+            pool.install(|| {
+                let mut work = Workspace::default();
+                let gradients = gradients(&scene, &tris, &mut work);
+                fit(&scene, &mut tris, &mut work);
+                let loss = loss(&scene, &tris, &mut work);
+                (loss, gradients, tris)
+            })
         };
         let one = run(1);
         assert!(one.1.iter().any(|g| g.iter().any(|&v| v != 0.0)));
-        let four = run(4);
-        assert_eq!(one.0.to_bits(), four.0.to_bits());
-        assert_eq!(one.1, four.1);
-        assert_eq!(one.2, four.2);
+        for threads in [2, 4, 8] {
+            let other = run(threads);
+            assert_eq!(one.0.to_bits(), other.0.to_bits(), "{threads} threads");
+            assert_eq!(one.1, other.1, "{threads} threads");
+            assert_eq!(one.2, other.2, "{threads} threads");
+        }
     }
 }

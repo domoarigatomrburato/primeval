@@ -867,8 +867,8 @@ mod tests {
     }
 
     /// Renders a 100 × 80 gradient as SVG with triangles inside a
-    /// dedicated pool of `threads` threads: large enough for the joint
-    /// optimisation's parallel path.
+    /// dedicated pool of `threads` threads: several bands of the joint
+    /// optimisation's passes.
     fn triangle_svg_on_threads(threads: usize) -> String {
         let image = RgbaImage::from_fn(100, 80, |x, y| {
             let ring = (x as i32 - 40).pow(2) + (y as i32 - 35).pow(2) < 600;
@@ -904,7 +904,7 @@ mod tests {
     #[test]
     fn same_seed_triangle_svg_is_identical_across_thread_counts() {
         let reference = triangle_svg_on_threads(1);
-        for threads in [2, 4] {
+        for threads in [2, 4, 8] {
             assert!(
                 triangle_svg_on_threads(threads) == reference,
                 "{threads} threads changed the SVG"
