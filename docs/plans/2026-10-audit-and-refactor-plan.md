@@ -652,6 +652,7 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
 6. Fix `quadratic` (`0a28286`).
 7. B pilot (succeeded).
 8. Ablation (gradients matter at equal time).
+9. B with the minimum angle (passed).
 
 **Requirement (user decision): shapes must read as their kind.**
 - Triangles keep the engine's 15° minimum angle (`Triangle::is_valid`) in every optimiser, B included. A sliver does not look like a triangle, and gains that come from slivers do not count.
@@ -675,21 +676,35 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
 - **Look.** Projected triangles cluster just above 15°, as greedy's integer triangles already do; the penalty moves that cluster to 16–18°. On the paintings the output reads as ordinary triangles with sharper features than A1's.
 - **Choice.** (a) and (b) differ by at most 0.5 points; either works.
 
-**Next:**
-
-10. **Decide how to productise B** (step 9 passed). The user decides; an independent review is advisable first. Candidate shape:
-- B becomes the final stage of `approximate` and exports its 0.25 px drawing directly, with no A1 pass after it.
-- It starts with the polygonal kinds (triangle, then rectangle, rotated rectangle and convex polygon, which share the half-plane coverage). Layers of other kinds stay fixed in the composite.
-- **Needed:**
-  - cancellation between iterations;
-  - multi-threading by image bands;
-  - the minimum-angle rule, as in step 9;
-  - deterministic reductions, which the pilot already has;
-  - a time budget per shape count that stays within 2× greedy in single-threaded wasm.
-- **Open questions:**
-  - whether the engine's greedy search should also get anti-aliased coverage;
-  - the curved kinds (ellipses, circles, `quadratic`) and `any`, the default, whose layers mix every kind;
-  - whether B replaces the A1 pass or follows it.
+**Productising B (step 10, decided 2026-10-03 after an independent review).**
+- **Shape.**
+  - B is a terminal stage beside the engine, `Drawing -> Drawing`, in a new `primeval-core` module. `Drawing` is already `f64` and both writers take fractional coordinates, so the engine's integer shape types do not change.
+  - `approximate` runs it after greedy, in place of A1, for the layers it covers. A1 stays for the kinds B does not cover yet, and as the fallback when B is skipped. A1 after B is out: it is measured to hurt.
+  - Layers B covers: half-plane kinds (triangle, rectangle, rotated rectangle, polygon). Other layers stay fixed in geometry, but their colour and alpha are still fitted.
+  - Minimum angle by projection, as arm (a) of step 9.
+  - The output snaps to 0.25 px. Axis-aligned rectangles may need a coarser snap, since 0.25 px costs them about 8 bytes each.
+- **Requirements.**
+  - Seeded output does not depend on the thread count. The iteration count K is a function of the request only, never of elapsed time.
+  - Native and wasm output stay identical (the browser tripwire test). B's arithmetic uses only `+ − × ÷` and `sqrt`: no libm calls such as `hypot`, `atan2`, `cos`, `powi`, `exp`, and no `mul_add`.
+  - Cancellation between iterations.
+  - Checkpoint memory capped as in A1, with A1 as the fallback above a size threshold.
+  - Budget: B's extra time is at most 0.5× greedy at 1 thread and at most 1× at 8 threads, at 100–200 shapes. The pilot runs at 1.0× greedy at 8 threads with K = 50, because it barely uses threads.
+- **User decisions.**
+  - Polygons must be convex, with the 15° minimum interior angle, in every optimiser, greedy included. A crossed quad reads as two triangles.
+  - Rotated rectangles get an aspect-ratio cap, set from the distribution of greedy's current output.
+  - Tiny triangles (sub-pixel but angle-valid): count them first, then decide.
+  - A silent "Refining" phase of 1–2 s in the single-threaded browser is acceptable, as long as it stays cancellable. `onProgress` does not change.
+  - `ApproximateResult.score` may become B's model RMSE, which is closer to the exported PNG's.
+  - Native–wasm identity is a requirement for B.
+  - Killed: anti-aliased coverage in the greedy search. Binary coverage costs no fidelity there, and B fixes coverage at the end.
+- **Experiments, in order:**
+  1. **Port the pilot (triangle only)** into the module, wired into `approximate` for `triangle`. Success: within 0.3 points of the pilot's `Bp50`/`Bp150` at 100 and 200 shapes, and native and wasm SVG identical.
+  2. **Band-parallel sweep** (fixed bands, one fork-join per pass, colours refitted together, Jacobi). Success: at least 3× faster at 8 threads, at most 0.5 points lost, identical output at 1, 4 and 8 threads. Kill: Jacobi loses more than 1 point; then fall back to per-layer barriers and accept about 1× greedy at 8 threads with K = 50.
+  3. **K per shape count**, from {32, 64, 100, 150} at 50 to 500 shapes: the smallest K within 0.5 points of 150 that meets the budget.
+  4. **`any`**: curved layers fixed, plus rectangle, rotated rectangle and convex polygon, each with its legibility rule. Success: at least 3 points over equal-time A1 at 100 and 200 shapes, zero violations, SVG bytes at most +3%. Kill: under 2 points; then B covers triangles and rectangles only, and the plan is revisited.
+  5. **A1 then B** at equal time. Keep only if it gains at least 0.5 points.
+  6. **Scale guard** at `resizeInput` 1024 and 2048 and counts of 500 and 2000: peak memory and time ratio. This sets the fallback threshold.
+  7. **Curved kinds** with their own smooth coverage: later, and perhaps never for `quadratic`.
 
 **Before merging the branch** (user decision: it merges once, when B's productisation is done too, with no intermediate merge):
 - regenerate the gallery, the README comparison images and the versus-Go numbers (`CONTRIBUTING.md`), which output changes make stale;
