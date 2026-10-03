@@ -598,6 +598,31 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
   - 3 px would fit better still (−26% and −54% at 100 and 200), but changes the look more.
 - **Still open:** `quadratic`'s ssim128 still falls from 50 to 100 shapes.
 
+**B pilot (step 7, branch `lab/b-pilot`, `90ca491`; not for merging).**
+- **Method.**
+  - Triangles only, from greedy.
+  - Adam on every vertex and alpha jointly (learning rate 1 px and 10 levels, cosine decay), for K iterations.
+  - Forward model: the exact box-filtered half-plane coverage, as a product over the three edges, composited in f32. Its coverage is within 0.02–0.05 of tiny-skia's on edge pixels, against 0.24–0.30 for the engine's binary triangles.
+  - Closed-form colours, refitted every iteration.
+  - Reverse-mode gradients over √N checkpoints, checked against finite differences (relative error ≤ 1e-6).
+  - A snap to 0.25 px for direct export, or to whole pixels followed by one A1 pass.
+- **Result** (triangles, the default corpus): B's advantage over A1 at equal single-threaded time, in points of greedy's median rmse256:
+
+| Shapes | B, 0.25 px, K = 50 | B, 0.25 px, K = 150 | B, 1 px + A1, K = 50 | B, 1 px + A1, K = 150 |
+| ---: | ---: | ---: | ---: | ---: |
+| 100 | +5.7 | +6.1 | +3.5 | +3.6 |
+| 200 | +9.5 | +9.2 | +4.2 | +4.0 |
+
+  - The A1 comparator is greedy plus P passes, with P from 2 to 12, matched to B's time.
+  - At 0.25 px B wins on all 5 images. SVG bytes are 1–2% below greedy's, and B takes 1.2–1.8× greedy's single-threaded time. It passes every success criterion.
+- **Findings.**
+  - Snapping to whole pixels gives back 1–5% of rmse256, and more on sharp synthetic edges.
+  - An A1 pass after B worsens rmse256 although it lowers the engine score. It fits the binary canvas and undoes geometry tuned for anti-aliased edges.
+  - 0.25 px coordinates cost no SVG bytes: the writer already prints up to 3 decimals. The engine's integer triangles cannot hold them, though.
+  - B barely uses threads (per-layer fork-join overhead), so the multi-threaded comparison handicaps it by about 1 point.
+  - B costs 5.5–9.6 ms per iteration per image at 50–200 shapes, single-threaded.
+- **Open question.** B combines three advantages: joint gradient search, anti-aliased coverage (what the export draws) and sub-pixel coordinates. The pilot does not separate them. Step 3 and the literature suggest that a step-adapted search could capture the first.
+
 **Done:**
 1. The measurement fix (runner metrics and summaries).
 2. A1 in `approximate` (`192714e`).
@@ -605,15 +630,15 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
 4. Engine and export agreement (`8c1ee09`).
 5. Remove and re-add (killed).
 6. Fix `quadratic` (`0a28286`).
+7. B pilot (succeeded; `lab/b-pilot`).
 
-**Next.** Success and kill thresholds are on median rmse256, overall and for `any` and `triangle`; overall medians alone can sit on a kind that does not react.
+**Next.**
 
-7. **B pilot** (step 3 showed that fine polish pays).
-   - The gap diagnosis removed the fidelity argument for smooth coverage, and step-adapted moves already capture much of the polish, so B must win on search quality alone, against the adapted refit.
-   - **Design:** triangles only; colour stays the closed-form fit; Adam on geometry and alpha; coordinates quantised to 0.25 px at export; then snap, exact verify, and one cheap A1 pass.
-   - **Baseline:** the best A1 at equal time, not greedy. More passes keep paying (step 5), so the baseline is `end:P` with P chosen to match B's time.
-   - **Success:** at least 3 points better, at most +10% SVG bytes, and at most 2× greedy time in single-threaded wasm.
-   - **Context:** the literature (ES-CLIP; Optimize & Reduce, AAAI 2024) shows step-adapted joint search matching gradient descent at this shape count, and has no greedy-plus-gradient comparison.
+8. **Ablation: gradients, or coverage and precision?**
+   - In the pilot's harness, run A1's step-adapted top-down climbs (1/5th rule, scales down to 0.25 px) against the same smooth forward model and continuous coordinates, at B's time. Add a variant with integer coordinates.
+   - **If A1 on the smooth model comes within about 1 point of B:** the gain is the coverage and the precision. Productise by giving the engine anti-aliased coverage and sub-pixel coordinates for every kind, keeping today's search, which already handles every kind.
+   - **If B leads by 3 points or more:** productise B as the final stage, exporting its drawing directly. That needs smooth coverage and gradients per kind, real multi-threading, and cancellation.
+   - **In between:** compare the two productisation costs.
 
 **Before merging the branch:**
 - regenerate the gallery, the README comparison images and the versus-Go numbers (`CONTRIBUTING.md`), which output changes make stale;
