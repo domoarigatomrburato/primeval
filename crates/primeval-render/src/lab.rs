@@ -38,8 +38,9 @@ pub fn working_image(input: &[u8], render: &RenderOptions) -> Result<RgbImage, A
 
 /// Runs [`crate::approximate`]'s final stage on `model`, a search after
 /// its last greedy step, exactly as [`crate::approximate`] runs it: for
-/// triangles and polygons the joint optimisation of every shape, which
-/// leaves `model` unchanged, otherwise one refit pass of `model`. `iterations`, if set,
+/// triangles, polygons, rectangles and rotated rectangles the joint
+/// optimisation of every shape, which leaves `model` unchanged, otherwise
+/// one refit pass of `model`. `iterations`, if set,
 /// overrides the joint optimisation's iteration count, which otherwise
 /// follows the number of shapes ([`joint::Settings::iterations`]).
 ///
@@ -66,7 +67,8 @@ pub fn final_stage(
 
 /// An experimental final stage for any shape kind: `refits` refit passes
 /// of `model` ([`Model::refine`]), then the joint optimisation of its
-/// triangles and polygons with every other shape fixed in geometry
+/// triangles, polygons and rectangles, rotated or not, with every other
+/// shape fixed in geometry
 /// ([`joint::optimise`]), with `iterations` overriding its count. Returns
 /// the drawing and its model's RMSE ([`joint::score`]).
 pub fn joint_stage(
@@ -254,13 +256,19 @@ mod tests {
     }
 
     /// The final stage's score is the joint optimisation's model RMSE of
-    /// its drawing for triangles and polygons, and the refitted model's
+    /// its drawing for the kinds it covers, and the refitted model's
     /// score for the other kinds; an iteration count overrides the joint
     /// optimisation's.
     #[test]
     fn the_final_stage_scores_its_drawing() {
         let input = png_bytes(&fixture());
-        for shape in [ShapeKind::Triangle, ShapeKind::Polygon, ShapeKind::Ellipse] {
+        for shape in [
+            ShapeKind::Triangle,
+            ShapeKind::Polygon,
+            ShapeKind::Rectangle,
+            ShapeKind::RotatedRectangle,
+            ShapeKind::Ellipse,
+        ] {
             let render = RenderOptions {
                 count: 5,
                 seed: Some(11),

@@ -17,8 +17,9 @@
 //!                       `every:K` one pass after every K-th step,
 //!                       `final` runs `approximate`'s final stage at each
 //!                       checkpoint, `joint:R` (lab only) R refit passes
-//!                       then the joint optimisation of the triangles and
-//!                       polygons, every other shape fixed in geometry, at
+//!                       then the joint optimisation of the triangles,
+//!                       polygons and rectangles, rotated or not, every
+//!                       other shape fixed in geometry, at
 //!                       each checkpoint, whatever `approximate` runs for
 //!                       the kind
 //!   --iterations K      with `--refine final` or `joint:R`: the joint
@@ -31,9 +32,9 @@
 //! checkpoint, with seed 42 and default options otherwise. It drives
 //! [`primeval_core::Model`] itself through `primeval_render::lab`, which
 //! reproduces `approximate`'s search and encoding exactly. `approximate`
-//! ends with its final stage: for triangles and polygons the joint gradient
-//! optimisation of every shape (`primeval_core::joint`), for every other
-//! kind one refit pass. The rows of `--refine final` are what it returns
+//! ends with its final stage: for triangles, polygons, rectangles and
+//! rotated rectangles the joint gradient optimisation of every shape
+//! (`primeval_core::joint`), for every other kind one refit pass. The rows of `--refine final` are what it returns
 //! for that step count (and of `--refine end:1` too, for the other kinds);
 //! rows without `--refine` are the greedy search alone. At each checkpoint
 //! it records one row.
@@ -112,9 +113,12 @@
 //!   output size.
 //! - `violations`, in the per-kind summary only: the drawing's shapes that
 //!   break the legibility rules, checked independently with `acos` angles:
-//!   triangles with an angle of 15° or less, and quadrilaterals (polygons
+//!   triangles with an angle of 15° or less; quadrilaterals (polygons
 //!   and rotated rectangles) whose diagonals do not cross strictly, that is
-//!   not strictly convex, or with an angle of 15° or less.
+//!   not strictly convex, or with an angle of 15° or less; and rectangles,
+//!   axis-aligned or rotated, with a side under 1 px or a long side more
+//!   than 8 times the short one. With `rotated-rectangle`, a quadrilateral
+//!   that is not a rectangle is one too.
 //!
 //! Summaries. The median of an even number of values is the mean of the two
 //! middle ones.
@@ -204,7 +208,7 @@ impl Refine {
             Self::Final => "final (approximate's final stage at each checkpoint)".to_owned(),
             Self::Joint(refits) => format!(
                 "joint:{refits} ({refits} refit passes, then the joint optimisation of the \
-                 triangles and polygons, at each checkpoint)"
+                 triangles, polygons and rectangles, at each checkpoint)"
             ),
         }
     }
@@ -498,37 +502,65 @@ fn search(
             small: png(&drawing, SMALL_SIZE)?,
             output: png(&drawing, render.output_size)?,
             svg_bytes,
-            violations: violations(&drawing),
+            violations: violations(&drawing, render.shape),
         });
     }
     Ok(recorded)
 }
 
-/// The shapes of `drawing` that break the legibility rules: triangles
-/// with an angle of 15° or less, and quadrilaterals that are not strictly
-/// convex (their diagonals do not cross strictly inside both) or have an
-/// angle of 15° or less. Angles by `acos`, independently of the engine's
-/// checks.
-fn violations(drawing: &Drawing) -> usize {
+/// The shapes of `drawing`, a drawing of `kind`, that break the
+/// legibility rules: triangles with an angle of 15° or less;
+/// quadrilaterals that are not strictly convex (their diagonals do not
+/// cross strictly inside both) or have an angle of 15° or less; rectangles
+/// with a side under 1 px or a long side more than 8 times the short one,
+/// up to a relative `1e-9`, the rounding of computed corners. The
+/// quadrilaterals of `rotated-rectangle` must be rectangles, every angle
+/// within `1e-6`° of 90°, and so are taken those of `any` that are.
+/// Angles by `acos`, independently of the engine's checks.
+fn violations(drawing: &Drawing, kind: ShapeKind) -> usize {
+    let bad_sides = |a: f64, b: f64| {
+        let (long, short) = (a.max(b), a.min(b));
+        short < 1.0 - 1e-9 || long > 8.0 * short * (1.0 + 1e-9)
+    };
     drawing
         .shapes
         .iter()
         .filter(|shape| {
-            let Geometry::Polygon(points) = &shape.geometry else {
-                return false;
+            let points = match &shape.geometry {
+                Geometry::Polygon(points) => points,
+                &Geometry::Rect { width, height, .. } => return bad_sides(width, height),
+                _ => return false,
             };
             let n = points.len();
-            let sharp = (0..n).any(|p| {
-                let (a, b, c) = (points[(p + n - 1) % n], points[p], points[(p + 1) % n]);
-                let (ux, uy, wx, wy) = (c.x - b.x, c.y - b.y, a.x - b.x, a.y - b.y);
-                let lengths = ux.hypot(uy) * wx.hypot(wy);
-                lengths == 0.0
-                    || ((ux * wx + uy * wy) / lengths)
-                        .clamp(-1.0, 1.0)
-                        .acos()
-                        .to_degrees()
-                        <= 15.0
-            });
+            let angles: Vec<f64> = (0..n)
+                .map(|p| {
+                    let (a, b, c) = (points[(p + n - 1) % n], points[p], points[(p + 1) % n]);
+                    let (ux, uy, wx, wy) = (c.x - b.x, c.y - b.y, a.x - b.x, a.y - b.y);
+                    let lengths = ux.hypot(uy) * wx.hypot(wy);
+                    if lengths == 0.0 {
+                        0.0
+                    } else {
+                        ((ux * wx + uy * wy) / lengths)
+                            .clamp(-1.0, 1.0)
+                            .acos()
+                            .to_degrees()
+                    }
+                })
+                .collect();
+            let sharp = angles.iter().any(|&angle| angle <= 15.0);
+            let right = n == 4 && angles.iter().all(|angle| (angle - 90.0).abs() <= 1e-6);
+            let rectangle = right && {
+                let side = |p: usize, q: usize| {
+                    (points[q].x - points[p].x).hypot(points[q].y - points[p].y)
+                };
+                !bad_sides(side(0, 1), side(1, 2))
+            };
+            if kind == ShapeKind::RotatedRectangle && !rectangle {
+                return true;
+            }
+            if right && !rectangle {
+                return true;
+            }
             let convex = n != 4 || {
                 let (p, r) = (
                     points[0],

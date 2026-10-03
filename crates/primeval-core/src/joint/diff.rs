@@ -2,9 +2,11 @@
 //! model, reverse-mode gradients through the layer stack and the colour
 //! fit. The arithmetic rule of [`super`] applies to everything here.
 //!
-//! A layer is a triangle or a convex quadrilateral, covered by the product
-//! of its edges' box-filtered half-planes, or a fixed layer, covered by a
-//! [`Mask`] that does not move.
+//! A layer is a triangle, a convex quadrilateral or a rotated rectangle,
+//! covered by the product of its edges' box-filtered half-planes; an
+//! axis-aligned rectangle, covered by the product of its four sides'
+//! box-filtered half-planes, which for an axis-aligned box is its exact
+//! pixel area; or a fixed layer, covered by a [`Mask`] that does not move.
 //!
 //! Coordinates are the engine's: the centre of pixel `(i, j)` is `(i, j)`,
 //! so a vertex `v` is the drawing's `v + 0.5`.
@@ -60,21 +62,31 @@ impl Real for f64 {
 /// the engine runner's corpus.
 pub(super) const OVER_RELAXATION: f64 = 1.5;
 
-/// Vertex coordinates per layer: `x0, y0, …, x3, y3`; a triangle uses the
-/// first six.
+/// Geometric parameters per layer, at most: a quadrilateral's vertex
+/// coordinates `x0, y0, …, x3, y3`. The other outlines use the first
+/// [`Outline::params`].
 pub(super) const COORDS: usize = 8;
-/// The gradient entry of the opacity, after the vertex coordinates.
+/// The gradient entry of the opacity, after the geometric parameters.
 pub(super) const ALPHA: usize = COORDS;
-/// Gradient entries per layer: the vertex coordinates, then the opacity.
+/// Gradient entries per layer: the geometric parameters, then the opacity.
 pub(super) const PARAMS: usize = COORDS + 1;
 
 /// What covers a layer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Outline {
-    /// A triangle through the first three vertices.
+    /// A triangle through three vertices, parameters `x0, y0, x1, y1, x2,
+    /// y2`.
     Triangle,
-    /// A convex quadrilateral through the four vertices.
+    /// A convex quadrilateral through four vertices, parameters `x0, y0,
+    /// …, x3, y3`.
     Quad,
+    /// An axis-aligned rectangle `x0 ≤ x ≤ x1`, `y0 ≤ y ≤ y1`, parameters
+    /// `x0, y0, x1, y1`.
+    Rect,
+    /// A rectangle of centre `c`, half-side vector `u` and half-width `h`
+    /// along `u`'s perpendicular, parameters `cx, cy, ux, uy, h`: its
+    /// corners are `c ± u ± (h / |u|) · (−u_y, u_x)` ([`Layer::corners`]).
+    Rotated,
     /// A fixed shape: the [`Scene::masks`] entry of this index, which does
     /// not move; only its opacity and colour are optimised.
     Fixed(usize),
@@ -85,7 +97,18 @@ impl Outline {
     pub(super) fn sides(self) -> usize {
         match self {
             Self::Triangle => 3,
-            Self::Quad => 4,
+            Self::Quad | Self::Rect | Self::Rotated => 4,
+            Self::Fixed(_) => 0,
+        }
+    }
+
+    /// The number of geometric parameters, `0` for a fixed layer.
+    pub(super) fn params(self) -> usize {
+        match self {
+            Self::Triangle => 6,
+            Self::Quad => 8,
+            Self::Rect => 4,
+            Self::Rotated => 5,
             Self::Fixed(_) => 0,
         }
     }
@@ -95,9 +118,10 @@ impl Outline {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Layer {
     pub(super) outline: Outline,
-    /// `x0, y0, x1, y1, …` in engine coordinates; the first
-    /// `2 · outline.sides()` are used, the others are zero.
-    pub(super) vertices: [f64; COORDS],
+    /// The geometric parameters of the outline ([`Outline`]), in engine
+    /// coordinates; the first [`Outline::params`] are used, the others are
+    /// zero.
+    pub(super) params: [f64; COORDS],
     /// Opacity, `1..=255`.
     pub(super) alpha: f64,
     /// RGB, `0..=255`.
@@ -109,10 +133,75 @@ impl Layer {
     pub(super) fn triangle(v: [f64; 6], alpha: f64, color: [f64; 3]) -> Self {
         Self {
             outline: Outline::Triangle,
-            vertices: [v[0], v[1], v[2], v[3], v[4], v[5], 0.0, 0.0],
+            params: [v[0], v[1], v[2], v[3], v[4], v[5], 0.0, 0.0],
             alpha,
             color,
         }
+    }
+
+    /// The vertex coordinates of the outline, `x0, y0, …`, of which the
+    /// first `2 · outline.sides()` are used: a triangle's or a
+    /// quadrilateral's parameters; a rectangle's corners `(x0, y0)`,
+    /// `(x1, y0)`, `(x1, y1)`, `(x0, y1)`; a rotated rectangle's
+    /// `c − u − n`, `c + u − n`, `c + u + n` and `c − u + n`, with
+    /// `n = (h / |u|) · (−u_y, u_x)`, by `sqrt` alone. All zero for a fixed
+    /// layer.
+    pub(super) fn corners(&self) -> [f64; COORDS] {
+        let p = self.params;
+        match self.outline {
+            Outline::Triangle | Outline::Quad | Outline::Fixed(_) => p,
+            Outline::Rect => [p[0], p[1], p[2], p[1], p[2], p[3], p[0], p[3]],
+            Outline::Rotated => {
+                let [cx, cy, ux, uy, h, ..] = p;
+                let k = h / (ux * ux + uy * uy).sqrt().max(1e-9);
+                let (nx, ny) = (-uy * k, ux * k);
+                [
+                    cx - ux - nx,
+                    cy - uy - ny,
+                    cx + ux - nx,
+                    cy + uy - ny,
+                    cx + ux + nx,
+                    cy + uy + ny,
+                    cx - ux + nx,
+                    cy - uy + ny,
+                ]
+            }
+        }
+    }
+
+    /// The gradient with respect to the parameters, from `grad`, with
+    /// respect to the [`Self::corners`] (and the opacity, which passes
+    /// through). The same for every outline but a rotated rectangle's,
+    /// whose corners depend on `c`, `u` and `h` through `n`:
+    /// `∂n/∂h = (−u_y, u_x) / |u|` and
+    /// `∂n/∂u = (h / |u|³) · [[u_x u_y, −u_x²], [u_y², −u_x u_y]]`
+    /// (rows `n_x`, `n_y`; columns `u_x`, `u_y`).
+    fn chain(&self, grad: [f64; PARAMS]) -> [f64; PARAMS] {
+        if self.outline != Outline::Rotated {
+            return grad;
+        }
+        let [_, _, ux, uy, h, ..] = self.params;
+        let r = (ux * ux + uy * uy).sqrt().max(1e-9);
+        let r3 = r * r * r;
+        // The corners' signs on `u` and on `n`.
+        let (on_u, on_n) = ([-1.0, 1.0, 1.0, -1.0], [-1.0, -1.0, 1.0, 1.0]);
+        let (mut centre, mut along_u, mut along_n) = ([0.0; 2], [0.0; 2], [0.0; 2]);
+        for corner in 0..4 {
+            for axis in 0..2 {
+                let g = grad[2 * corner + axis];
+                centre[axis] += g;
+                along_u[axis] += on_u[corner] * g;
+                along_n[axis] += on_n[corner] * g;
+            }
+        }
+        let mut out = [0.0; PARAMS];
+        out[0] = centre[0];
+        out[1] = centre[1];
+        out[2] = along_u[0] + (along_n[0] * ux * uy + along_n[1] * uy * uy) * h / r3;
+        out[3] = along_u[1] - (along_n[0] * ux * ux + along_n[1] * ux * uy) * h / r3;
+        out[4] = (-along_n[0] * uy + along_n[1] * ux) / r;
+        out[ALPHA] = grad[ALPHA];
+        out
     }
 }
 
@@ -222,14 +311,44 @@ struct EdgeValue<F> {
     fb: F,
 }
 
+/// How a [`Prepared`] layer covers its pixels.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// A fixed layer's mask.
+    Masked,
+    /// Three edges.
+    Triangle,
+    /// Four edges: a quadrilateral or a rotated rectangle.
+    Quad,
+    /// An axis-aligned rectangle's four sides.
+    Box,
+}
+
+impl Kind {
+    /// The number of gradient entries its coverage has: the vertex
+    /// coordinates of the edges, or a rectangle's four parameters.
+    fn coords(self) -> usize {
+        match self {
+            Self::Masked => 0,
+            Self::Triangle => 6,
+            Self::Quad => 8,
+            Self::Box => 4,
+        }
+    }
+}
+
 /// A layer ready to composite: the edges of a triangle or a quadrilateral
-/// (the first `sides`) or a fixed layer's mask, its bounding box on the
-/// canvas (`x0..x1`, `y0..y1`, empty if it cannot cover any pixel), its
-/// opacity as a fraction and its colour.
+/// (the first three or four), the sides of an axis-aligned rectangle or a
+/// fixed layer's mask, its bounding box on the canvas (`x0..x1`, `y0..y1`,
+/// empty if it cannot cover any pixel), its opacity as a fraction and its
+/// colour.
 #[derive(Clone, Copy)]
 pub(super) struct Prepared<'a, F> {
+    kind: Kind,
     edges: [Edge<F>; 4],
-    sides: usize,
+    /// An axis-aligned rectangle's `x0, y0, x1, y1`, then `1 / filter`;
+    /// zero for the others.
+    rect: [F; 5],
     /// A fixed layer's coverage over the bounding box, row-major; empty
     /// for the others.
     mask: &'a [F],
@@ -328,6 +447,19 @@ impl<F: Real> Edge<F> {
     }
 }
 
+/// The pixels `start..end` of a canvas axis of `size` pixels whose
+/// centres an axis-aligned rectangle's sides at `low` and `high` cover with
+/// a box filter of width `filter`, or `None` if there are none or the
+/// rectangle is empty.
+fn box_span(low: f64, high: f64, filter: f64, size: usize) -> Option<(usize, usize)> {
+    if low >= high {
+        return None;
+    }
+    let start = (low - filter / 2.0).ceil().max(0.0);
+    let end = ((high + filter / 2.0).floor() + 1.0).min(size as f64);
+    (start < end).then_some((start as usize, end as usize))
+}
+
 /// `1` for a non-negative `value`, `−1` for a negative one: the sign the
 /// derivative of `|value|` takes, `+1` at zero.
 #[inline]
@@ -340,22 +472,51 @@ impl<'a, F: Real> Prepared<'a, F> {
         let opacity = F::of(layer.alpha / 255.0);
         let color = layer.color.map(F::of);
         let sides = layer.outline.sides();
-        if let Outline::Fixed(index) = layer.outline {
-            let mask = &scene.masks[index];
+        let kind = match layer.outline {
+            Outline::Triangle => Kind::Triangle,
+            Outline::Quad | Outline::Rotated => Kind::Quad,
+            Outline::Rect => Kind::Box,
+            Outline::Fixed(index) => {
+                let mask = &scene.masks[index];
+                return Self {
+                    kind: Kind::Masked,
+                    edges: [Edge::default(); 4],
+                    rect: [F::of(0.0); 5],
+                    mask: &mask.coverage,
+                    x0: mask.x0,
+                    x1: mask.x1,
+                    y0: mask.y0,
+                    y1: mask.y1,
+                    opacity,
+                    color,
+                };
+            }
+        };
+        let filter = scene.filter;
+        let v = layer.corners();
+        if kind == Kind::Box {
+            let p = layer.params;
+            // A side's ramp is zero from half the filter outside it.
+            let (x0, x1, y0, y1) = match (
+                box_span(p[0], p[2], filter, scene.width),
+                box_span(p[1], p[3], filter, scene.height),
+            ) {
+                (Some((x0, x1)), Some((y0, y1))) => (x0, x1, y0, y1),
+                _ => (0, 0, 0, 0),
+            };
             return Self {
+                kind,
                 edges: [Edge::default(); 4],
-                sides,
-                mask: &mask.coverage,
-                x0: mask.x0,
-                x1: mask.x1,
-                y0: mask.y0,
-                y1: mask.y1,
+                rect: [p[0], p[1], p[2], p[3], 1.0 / filter].map(F::of),
+                mask: &[],
+                x0,
+                x1,
+                y0,
+                y1,
                 opacity,
                 color,
             };
         }
-        let filter = scene.filter;
-        let v = layer.vertices;
         let cross = if sides == 3 {
             (v[2] - v[0]) * (v[5] - v[1]) - (v[3] - v[1]) * (v[4] - v[0])
         } else {
@@ -450,8 +611,9 @@ impl<'a, F: Real> Prepared<'a, F> {
             (0, 0, 0, 0)
         };
         Self {
+            kind,
             edges,
-            sides,
+            rect: [F::of(0.0); 5],
             mask: &[],
             x0,
             x1,
@@ -471,25 +633,98 @@ impl<'a, F: Real> Prepared<'a, F> {
     /// `fy` the row as a float, by the layer's [`Cover`].
     #[cfg(test)]
     fn pixel(&self, x: usize, y: usize, fy: F) -> F {
-        match self.sides {
-            0 => Masked::cover(self, x, y, fy),
-            3 => Edges::<3>::cover(self, x, y, fy),
-            _ => Edges::<4>::cover(self, x, y, fy),
+        match self.kind {
+            Kind::Masked => Masked::cover(self, x, y, fy),
+            Kind::Triangle => Edges::<3>::cover(self, x, y, fy),
+            Kind::Quad => Edges::<4>::cover(self, x, y, fy),
+            Kind::Box => Boxed::cover(self, x, y, fy),
         }
     }
 
-    /// The coverage of the pixel centred at `(x, y)` by the edges: the
-    /// product of their box-filtered half-planes.
+    /// The coverage of the pixel centred at `(x, y)` by the edges or the
+    /// sides: the product of their box-filtered half-planes.
     #[cfg(test)]
     fn coverage(&self, x: F, y: F) -> F {
-        if self.sides == 3 {
-            self.edge_coverage::<3>(x, y)
-        } else {
-            self.edge_coverage::<4>(x, y)
+        match self.kind {
+            Kind::Triangle => self.edge_coverage::<3>(x, y),
+            Kind::Quad => self.edge_coverage::<4>(x, y),
+            Kind::Box => self.box_coverage(x, y),
+            Kind::Masked => panic!("a mask has no edges"),
         }
     }
 
-    /// [`Self::coverage`] of the first `N` edges, `N` being `sides`.
+    /// The coverage of the pixel centred at `(x, y)` by an axis-aligned
+    /// rectangle, as [`Self::box_coverage_grad`] computes it.
+    #[inline]
+    fn box_coverage(&self, x: F, y: F) -> F {
+        let [x0, y0, x1, y1, inv] = self.rect;
+        let (zero, one, half) = (F::of(0.0), F::of(1.0), F::of(0.5));
+        let mut product = one;
+        for d in [x - x0, y - y0, x1 - x, y1 - y] {
+            let t = half + d * inv;
+            if t <= zero {
+                return zero;
+            }
+            if t < one {
+                product = product * t;
+            }
+        }
+        product
+    }
+
+    /// The coverage of the pixel centred at `(x, y)` by an axis-aligned
+    /// rectangle and its gradient with respect to `x0, y0, x1, y1`, or
+    /// `None` where the pixel is strictly outside a side's ramp.
+    ///
+    /// Each side's box-filtered half-plane is a ramp, `clamp(t)` with
+    /// `t = 1/2 + d / f`, `d` the signed distance inside the side and `f`
+    /// the filter width. The coverage is the product of the four ramps:
+    /// the left and right ones give the overlap of the filter square with
+    /// `x0..x1` along `x` as long as `x1 − x0 ≥ f`, so that no square
+    /// crosses both sides, and likewise along `y`; the box filter is
+    /// separable, so the product is the exact area of the rectangle in the
+    /// filter square. Rectangles keep their sides at least 1 px, the
+    /// export's filter width.
+    ///
+    /// A ramp's slope is `1 / f` for `0 < t < 1`, and half that at `t = 0`
+    /// and `t = 1`, the mean of its one-sided slopes. The greedy search's
+    /// rectangles have their sides on pixel boundaries, where the pixels on
+    /// both sides sit at those ends: with the slope of either side alone
+    /// the side would have no gradient there, or twice its one-sided ones.
+    /// So a pixel at `t = 0` of a ramp, which has no coverage, still has a
+    /// gradient.
+    #[inline]
+    fn box_coverage_grad(&self, x: F, y: F) -> Option<(F, [F; COORDS])> {
+        let [x0, y0, x1, y1, inv] = self.rect;
+        let (zero, one, half) = (F::of(0.0), F::of(1.0), F::of(0.5));
+        let ramp = |d: F| {
+            let t = half + d * inv;
+            if t < zero {
+                None
+            } else if t > zero && t < one {
+                Some((t, inv))
+            } else if t == zero {
+                Some((zero, half * inv))
+            } else if t == one {
+                Some((one, half * inv))
+            } else {
+                Some((one, zero))
+            }
+        };
+        let (left, dleft) = ramp(x - x0)?;
+        let (top, dtop) = ramp(y - y0)?;
+        let (right, dright) = ramp(x1 - x)?;
+        let (bottom, dbottom) = ramp(y1 - y)?;
+        let (across, down) = (left * right, top * bottom);
+        let mut grad = [zero; COORDS];
+        grad[0] = -dleft * right * down;
+        grad[1] = -dtop * bottom * across;
+        grad[2] = dright * left * down;
+        grad[3] = dbottom * top * across;
+        Some((across * down, grad))
+    }
+
+    /// [`Self::coverage`] of the first `N` edges, three or four.
     #[inline]
     fn edge_coverage<const N: usize>(&self, x: F, y: F) -> F {
         let mut product = F::of(1.0);
@@ -504,7 +739,7 @@ impl<'a, F: Real> Prepared<'a, F> {
     }
 
     /// The coverage of the pixel centred at `(x, y)` by the first `N`
-    /// edges, `N` being `sides`, and its gradient with respect to the
+    /// edges, three or four, and its gradient with respect to the
     /// vertex coordinates, or `None` where the coverage is zero.
     #[inline]
     fn edge_coverage_grad<const N: usize>(&self, x: F, y: F) -> Option<(F, [F; COORDS])> {
@@ -544,7 +779,7 @@ impl<'a, F: Real> Prepared<'a, F> {
 }
 
 /// How a layer covers its pixels. The pixel loops are compiled once per
-/// implementation and chosen once per layer ([`Prepared::sides`]), so that
+/// implementation and chosen once per layer ([`Prepared::kind`]), so that
 /// no pixel pays for the choice.
 trait Cover {
     /// The coverage of the pixel `(x, y)` inside the layer's bounding box,
@@ -552,8 +787,8 @@ trait Cover {
     fn cover<F: Real>(layer: &Prepared<'_, F>, x: usize, y: usize, fy: F) -> F;
 
     /// The coverage and its gradient with respect to the vertex
-    /// coordinates, if the layer has vertices, or `None` where the coverage
-    /// is zero.
+    /// coordinates, or an axis-aligned rectangle's parameters, if the layer
+    /// has them, or `None` where the coverage and its gradient are zero.
     fn cover_grad<F: Real>(
         layer: &Prepared<'_, F>,
         x: usize,
@@ -564,6 +799,28 @@ trait Cover {
 
 /// A fixed layer's mask.
 struct Masked;
+
+/// An axis-aligned rectangle's four sides.
+struct Boxed;
+
+impl Cover for Boxed {
+    #[inline]
+    fn cover<F: Real>(layer: &Prepared<'_, F>, x: usize, _y: usize, fy: F) -> F {
+        layer.box_coverage(F::of(x as f64), fy)
+    }
+
+    #[inline]
+    fn cover_grad<F: Real>(
+        layer: &Prepared<'_, F>,
+        x: usize,
+        _y: usize,
+        fy: F,
+    ) -> Option<(F, Option<[F; COORDS]>)> {
+        layer
+            .box_coverage_grad(F::of(x as f64), fy)
+            .map(|(cov, grad)| (cov, Some(grad)))
+    }
+}
 
 /// The product of `N` edges' half-planes.
 struct Edges<const N: usize>;
@@ -609,17 +866,21 @@ impl<const N: usize> Cover for Edges<N> {
 /// `$layer`.
 macro_rules! by_cover {
     ($layer:expr, $cover:ident => $call:expr) => {
-        match $layer.sides {
-            0 => {
+        match $layer.kind {
+            Kind::Masked => {
                 type $cover = Masked;
                 $call
             }
-            3 => {
+            Kind::Triangle => {
                 type $cover = Edges<3>;
                 $call
             }
-            _ => {
+            Kind::Quad => {
                 type $cover = Edges<4>;
+                $call
+            }
+            Kind::Box => {
+                type $cover = Boxed;
                 $call
             }
         }
@@ -909,10 +1170,10 @@ impl<F: Real> Reverse<'_, F> {
     }
 
     /// Accumulates the gradient `∂L/∂w = 2 A Σ_c R_c (s_c − X_{i−1,c})`
-    /// into the vertices and alpha in `sums`, with `below` the canvas
-    /// below the layer inside its bounding box and the band, then folds
-    /// the layer into the transmittance. A fixed layer has the alpha's
-    /// alone.
+    /// into the coverage's coordinates ([`Kind::coords`]) and the alpha in
+    /// `sums`, with `below` the canvas below the layer inside its bounding
+    /// box and the band, then folds the layer into the transmittance. A
+    /// fixed layer has the alpha's alone.
     fn gradient(
         &self,
         below: &[F],
@@ -936,7 +1197,7 @@ impl<F: Real> Reverse<'_, F> {
     ) {
         let layer = self.layer;
         let box_width = layer.x1 - layer.x0;
-        let coords = 2 * layer.sides;
+        let coords = layer.kind.coords();
         let opacity = layer.opacity.get();
         for (local, y) in self.rows.clone().enumerate() {
             let fy = F::of(y as f64);
@@ -1027,15 +1288,22 @@ fn run<F: Real>(
     totals
 }
 
-/// The gradient of the loss `Σ (X − T)²` per layer of `layers`, the
-/// colours held constant: zero for the vertex coordinates a layer does not
-/// use, and for every vertex coordinate of a fixed layer.
+/// The gradient of the loss `Σ (X − T)²` per layer of `layers` with
+/// respect to its parameters ([`Outline`]) and its opacity, the colours
+/// held constant: zero for the parameters a layer does not use, every one
+/// of a fixed layer's among them. A rotated rectangle's comes from its
+/// corners' ([`Layer::chain`]).
 pub(super) fn gradients<F: Real>(
     scene: &Scene<F>,
     layers: &[Layer],
     work: &mut Workspace<F>,
 ) -> Vec<[f64; PARAMS]> {
-    run(scene, layers, Pass::Gradient, work)
+    let totals = run(scene, layers, Pass::Gradient, work);
+    layers
+        .iter()
+        .zip(totals)
+        .map(|(layer, grad)| layer.chain(grad))
+        .collect()
 }
 
 /// Refits every colour of `layers` together, from the residual of the stack
@@ -1154,7 +1422,78 @@ pub(super) mod tests {
                 let centre = (rng.random_range(0.0..size), rng.random_range(0.0..size));
                 Layer {
                     outline: Outline::Quad,
-                    vertices: random_convex(rng, centre, size / 2.0),
+                    params: random_convex(rng, centre, size / 2.0),
+                    alpha: rng.random_range(40.0..250.0),
+                    color: std::array::from_fn(|_| rng.random_range(0.0..255.0)),
+                }
+            })
+            .collect()
+    }
+
+    /// Random axis-aligned rectangles in a canvas of `size`, keeping the
+    /// rule: sides at least 1 px and at most 8 times each other.
+    pub(in crate::joint) fn random_boxes(
+        rng: &mut ChaCha8Rng,
+        count: usize,
+        size: f64,
+    ) -> Vec<Layer> {
+        (0..count)
+            .map(|_| {
+                let (w, h) = loop {
+                    let (w, h) = (
+                        rng.random_range(1.0..size / 2.0),
+                        rng.random_range(1.0..size / 2.0),
+                    );
+                    if w <= 8.0 * h && h <= 8.0 * w {
+                        break (w, h);
+                    }
+                };
+                let (x, y) = (
+                    rng.random_range(-3.0..size - 2.0),
+                    rng.random_range(-3.0..size - 2.0),
+                );
+                let mut params = [0.0; COORDS];
+                params[..4].copy_from_slice(&[x, y, x + w, y + h]);
+                Layer {
+                    outline: Outline::Rect,
+                    params,
+                    alpha: rng.random_range(40.0..250.0),
+                    color: std::array::from_fn(|_| rng.random_range(0.0..255.0)),
+                }
+            })
+            .collect()
+    }
+
+    /// Random rotated rectangles in a canvas of `size`, keeping the rule:
+    /// `|u|` and `h` at least 1/2 and at most 8 times each other.
+    pub(in crate::joint) fn random_rotated(
+        rng: &mut ChaCha8Rng,
+        count: usize,
+        size: f64,
+    ) -> Vec<Layer> {
+        (0..count)
+            .map(|_| {
+                let (r, h) = loop {
+                    let (r, h) = (
+                        rng.random_range(0.5..size / 3.0),
+                        rng.random_range(0.5..size / 3.0),
+                    );
+                    if r <= 8.0 * h && h <= 8.0 * r {
+                        break (r, h);
+                    }
+                };
+                let turn = rng.random_range(0.0..std::f64::consts::TAU);
+                let mut params = [0.0; COORDS];
+                params[..5].copy_from_slice(&[
+                    rng.random_range(0.0..size),
+                    rng.random_range(0.0..size),
+                    r * turn.cos(),
+                    r * turn.sin(),
+                    h,
+                ]);
+                Layer {
+                    outline: Outline::Rotated,
+                    params,
                     alpha: rng.random_range(40.0..250.0),
                     color: std::array::from_fn(|_| rng.random_range(0.0..255.0)),
                 }
@@ -1205,7 +1544,7 @@ pub(super) mod tests {
                 scene.masks.push(random_mask(rng, width, height));
                 layers.push(Layer {
                     outline: Outline::Fixed(index),
-                    vertices: [0.0; COORDS],
+                    params: [0.0; COORDS],
                     alpha: rng.random_range(40.0..250.0),
                     color: std::array::from_fn(|_| rng.random_range(0.0..255.0)),
                 });
@@ -1229,7 +1568,7 @@ pub(super) mod tests {
         let analytic = gradients(scene, layers, &mut Workspace::default());
         let mut numeric = vec![[0.0; PARAMS]; layers.len()];
         for (index, grads) in numeric.iter_mut().enumerate() {
-            let coords = 2 * layers[index].outline.sides();
+            let coords = layers[index].outline.params();
             for (k, grad) in grads.iter_mut().enumerate() {
                 if k < ALPHA && k >= coords {
                     assert_eq!(analytic[index][k], 0.0, "layer {index}, {k}");
@@ -1241,7 +1580,7 @@ pub(super) mod tests {
                     if k == ALPHA {
                         moved[index].alpha += sign * h;
                     } else {
-                        moved[index].vertices[k] += sign * h;
+                        moved[index].params[k] += sign * h;
                     }
                     fresh_loss(scene, &moved)
                 };
@@ -1304,6 +1643,46 @@ pub(super) mod tests {
             scene.filter = filter;
             let quads = random_quads(&mut rng, count, 32.0);
             let (worst, overall, checked) = gradient_check(&scene, &quads);
+            assert!(checked >= count * 6, "seed {seed}: {checked} checked");
+            assert!(worst < 1e-3, "seed {seed}: worst {worst}");
+            assert!(overall < 1e-4, "seed {seed}: overall {overall}");
+        }
+    }
+
+    /// The same with axis-aligned and rotated rectangles, among them
+    /// rectangles on the rule's boundary: sides of exactly 1 px, half-sides
+    /// of exactly 1/2, and long sides of exactly 8 times the short ones.
+    #[test]
+    fn analytic_gradients_of_rectangles_match_finite_differences() {
+        for (seed, count, filter) in [
+            (31, 3, 1.0),
+            (32, 5, 1.0),
+            (33, 7, 1.0),
+            (34, 5, 1.6),
+            (35, 7, 2.0),
+        ] {
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
+            let mut scene = random_scene::<f64>(&mut rng, 32, 32);
+            scene.filter = filter;
+            let mut layers = random_boxes(&mut rng, count, 32.0);
+            layers.extend(random_rotated(&mut rng, count, 32.0));
+            // On the boundary of the rule.
+            layers[0].params[2] = layers[0].params[0] + 1.0;
+            layers[1].params[3] =
+                layers[1].params[1] + 8.0 * (layers[1].params[2] - layers[1].params[0]);
+            let [_, _, ux, uy, ..] = layers[count].params;
+            let r = ux.hypot(uy);
+            layers[count].params[2] = 0.5 * ux / r;
+            layers[count].params[3] = 0.5 * uy / r;
+            layers[count].params[4] = 4.0;
+            layers[count + 1].params[4] =
+                layers[count + 1].params[2].hypot(layers[count + 1].params[3]) / 8.0;
+            // On pixel boundaries, as the greedy search's: central
+            // differences there are the mean of the one-sided slopes.
+            layers[2].params[..4].copy_from_slice(&[3.5, 4.5, 12.5, 20.5]);
+            let (worst, overall, checked) = gradient_check(&scene, &layers);
+            let aligned = gradients(&scene, &layers, &mut Workspace::default())[2];
+            assert!(aligned[..4].iter().all(|&g| g != 0.0), "{aligned:?}");
             assert!(checked >= count * 6, "seed {seed}: {checked} checked");
             assert!(worst < 1e-3, "seed {seed}: worst {worst}");
             assert!(overall < 1e-4, "seed {seed}: overall {overall}");
@@ -1463,7 +1842,8 @@ pub(super) mod tests {
     fn compare_coverage(layer: &Layer) -> (f64, f64, f64, u32) {
         const SIZE: usize = 64;
         let scene = blank_scene(SIZE, SIZE);
-        let v = &layer.vertices[..2 * layer.outline.sides()];
+        let corners = layer.corners();
+        let v = &corners[..2 * layer.outline.sides()];
         let prepared = Prepared::<f64>::new(layer, &scene);
         let (mut model_area, mut exact_area) = (0.0, 0.0);
         let (mut error_sum, mut edge_pixels) = (0.0, 0);
@@ -1543,11 +1923,86 @@ pub(super) mod tests {
             for _ in 0..20 {
                 let layer = Layer {
                     outline: Outline::Quad,
-                    vertices: random_convex(&mut rng, (32.0, 32.0), size / 2.0),
+                    params: random_convex(&mut rng, (32.0, 32.0), size / 2.0),
                     alpha: 255.0,
                     color: [255.0; 3],
                 };
                 let (model_area, exact_area, errors, pixels) = compare_coverage(&layer);
+                if size >= 24.0 {
+                    let relative = model_area / exact_area - 1.0;
+                    assert!(relative.abs() < 0.015, "{layer:?}: area {relative:+.4}");
+                }
+                error_sum += errors;
+                edge_pixels += pixels;
+            }
+            let mean = error_sum / f64::from(edge_pixels);
+            let bound = if size >= 24.0 { 0.006 } else { 0.05 };
+            assert!(mean < bound, "size {size}: mean edge error {mean}");
+        }
+    }
+
+    /// An axis-aligned rectangle with sides of at least 1 px covers each
+    /// pixel by exactly its area there.
+    #[test]
+    fn coverage_of_an_axis_aligned_rectangle_is_exact() {
+        let mut rng = ChaCha8Rng::seed_from_u64(10);
+        let scene = blank_scene(64, 64);
+        let mut partial = 0;
+        for layer in random_boxes(&mut rng, 200, 64.0) {
+            let prepared = Prepared::<f64>::new(&layer, &scene);
+            let corners = layer.corners();
+            let mut total = 0.0;
+            for y in 0..64 {
+                for x in 0..64 {
+                    let (fx, fy) = (x as f64, y as f64);
+                    let exact = exact_coverage(&corners, fx, fy);
+                    let in_box = (prepared.x0..prepared.x1).contains(&x)
+                        && (prepared.y0..prepared.y1).contains(&y);
+                    assert!(
+                        in_box || exact == 0.0,
+                        "{layer:?}: ({x}, {y}) outside the box"
+                    );
+                    let model = if in_box {
+                        prepared.pixel(x, y, fy)
+                    } else {
+                        0.0
+                    };
+                    assert!(
+                        (model - exact).abs() < 1e-12,
+                        "{layer:?} at ({x}, {y}): {model} vs {exact}"
+                    );
+                    partial += usize::from(exact > 0.0 && exact < 1.0);
+                    total += model;
+                }
+            }
+            let [x0, y0, x1, y1, ..] = layer.params;
+            let visible = (x1.min(63.5) - x0.max(-0.5)) * (y1.min(63.5) - y0.max(-0.5));
+            assert!(
+                (total - visible).abs() < 1e-9,
+                "{layer:?}: {total} vs {visible}"
+            );
+        }
+        assert!(partial > 5000, "{partial} partly covered pixels");
+    }
+
+    /// Rotated rectangles have the convex quadrilaterals' bounds, with
+    /// right angles at every corner.
+    #[test]
+    fn coverage_matches_the_exact_pixel_area_of_a_rotated_rectangle() {
+        let mut rng = ChaCha8Rng::seed_from_u64(11);
+        for size in [2.0, 6.0, 12.0, 24.0, 48.0_f64] {
+            let (mut error_sum, mut edge_pixels) = (0.0, 0);
+            for mut layer in random_rotated(&mut rng, 20, size) {
+                // Centred within a pixel of the canvas's centre, inside it.
+                layer.params[0] = 31.0 + 2.0 * layer.params[0] / size;
+                layer.params[1] = 31.0 + 2.0 * layer.params[1] / size;
+                let (model_area, exact_area, errors, pixels) = compare_coverage(&layer);
+                let [_, _, ux, uy, h, ..] = layer.params;
+                let area = 4.0 * ux.hypot(uy) * h;
+                assert!(
+                    (exact_area - area).abs() < 1e-9 * area.max(1.0),
+                    "{layer:?}"
+                );
                 if size >= 24.0 {
                     let relative = model_area / exact_area - 1.0;
                     assert!(relative.abs() < 0.015, "{layer:?}: area {relative:+.4}");
@@ -1656,10 +2111,10 @@ pub(super) mod tests {
         assert_eq!(
             fitted
                 .iter()
-                .map(|tri| (tri.vertices, tri.alpha))
+                .map(|tri| (tri.params, tri.alpha))
                 .collect::<Vec<_>>(),
             tris.iter()
-                .map(|tri| (tri.vertices, tri.alpha))
+                .map(|tri| (tri.params, tri.alpha))
                 .collect::<Vec<_>>()
         );
     }

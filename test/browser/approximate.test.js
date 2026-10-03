@@ -697,7 +697,15 @@ for (const isolated of [true, false]) {
     test(`SVG output equals the native addon's for fixed seeds (${variant} build)`, async () => {
       const renders = [];
       for (const seed of [1, 2, 3]) {
-        for (const shape of ["triangle", "rotated-ellipse", "quadratic", "any"]) {
+        for (const shape of [
+          "triangle",
+          "rectangle",
+          "rotated-rectangle",
+          "rotated-ellipse",
+          "quadratic",
+          "polygon",
+          "any",
+        ]) {
           renders.push({ count: 12, resizeInput: 64, outputSize: 128, seed, shape });
         }
       }

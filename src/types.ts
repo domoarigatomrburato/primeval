@@ -90,10 +90,12 @@ export type ProgressInfo = {
    * The shapes of every step, in order, draw a live preview. After the last
    * step the render runs a final stage that can move, resize and recolour
    * any shape, so the result's shape lines can differ from the preview. For
-   * triangles and polygons it is a joint gradient optimisation of every
-   * shape at once, whose coordinates are multiples of a quarter of a
-   * `viewBox` unit, so they can be fractional; for the other shapes it is
-   * one refit pass, which re-optimises one shape at a time. The stage keeps the shapes' number,
+   * triangles, polygons, rectangles and rotated rectangles it is a joint
+   * gradient optimisation of every shape at once, whose coordinates are
+   * multiples of a quarter of a `viewBox` unit, half a unit for
+   * rectangles, while a rotated rectangle's corners are computed from such
+   * values, so they can be fractional; for the other shapes it is one
+   * refit pass, which re-optimises one shape at a time. The stage keeps the shapes' number,
    * their order and each shape's kind, though an ellipse can turn into a
    * `<circle>` or back when its radii become equal or unequal.
    *

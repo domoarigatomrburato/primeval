@@ -286,10 +286,12 @@ pub struct ProgressInfo {
     /// The shapes of every step, in order, draw a live preview. After the
     /// last step the render runs a final stage that can move, resize and
     /// recolour any shape, so the result's shape lines can differ from the
-    /// preview. For triangles and polygons it is a joint gradient
-    /// optimisation of every shape at once, whose vertices are multiples of
-    /// a quarter of a working pixel, so the result's coordinates can be
-    /// fractional; for the other kinds it is one refit pass, which
+    /// preview. For triangles, polygons, rectangles and rotated rectangles
+    /// it is a joint gradient optimisation of every shape at once, whose
+    /// coordinates are multiples of a quarter of a working pixel, and of
+    /// half a pixel for rectangles, while a rotated rectangle's corners are
+    /// computed from such values, so the result's coordinates can be
+    /// fractional. For the other kinds it is one refit pass, which
     /// re-optimises one shape at a time. The stage keeps the shapes'
     /// number, their order and each shape's kind; an ellipse whose radii
     /// the pass makes equal (or unequal) is written as a `<circle>` (or an
@@ -301,8 +303,8 @@ pub struct ProgressInfo {
 ///
 /// Clones share the same flag. The render checks it before and after
 /// decoding, before every step, during the final stage (between the layers
-/// of a refit pass, or before every iteration of the joint optimisation of
-/// triangles or polygons and before its snap), and before encoding.
+/// of a refit pass, or before every iteration of the joint optimisation and
+/// before its snap), and before encoding.
 #[derive(Clone, Debug, Default)]
 pub struct CancellationToken(Arc<AtomicBool>);
 
@@ -441,15 +443,17 @@ impl ApproximateResult {
 /// The search runs [`RenderOptions::count`] greedy steps, each adding the
 /// best shape it finds and reporting it through `execution`'s progress
 /// callback, then a final stage that revises every shape and reports no
-/// progress. For [`ShapeKind::Triangle`] and [`ShapeKind::Polygon`] the
-/// final stage is a joint gradient optimisation of every vertex, opacity
-/// (with [`Alpha::Auto`]) and colour at once, against a model of the
-/// anti-aliased output, with vertices snapped to quarter pixels that keep
-/// every angle above 15° and every polygon strictly convex
-/// ([`primeval_core::joint`]). For the other kinds it is one refit pass
-/// that re-optimises every shape at its own layer, with the others fixed,
-/// and keeps the result only if it lowers the score. The result is encoded
-/// from the revised shapes.
+/// progress. For [`ShapeKind::Triangle`], [`ShapeKind::Polygon`],
+/// [`ShapeKind::Rectangle`] and [`ShapeKind::RotatedRectangle`] the final
+/// stage is a joint gradient optimisation of the geometry, opacity (with
+/// [`Alpha::Auto`]) and colour of every shape at once, against a model of
+/// the anti-aliased output, snapped to quarter pixels (half pixels for
+/// axis-aligned rectangles) that keep every angle above 15°, every polygon
+/// strictly convex and every rectangle within the 1:8 aspect cap
+/// ([`primeval_core::joint`]). For the other kinds it is one refit pass that re-optimises
+/// every shape at its own layer, with the others fixed, and keeps the
+/// result only if it lowers the score. The result is encoded from the
+/// revised shapes.
 ///
 /// # Errors
 ///
@@ -511,13 +515,22 @@ pub fn approximate(
 /// optimisation of every shape ([`primeval_core::joint`]) rather than one
 /// refit pass ([`Model::refine`]).
 ///
-/// [`ShapeKind::Any`] keeps the refit pass: on the engine runner's corpus,
-/// the joint optimisation of its triangles and polygons, with the other
-/// shapes fixed, lowered the median RMSE of the export at 100 shapes by
-/// only 2.5% of greedy's more than a refit pass that took longer, under
-/// the 3% that would justify it.
+/// Every kind whose shapes the joint optimisation moves runs it: on the
+/// engine runner's corpus it gives a lower median RMSE of the export than
+/// the refit pass, for rectangles at 100 and 200 shapes 0.0458 and 0.0353
+/// against 0.0500 and 0.0394, for rotated rectangles 0.0401 and 0.0306
+/// against 0.0437 and 0.0347.
+///
+/// [`ShapeKind::Any`] keeps the refit pass for now: the joint optimisation
+/// would keep its ellipses, circles and curves fixed in geometry.
 fn runs_joint(shape: ShapeKind) -> bool {
-    matches!(shape, ShapeKind::Triangle | ShapeKind::Polygon)
+    matches!(
+        shape,
+        ShapeKind::Triangle
+            | ShapeKind::Polygon
+            | ShapeKind::Rectangle
+            | ShapeKind::RotatedRectangle
+    )
 }
 
 /// [`approximate`]'s final stage, after the greedy steps of `model` of
@@ -947,48 +960,106 @@ mod tests {
         assert_joint_svg_is_identical_across_thread_counts(ShapeKind::Polygon, 4);
     }
 
+    /// The joint optimisation of rectangles, rotated or not, gives the
+    /// same SVG whatever the number of threads. Axis-aligned rectangles
+    /// stay `<rect>` elements on the half-pixel lattice, some of them off
+    /// whole pixels; rotated rectangles stay polygons of four points.
+    #[test]
+    fn same_seed_rectangle_svgs_are_identical_across_thread_counts() {
+        for shape in [ShapeKind::Rectangle, ShapeKind::RotatedRectangle] {
+            let reference = joint_svg_on_threads(shape, 1);
+            for threads in [2, 4, 8] {
+                assert!(
+                    joint_svg_on_threads(shape, threads) == reference,
+                    "{shape:?}: {threads} threads changed the SVG"
+                );
+            }
+            for line in svg_shape_lines(&reference) {
+                match shape {
+                    ShapeKind::Rectangle => assert!(line.starts_with("<rect x="), "{line}"),
+                    _ => {
+                        let points = line
+                            .split("points=\"")
+                            .nth(1)
+                            .and_then(|rest| rest.split('"').next())
+                            .unwrap_or_else(|| panic!("not a polygon: {line}"));
+                        assert_eq!(points.split([' ', ',']).count(), 8, "{line}");
+                    }
+                }
+            }
+        }
+        let reference = joint_svg_on_threads(ShapeKind::Rectangle, 1);
+        let values: Vec<f64> = svg_shape_lines(&reference)
+            .iter()
+            .flat_map(|line| {
+                ["x", "y", "width", "height"].map(|name| {
+                    line.split(&format!(" {name}=\""))
+                        .nth(1)
+                        .and_then(|rest| rest.split('"').next())
+                        .and_then(|value| value.parse::<f64>().ok())
+                        .unwrap_or_else(|| panic!("no {name}: {line}"))
+                })
+            })
+            .collect();
+        assert!(values.iter().all(|value| (value * 2.0).fract() == 0.0));
+        assert!(
+            values.iter().any(|value| value.fract() != 0.0),
+            "no half-pixel coordinate"
+        );
+    }
+
     /// The final stage polls `cancelled` during the joint optimisation of
-    /// triangles; once it returns true the stage returns `None`, which
-    /// `approximate` turns into [`ApproximateError::Aborted`].
+    /// triangles, rectangles and rotated rectangles; once it returns true
+    /// the stage returns `None`, which `approximate` turns into
+    /// [`ApproximateError::Aborted`].
     #[test]
     fn cancellation_during_the_final_stage_stops_it() {
-        let render = render_options();
-        let (target, background) =
-            working_target(fixture_bytes(), &render, || Ok(())).expect("target");
-        let mut options = ModelOptions::default();
-        options.seed = render.seed;
-        let mut model = Model::new(target, background, options);
-        for _ in 0..render.count {
-            model.step(render.shape, render.alpha);
-        }
-        assert!(runs_joint(render.shape));
-        let mut polls = 0;
-        let finished = final_stage(
-            &mut model.clone(),
-            render.shape,
-            render.alpha,
-            joint::Settings::default(),
-            || {
-                polls += 1;
-                false
-            },
-        );
-        assert!(finished.is_some());
-        // 3 triangles run 80 iterations, each polled before it starts.
-        assert!(polls > 80, "{polls} polls");
-        for cancel_at in [1, polls / 2, polls] {
-            let mut count = 0;
-            let stopped = final_stage(
+        for shape in [
+            render_options().shape,
+            ShapeKind::Rectangle,
+            ShapeKind::RotatedRectangle,
+        ] {
+            let render = RenderOptions {
+                shape,
+                ..render_options()
+            };
+            let (target, background) =
+                working_target(fixture_bytes(), &render, || Ok(())).expect("target");
+            let mut options = ModelOptions::default();
+            options.seed = render.seed;
+            let mut model = Model::new(target, background, options);
+            for _ in 0..render.count {
+                model.step(render.shape, render.alpha);
+            }
+            assert!(runs_joint(render.shape), "{shape:?}");
+            let mut polls = 0;
+            let finished = final_stage(
                 &mut model.clone(),
                 render.shape,
                 render.alpha,
                 joint::Settings::default(),
                 || {
-                    count += 1;
-                    count >= cancel_at
+                    polls += 1;
+                    false
                 },
             );
-            assert_eq!(stopped, None, "cancelled at poll {cancel_at}");
+            assert!(finished.is_some());
+            // 3 shapes run 80 iterations, each polled before it starts.
+            assert!(polls > 80, "{shape:?}: {polls} polls");
+            for cancel_at in [1, polls / 2, polls] {
+                let mut count = 0;
+                let stopped = final_stage(
+                    &mut model.clone(),
+                    render.shape,
+                    render.alpha,
+                    joint::Settings::default(),
+                    || {
+                        count += 1;
+                        count >= cancel_at
+                    },
+                );
+                assert_eq!(stopped, None, "{shape:?}: cancelled at poll {cancel_at}");
+            }
         }
     }
 

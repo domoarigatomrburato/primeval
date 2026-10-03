@@ -20,7 +20,8 @@ pub enum ShapeKind {
     Any,
     /// Triangles.
     Triangle,
-    /// Axis-aligned rectangles.
+    /// Axis-aligned rectangles, the long side at most 8 times the short
+    /// one.
     Rectangle,
     /// Axis-aligned ellipses.
     Ellipse,
@@ -128,6 +129,19 @@ pub(crate) struct Triangle {
     pub(crate) y3: i32,
 }
 
+/// The pixels `x1..=x2` × `y1..=y2`, the corners in either order, its long
+/// side at most [`MAX_ASPECT`] (8) times the short one
+/// ([`Self::is_valid`]), as a rotated rectangle's, so that it reads as a
+/// rectangle and not a line.
+///
+/// Measured with the engine runner (seed 42, `--refine final` with the
+/// refit pass, the RMSE of the PNG at the working size), the cap made the
+/// median over the corpus 2.2% worse at 50 steps, 2.0% at 100 and 1.0% at
+/// 200 for rectangles, the synthetic shapes 5–9%; for `any` the median
+/// changed by −2.3%, −0.5% and −1.4%, but its synthetic shapes got 7%,
+/// 35% and 72% worse. The SVG size did not change, nor did the greedy
+/// search's time (0.95–0.98×); with the refit pass the time was
+/// 1.07–1.14× on one run each.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Rectangle {
     pub(crate) x1: i32,
@@ -534,15 +548,33 @@ impl Rectangle {
         }
     }
 
+    /// A random rectangle from a sampled point, its opposite corner drawn
+    /// again until the rectangle keeps the aspect-ratio cap. Offsets of 1
+    /// on both axes always keep it, so the loop ends.
     fn random<R: Rng>(worker: &mut WorkerCtx<R>, round: &SearchRound<'_>) -> Self {
         let (x1, y1) = worker.sample_xy(round);
-        let x2 = (x1 + worker.rng.random_range(1..33)).clamp(0, worker.width - 1);
-        let y2 = (y1 + worker.rng.random_range(1..33)).clamp(0, worker.height - 1);
-        Self { x1, y1, x2, y2 }
+        loop {
+            let x2 = (x1 + worker.rng.random_range(1..33)).clamp(0, worker.width - 1);
+            let y2 = (y1 + worker.rng.random_range(1..33)).clamp(0, worker.height - 1);
+            let rect = Self { x1, y1, x2, y2 };
+            if rect.is_valid() {
+                return rect;
+            }
+        }
     }
 
+    /// Whether the long side is at most [`MAX_ASPECT`] times the short one,
+    /// in pixels.
     #[must_use]
-    fn bounds(&self) -> (i32, i32, i32, i32) {
+    pub(crate) fn is_valid(&self) -> bool {
+        let (x1, y1, x2, y2) = self.bounds();
+        let (width, height) = (x2 - x1 + 1, y2 - y1 + 1);
+        width.max(height) <= MAX_ASPECT * width.min(height)
+    }
+
+    /// The corners in order: `x1 <= x2` and `y1 <= y2`.
+    #[must_use]
+    pub(crate) fn bounds(&self) -> (i32, i32, i32, i32) {
         let (mut x1, mut y1, mut x2, mut y2) = (self.x1, self.y1, self.x2, self.y2);
         if x1 > x2 {
             std::mem::swap(&mut x1, &mut x2);
@@ -567,18 +599,32 @@ impl Rectangle {
         &worker.lines
     }
 
+    /// Moves one corner. A move that breaks the aspect-ratio cap
+    /// ([`Self::is_valid`]) is undone and a new one drawn, as for a rotated
+    /// rectangle. From a valid rectangle, shortening its long side by one
+    /// pixel, or moving a corner of a square by one pixel, keeps the cap,
+    /// and such a move has a positive probability at every step size, so
+    /// the loop ends.
     fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>, step: Step) {
-        match worker.rng.random_range(0..2) {
-            0 => {
-                let (dx1, dy1) = step.offsets(&mut worker.rng, POSITION_SIGMA);
-                self.x1 = (self.x1 + dx1).clamp(0, worker.width - 1);
-                self.y1 = (self.y1 + dy1).clamp(0, worker.height - 1);
+        debug_assert!(self.is_valid(), "{self:?}");
+        let start = *self;
+        loop {
+            match worker.rng.random_range(0..2) {
+                0 => {
+                    let (dx1, dy1) = step.offsets(&mut worker.rng, POSITION_SIGMA);
+                    self.x1 = (self.x1 + dx1).clamp(0, worker.width - 1);
+                    self.y1 = (self.y1 + dy1).clamp(0, worker.height - 1);
+                }
+                _ => {
+                    let (dx2, dy2) = step.offsets(&mut worker.rng, POSITION_SIGMA);
+                    self.x2 = (self.x2 + dx2).clamp(0, worker.width - 1);
+                    self.y2 = (self.y2 + dy2).clamp(0, worker.height - 1);
+                }
             }
-            _ => {
-                let (dx2, dy2) = step.offsets(&mut worker.rng, POSITION_SIGMA);
-                self.x2 = (self.x2 + dx2).clamp(0, worker.width - 1);
-                self.y2 = (self.y2 + dy2).clamp(0, worker.height - 1);
+            if self.is_valid() {
+                return;
             }
+            *self = start;
         }
     }
 }
@@ -1160,7 +1206,8 @@ impl Polygon {
 /// output stay identical.
 const TAN_MIN_ANGLE: f64 = 0.267_949_192_431_122_7;
 
-/// The longest side of a rotated rectangle, in multiples of its shortest.
+/// The longest side of a rectangle, rotated or not, in multiples of its
+/// shortest.
 const MAX_ASPECT: i32 = 8;
 
 /// Whether the polygon through `vertices`, three or four of them in either
@@ -1700,14 +1747,41 @@ mod tests {
         }
     }
 
-    /// The legibility rules hold for every shape the search makes and
-    /// moves: random polygons and rotated rectangles, and every greedy and
-    /// refit move of them, over many seeds and canvas sizes.
+    /// The cap counts pixels: `x1..=x2` is `x2 − x1 + 1` wide, in either
+    /// order of the corners.
     #[test]
-    fn random_and_mutate_keep_polygons_and_rotated_rectangles_valid() {
+    fn rectangle_validity_caps_the_aspect_ratio_at_8() {
+        let rect = |w: i32, h: i32| Rectangle {
+            x1: 3,
+            y1: 5,
+            x2: 3 + w - 1,
+            y2: 5 + h - 1,
+        };
+        let swapped = |r: Rectangle| Rectangle {
+            x1: r.x2,
+            y1: r.y2,
+            x2: r.x1,
+            y2: r.y1,
+        };
+        for (w, h) in [(1, 1), (8, 1), (1, 8), (80, 10), (10, 80), (255, 32)] {
+            assert!(rect(w, h).is_valid(), "{w} × {h}");
+            assert!(swapped(rect(w, h)).is_valid(), "{w} × {h}");
+        }
+        for (w, h) in [(9, 1), (1, 9), (81, 10), (10, 81), (17, 2), (255, 31)] {
+            assert!(!rect(w, h).is_valid(), "{w} × {h}");
+            assert!(!swapped(rect(w, h)).is_valid(), "{w} × {h}");
+        }
+    }
+
+    /// The legibility rules hold for every shape the search makes and
+    /// moves: random polygons, rectangles and rotated rectangles, and every
+    /// greedy and refit move of them, over many seeds and canvas sizes.
+    #[test]
+    fn random_and_mutate_keep_polygons_and_rectangles_valid() {
         fn assert_valid(shape: &Shape, context: &str) {
             match shape {
                 Shape::Polygon(polygon) => assert!(polygon.is_valid(), "{context}: {polygon:?}"),
+                Shape::Rectangle(rect) => assert!(rect.is_valid(), "{context}: {rect:?}"),
                 Shape::RotatedRectangle(rect) => assert!(rect.is_valid(), "{context}: {rect:?}"),
                 _ => {}
             }
@@ -1718,12 +1792,13 @@ mod tests {
             Step::Scaled(0.3),
             Step::Scaled(crate::refine::MIN_SCALE),
         ];
-        let (mut polygons, mut rects) = (0, 0);
+        let (mut polygons, mut rects, mut aligned) = (0, 0, 0);
         for seed in 0..40 {
-            for (width, height) in [(2, 2), (3, 7), (64, 48), (256, 171)] {
+            for (width, height) in [(2, 2), (3, 7), (64, 48), (256, 171), (300, 9)] {
                 let (mut worker, round) = make_test_round(width, height, 0x1e91 + seed);
                 for kind in [
                     ShapeKind::Polygon,
+                    ShapeKind::Rectangle,
                     ShapeKind::RotatedRectangle,
                     ShapeKind::Any,
                 ] {
@@ -1733,6 +1808,7 @@ mod tests {
                         assert_valid(&shape, &context);
                         polygons += usize::from(matches!(shape, Shape::Polygon(_)));
                         rects += usize::from(matches!(shape, Shape::RotatedRectangle(_)));
+                        aligned += usize::from(matches!(shape, Shape::Rectangle(_)));
                         for step in steps {
                             for _ in 0..25 {
                                 shape.mutate(&mut worker, step);
@@ -1743,7 +1819,10 @@ mod tests {
                 }
             }
         }
-        assert!(polygons > 1000 && rects > 1000, "{polygons} {rects}");
+        assert!(
+            polygons > 1000 && rects > 1000 && aligned > 1000,
+            "{polygons} {rects} {aligned}"
+        );
     }
 
     #[test]

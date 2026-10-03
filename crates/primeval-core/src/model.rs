@@ -632,13 +632,14 @@ mod tests {
     /// `polygon`, `rotated-rectangle` and `any` (both coarse and not) were
     /// recorded again when polygons became strictly convex with every
     /// angle above 15° and rotated rectangles got their 1:8 aspect-ratio
-    /// cap, the legibility rules.
+    /// cap, the legibility rules; `rectangle` and `any` (both coarse and
+    /// not) again when axis-aligned rectangles got the same cap.
     #[test]
     fn seeded_greedy_output_is_pinned() {
         let pinned = [
-            (ShapeKind::Any, 0xe58047d2db16df10),
+            (ShapeKind::Any, 0xc79e328758b81cac),
             (ShapeKind::Triangle, 0x0b2c1d60c966824f),
-            (ShapeKind::Rectangle, 0xdf2ad63d0504df61),
+            (ShapeKind::Rectangle, 0xd8f95f8e1f029eac),
             (ShapeKind::Ellipse, 0xdd99e621c00e71b6),
             (ShapeKind::Circle, 0x1cc7d6677aa8b599),
             (ShapeKind::RotatedRectangle, 0x52186adc7569380b),
@@ -659,7 +660,7 @@ mod tests {
         assert_eq!(actual, pinned);
         assert_eq!(
             digest(&seeded_drawing_of(42, 2, 2, ShapeKind::Any, true, COARSE)),
-            0xb9d43f5ae39f6f0b,
+            0x90ca95129c711074,
             "with a coarse random phase"
         );
     }

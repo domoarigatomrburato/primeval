@@ -1,23 +1,32 @@
-//! Joint gradient optimisation of a drawing's triangles and convex
-//! polygons, with every other layer fixed in geometry.
+//! Joint gradient optimisation of a drawing's triangles, convex polygons
+//! and rectangles, rotated or not, with every other layer fixed in
+//! geometry.
 //!
 //! The greedy search places one shape at a time with the others fixed.
-//! [`optimise`] then moves every vertex of every triangle and polygon, and
-//! every opacity under [`Alpha::Auto`], at once: Adam on the gradient of
-//! the squared error between the composite and the target, through a
-//! smooth model of the export's anti-aliased rendering, with every colour
-//! refitted at each iteration. Its result is snapped to a quarter pixel and
-//! keeps the engine's rules: every angle of a triangle above 15°, and every
-//! polygon strictly convex with every angle above 15°.
+//! [`optimise`] then moves every vertex of every triangle and polygon, every
+//! side of every rectangle, the centre, half-side vector and half-width of
+//! every rotated rectangle, and every opacity under [`Alpha::Auto`], at
+//! once: Adam on the gradient of the squared error between the composite
+//! and the target, through a smooth model of the export's anti-aliased
+//! rendering, with every colour refitted at each iteration. Its result is
+//! snapped to a quarter pixel (half a pixel for axis-aligned rectangles)
+//! and keeps the engine's rules: every angle of a triangle above 15°, every
+//! polygon strictly convex with every angle above 15°, and every rectangle
+//! with sides of at least 1 px, the long one at most 8 times the short one.
 //!
-//! The other layers (rectangles, rotated rectangles, ellipses, circles,
-//! rotated ellipses and quadratics) keep their geometry. Their opacity and
-//! colour are optimised with the others', through a coverage mask of the
-//! engine's own rasterization of the shape, computed once.
+//! The other layers (ellipses, circles, rotated ellipses and quadratics)
+//! keep their geometry. Their opacity and colour are optimised with the
+//! others', through a coverage mask of the engine's own rasterization of
+//! the shape, computed once.
 //!
-//! The forward model (`diff.rs`) covers each pixel of a triangle or a
-//! polygon by the product of its edges' exact half-plane areas in the pixel
-//! square, and composites in `f32`. Reverse-mode gradients replay the layer
+//! The forward model (`diff.rs`) covers each pixel of a triangle, a
+//! polygon or a rotated rectangle by the product of its edges' exact
+//! half-plane areas in the pixel square, and of an axis-aligned rectangle
+//! by the product of its sides', which is its exact area there; it
+//! composites in `f32`. A rotated rectangle is parametrised without
+//! trigonometry, by its centre `c`, a half-side vector `u` and its
+//! half-width `h`, its corners `c ± u ± (h / |u|) · (−u_y, u_x)` computed
+//! with `sqrt` alone. Reverse-mode gradients replay the layer
 //! stack from canvas checkpoints, about `√N` of them for `N` layers, capped
 //! in memory as the refit pass's are. Every pass runs as one task per fixed
 //! band of rows, with one fork and join, and its sums are reduced in band
@@ -25,7 +34,7 @@
 //! colours are refitted together, each by a step towards its closed-form
 //! fit that can only lower the loss. The rules are kept by a projection
 //! after every step and by the snap (`angle.rs` for triangles, `convex.rs`
-//! for polygons).
+//! for polygons, `rect.rs` for rectangles).
 //!
 //! # Arithmetic
 //!
@@ -43,11 +52,17 @@
 //! between platforms. Tests may use them. The masks of the fixed layers
 //! are not computed here: they are the scanlines of the engine's
 //! rasterizers, which the greedy search's own output already depends on,
-//! and which the native–wasm tripwire test covers.
+//! and which the native–wasm tripwire test covers. A rotated rectangle's
+//! starting `u` needs the sine and cosine of the greedy search's integer
+//! angle: they come from a Taylor polynomial in `+ − × ÷`
+//! (`rect::sin_cos_degrees`), not from the platform's `sin_cos`, so B's
+//! input is the same on every platform even where the platforms' `sin_cos`
+//! differ in the last bit.
 
 mod angle;
 mod convex;
 mod diff;
+mod rect;
 
 use crate::model::CommittedShape;
 use crate::shapes::Shape;
@@ -106,16 +121,20 @@ pub struct Settings {
 ///
 /// See the module documentation for the method.
 /// [`Settings::iterations`] Adam iterations, by default a number that
-/// grows with the number of shapes, move the vertices of the triangles and
-/// polygons, and every opacity when `alpha` is [`Alpha::Auto`]; with
-/// [`Alpha::Fixed`] every opacity stays at the fixed value. Every colour is
-/// refitted at each iteration. Every other shape keeps its geometry
-/// exactly.
+/// grows with the number of shapes, move the triangles, polygons and
+/// rectangles, rotated or not, and every opacity when `alpha` is
+/// [`Alpha::Auto`]; with [`Alpha::Fixed`] every opacity stays at the fixed
+/// value. Every colour is refitted at each iteration. Every other shape
+/// keeps its geometry exactly.
 ///
 /// The result keeps the number, the order and the kind of the shapes. Its
-/// triangle and polygon vertices are multiples of 0.25 px; every angle of
-/// every triangle is above 15°, every polygon is strictly convex with every
-/// angle above 15°, and the opacities and colours are integers.
+/// triangle and polygon vertices are multiples of 0.25 px, and so are a
+/// rotated rectangle's centre, half-side vector and half-width, from which
+/// its corners are computed; an axis-aligned rectangle's corners and sides
+/// are multiples of 0.5 px. Every angle of every triangle is above 15°,
+/// every polygon is strictly convex with every angle above 15°, every
+/// rectangle has sides of at least 1 px and its long side at most 8 times
+/// its short one, and the opacities and colours are integers.
 ///
 /// `cancelled` is polled before every iteration and before the snap. The
 /// result does not depend on the number of threads of the current rayon
@@ -134,14 +153,14 @@ pub fn optimise(
 /// The difference between `drawing`, an [`optimise`] result for `model`,
 /// rendered by [`optimise`]'s model, and `model`'s target: the RMSE over
 /// the RGB channels divided by 255, as [`Model::score_f64`] measures the
-/// engine's canvas. Its triangles and polygons are taken from `drawing`,
-/// and the coverage of every other shape from `model`'s.
+/// engine's canvas. Its triangles, polygons and rectangles, rotated or not,
+/// are taken from `drawing`, and the coverage of every other shape from
+/// `model`'s.
 ///
 /// # Panics
 ///
 /// If `drawing` does not have `model`'s shapes, kinds, background and size,
-/// with the geometry of every shape that is neither a triangle nor a
-/// polygon unchanged.
+/// with the geometry of every other shape unchanged.
 #[must_use]
 pub fn score(model: &Model, drawing: &Drawing) -> f64 {
     let (target, background, history) = model.joint_parts();
@@ -153,8 +172,19 @@ pub fn score(model: &Model, drawing: &Drawing) -> f64 {
     score_shapes(target, background, history, drawing)
 }
 
-/// The lattice the exported vertices snap to, in pixels.
+/// The lattice the exported vertices, and rotated rectangles' parameters,
+/// snap to, in pixels.
 const QUANTUM: f64 = 0.25;
+/// The lattice the exported axis-aligned rectangles snap to, in pixels.
+///
+/// Their coordinates are integers in the greedy search's output, so a
+/// finer lattice costs them bytes that the other kinds' coordinates
+/// already pay. Measured with the engine runner (B alone, at 50 / 100 /
+/// 200 rectangles, against 0.25 px): 0.5 px saves about 3.5 bytes a
+/// rectangle and costs 0.3 / 0.5 / 0.8 points of greedy's median RMSE,
+/// 1 px saves about 3.8 bytes and costs 0.4 / 0.7 / 1.7 points. With
+/// 0.25 px the SVG is 6–7% larger than greedy's, with 0.5 px 2–3%.
+const RECT_QUANTUM: f64 = 0.5;
 /// Adam's step size of the vertices at the first iteration, in pixels.
 const LR_VERTEX: f64 = 1.0;
 /// Adam's step size of the opacities at the first iteration, in levels of
@@ -176,9 +206,9 @@ struct Parts<F> {
 }
 
 /// The [`Parts`] of the committed shapes `history` on `target` and
-/// `background`: triangles and quadrilaterals become layers with their
-/// vertices in engine coordinates, every other shape a fixed layer with
-/// the mask of the engine's rasterization.
+/// `background`: triangles, quadrilaterals and rectangles, rotated or not,
+/// become layers with their parameters in engine coordinates, every other
+/// shape a fixed layer with the mask of the engine's rasterization.
 fn parts<F: Real>(target: &Buffer, background: Color, history: &[CommittedShape]) -> Parts<F> {
     let (width, height) = (target.width() as usize, target.height() as usize);
     let mut masks = Vec::new();
@@ -211,13 +241,49 @@ fn parts<F: Real>(target: &Buffer, background: Color, history: &[CommittedShape]
                 ),
                 Shape::Polygon(polygon) if polygon.order == 4 => Layer {
                     outline: Outline::Quad,
-                    vertices: std::array::from_fn(|k| {
+                    params: std::array::from_fn(|k| {
                         let axis = if k % 2 == 0 { &polygon.x } else { &polygon.y };
                         axis[k / 2] - 0.5
                     }),
                     alpha,
                     color: rgb,
                 },
+                // The pixels `x1..=x2` span `x1 − 0.5..x2 + 0.5`.
+                Shape::Rectangle(rectangle) => {
+                    let (x1, y1, x2, y2) = rectangle.bounds();
+                    let mut params = [0.0; COORDS];
+                    params[..4].copy_from_slice(&[
+                        f64::from(x1) - 0.5,
+                        f64::from(y1) - 0.5,
+                        f64::from(x2) + 0.5,
+                        f64::from(y2) + 0.5,
+                    ]);
+                    Layer {
+                        outline: Outline::Rect,
+                        params,
+                        alpha,
+                        color: rgb,
+                    }
+                }
+                // The centre is continuous; `u` runs along the side `sx`.
+                Shape::RotatedRectangle(rectangle) => {
+                    let (sin, cos) = rect::sin_cos_degrees(rectangle.angle);
+                    let half = f64::from(rectangle.sx) / 2.0;
+                    let mut params = [0.0; COORDS];
+                    params[..5].copy_from_slice(&[
+                        f64::from(rectangle.x) - 0.5,
+                        f64::from(rectangle.y) - 0.5,
+                        half * cos,
+                        half * sin,
+                        f64::from(rectangle.sy) / 2.0,
+                    ]);
+                    Layer {
+                        outline: Outline::Rotated,
+                        params,
+                        alpha,
+                        color: rgb,
+                    }
+                }
                 shape => {
                     masks.push(Mask::from_lines(
                         shape.rasterize(&mut worker),
@@ -227,7 +293,7 @@ fn parts<F: Real>(target: &Buffer, background: Color, history: &[CommittedShape]
                     fixed.push(shape.geometry());
                     Layer {
                         outline: Outline::Fixed(masks.len() - 1),
-                        vertices: [0.0; COORDS],
+                        params: [0.0; COORDS],
                         alpha,
                         color: rgb,
                     }
@@ -310,10 +376,33 @@ fn score_shapes(
             (Outline::Fixed(index), geometry) => {
                 assert_eq!(geometry, &fixed[index], "a fixed shape moved");
             }
-            (outline, Geometry::Polygon(points)) if points.len() == outline.sides() => {
+            (
+                Outline::Rect,
+                &Geometry::Rect {
+                    x,
+                    y,
+                    width,
+                    height,
+                },
+            ) => {
+                layer.params[..4].copy_from_slice(&[
+                    x - 0.5,
+                    y - 0.5,
+                    x + width - 0.5,
+                    y + height - 0.5,
+                ]);
+            }
+            (outline, Geometry::Polygon(points))
+                if points.len() == outline.sides() && outline != Outline::Rect =>
+            {
+                // A rotated rectangle's coverage is its corners' as a
+                // quadrilateral's.
+                if outline == Outline::Rotated {
+                    layer.outline = Outline::Quad;
+                }
                 for (k, point) in points.iter().enumerate() {
-                    layer.vertices[2 * k] = point.x - 0.5;
-                    layer.vertices[2 * k + 1] = point.y - 0.5;
+                    layer.params[2 * k] = point.x - 0.5;
+                    layer.params[2 * k + 1] = point.y - 0.5;
                 }
             }
             (_, geometry) => panic!("not the model's shape: {geometry:?}"),
@@ -331,39 +420,44 @@ fn decay(t: usize, iterations: usize) -> f64 {
     1.0 - p * p * (3.0 - 2.0 * p)
 }
 
-/// Projects `layer` onto its rule with angles of at least `atan tan_tau`:
-/// a triangle by [`angle::project`], a polygon by [`convex::project`];
-/// a fixed layer has no vertices. Returns the displacement, or `None` if
-/// the layer was already inside.
+/// Projects `layer` onto its rule, with angles of at least `atan tan_tau`:
+/// a triangle by [`angle::project`], a polygon by [`convex::project`], a
+/// rectangle by [`rect::project_box`] and a rotated one by
+/// [`rect::project_rotated`]; a fixed layer has no parameters. Returns the
+/// displacement of the parameters, or `None` if the layer was already
+/// inside.
 fn project(layer: &mut Layer, tan_tau: f64) -> Option<[f64; COORDS]> {
-    let before = layer.vertices;
+    let before = layer.params;
     let projected = match layer.outline {
         Outline::Triangle => {
-            let mut v: [f64; 6] = std::array::from_fn(|k| layer.vertices[k]);
+            let mut v: [f64; 6] = std::array::from_fn(|k| layer.params[k]);
             let projected = angle::project(&mut v, tan_tau);
-            layer.vertices[..6].copy_from_slice(&v);
+            layer.params[..6].copy_from_slice(&v);
             projected
         }
-        Outline::Quad => convex::project(&mut layer.vertices, tan_tau),
+        Outline::Quad => convex::project(&mut layer.params, tan_tau),
+        Outline::Rect => rect::project_box(&mut layer.params),
+        Outline::Rotated => rect::project_rotated(&mut layer.params),
         Outline::Fixed(_) => return None,
     };
     match projected {
         angle::Projected::Unchanged => None,
         angle::Projected::Moved | angle::Projected::Rebuilt => {
-            Some(std::array::from_fn(|k| layer.vertices[k] - before[k]))
+            Some(std::array::from_fn(|k| layer.params[k] - before[k]))
         }
     }
 }
 
-/// Runs `iterations` Adam steps on the vertices and opacities of `layers`
-/// (opacities only with `auto_alpha`, and no vertices for fixed layers),
-/// each on the [`diff::gradients`] taken after one [`diff::fit`] of every
-/// colour; then one more fit refits the colours of the final geometry.
-/// `cancelled` is polled before every step; `None` once it returns true.
-/// Vertices stay within [`MARGIN`] of the canvas unless a projection moves
-/// them out.
+/// Runs `iterations` Adam steps on the parameters and opacities of
+/// `layers` (opacities only with `auto_alpha`, and no parameters for fixed
+/// layers), each on the [`diff::gradients`] taken after one [`diff::fit`]
+/// of every colour; then one more fit refits the colours of the final
+/// geometry. `cancelled` is polled before every step; `None` once it
+/// returns true. Positions stay within [`MARGIN`] of the canvas, and a
+/// rotated rectangle's `u` and `h` within the canvas's longer side plus
+/// twice the margin, unless a projection moves them out ([`bounds`]).
 ///
-/// Every triangle and polygon is projected onto its rule ([`project`])
+/// Every layer that is not fixed is projected onto its rule ([`project`])
 /// before the first step and after every step, after the clamp to the
 /// margin. A projected layer loses the component of its first moment
 /// along the projection's displacement when that component pushes back
@@ -384,10 +478,7 @@ fn run<F: Real>(
     let mut work = Workspace::default();
     let mut first = vec![[0.0; PARAMS]; layers.len()];
     let mut second = vec![[0.0; PARAMS]; layers.len()];
-    let (max_x, max_y) = (
-        (scene.width - 1) as f64 + MARGIN,
-        (scene.height - 1) as f64 + MARGIN,
-    );
+    let bounds = bounds(scene.width, scene.height);
     // `β^t`, as running products.
     let (mut power1, mut power2) = (1.0, 1.0);
     for t in 0..iterations {
@@ -402,17 +493,16 @@ fn run<F: Real>(
         let (correction1, correction2) = (1.0 - power1, 1.0 - power2);
         for (index, layer) in layers.iter_mut().enumerate() {
             let grad = gradients[index];
-            let coords = 2 * layer.outline.sides();
+            let coords = layer.outline.params();
             for k in (0..coords).chain((auto_alpha).then_some(ALPHA)) {
                 let m = &mut first[index][k];
                 let v = &mut second[index][k];
                 *m = BETA1 * *m + (1.0 - BETA1) * grad[k];
                 *v = BETA2 * *v + (1.0 - BETA2) * grad[k] * grad[k];
                 let update = adam_update(*m, *v, (correction1, correction2));
-                let (value, rate, low, high) = match k {
-                    ALPHA => (&mut layer.alpha, LR_ALPHA, 1.0, 255.0),
-                    k if k % 2 == 0 => (&mut layer.vertices[k], LR_VERTEX, -MARGIN, max_x),
-                    _ => (&mut layer.vertices[k], LR_VERTEX, -MARGIN, max_y),
+                let (value, rate, (low, high)) = match k {
+                    ALPHA => (&mut layer.alpha, LR_ALPHA, (1.0, 255.0)),
+                    k => (&mut layer.params[k], LR_VERTEX, bounds(layer.outline, k)),
                 };
                 *value = (*value - rate * decay * update).clamp(low, high);
             }
@@ -428,6 +518,20 @@ fn run<F: Real>(
     }
     diff::fit(scene, layers, &mut work);
     Some(())
+}
+
+/// The range Adam's steps keep parameter `k` of an outline in, on a canvas
+/// `width × height`: positions within [`MARGIN`] of the canvas, and a
+/// rotated rectangle's `ux`, `uy` and `h` within the canvas's longer side
+/// plus twice the margin, of either sign.
+fn bounds(width: usize, height: usize) -> impl Fn(Outline, usize) -> (f64, f64) {
+    let (max_x, max_y) = ((width - 1) as f64 + MARGIN, (height - 1) as f64 + MARGIN);
+    let size = width.max(height) as f64 + 2.0 * MARGIN;
+    move |outline, k| match (outline, k) {
+        (Outline::Rotated, 2..) => (-size, size),
+        (_, k) if k % 2 == 0 => (-MARGIN, max_x),
+        _ => (-MARGIN, max_y),
+    }
 }
 
 /// Adam's update of one parameter, in units of its step size: the
@@ -470,10 +574,13 @@ fn redirect_momentum(
 }
 
 /// `layers` as a drawing on `background`: triangle and polygon vertices
-/// snapped to [`QUANTUM`] keeping their rules ([`angle::snap`],
-/// [`convex::snap`]), opacities rounded, colours refitted once to the
-/// snapped geometry and rounded. A fixed layer keeps its geometry, from
-/// `fixed`.
+/// and rotated rectangle parameters snapped to [`QUANTUM`], and rectangle
+/// parameters to [`RECT_QUANTUM`], keeping their rules ([`angle::snap`],
+/// [`convex::snap`], [`rect::snap_rotated`], [`rect::snap_box`]),
+/// opacities rounded, colours refitted once to the snapped geometry and
+/// rounded. A rectangle becomes a [`Geometry::Rect`], a rotated rectangle
+/// the polygon of its corners ([`Layer::corners`]). A fixed layer keeps its
+/// geometry, from `fixed`.
 fn export<F: Real>(
     scene: &Scene<F>,
     layers: &[Layer],
@@ -483,17 +590,19 @@ fn export<F: Real>(
     let mut snapped: Vec<Layer> = layers
         .iter()
         .map(|layer| {
-            let mut vertices = layer.vertices;
+            let mut params = layer.params;
             match layer.outline {
                 Outline::Triangle => {
-                    let v: [f64; 6] = std::array::from_fn(|k| vertices[k]);
-                    vertices[..6].copy_from_slice(&angle::snap(&v, QUANTUM).0);
+                    let v: [f64; 6] = std::array::from_fn(|k| params[k]);
+                    params[..6].copy_from_slice(&angle::snap(&v, QUANTUM).0);
                 }
-                Outline::Quad => vertices = convex::snap(&vertices, QUANTUM).0,
+                Outline::Quad => params = convex::snap(&params, QUANTUM).0,
+                Outline::Rect => params = rect::snap_box(&params, RECT_QUANTUM).0,
+                Outline::Rotated => params = rect::snap_rotated(&params, QUANTUM).0,
                 Outline::Fixed(_) => {}
             }
             Layer {
-                vertices,
+                params,
                 alpha: layer.alpha.round().clamp(1.0, 255.0),
                 ..*layer
             }
@@ -509,16 +618,23 @@ fn export<F: Real>(
             .map(|layer| {
                 let geometry = match layer.outline {
                     Outline::Fixed(index) => fixed[index].clone(),
-                    outline => Geometry::Polygon(
-                        (0..outline.sides())
-                            .map(|k| {
-                                Point::new(
-                                    layer.vertices[2 * k] + 0.5,
-                                    layer.vertices[2 * k + 1] + 0.5,
-                                )
-                            })
-                            .collect(),
-                    ),
+                    Outline::Rect => {
+                        let [x0, y0, x1, y1, ..] = layer.params;
+                        Geometry::Rect {
+                            x: x0 + 0.5,
+                            y: y0 + 0.5,
+                            width: x1 - x0,
+                            height: y1 - y0,
+                        }
+                    }
+                    outline => {
+                        let corners = layer.corners();
+                        Geometry::Polygon(
+                            (0..outline.sides())
+                                .map(|k| Point::new(corners[2 * k] + 0.5, corners[2 * k + 1] + 0.5))
+                                .collect(),
+                        )
+                    }
                 };
                 let [r, g, b] = layer.color.map(|c| c.round().clamp(0.0, 255.0) as u8);
                 DrawnShape {
@@ -698,19 +814,19 @@ mod tests {
         let tan_tau = (15.0 + 1e-9_f64).to_radians().tan();
         let mut boundary = start;
         boundary.retain_mut(|tri| {
-            let mut v: [f64; 6] = std::array::from_fn(|k| tri.vertices[k]);
+            let mut v: [f64; 6] = std::array::from_fn(|k| tri.params[k]);
             let cy = (v[1] + v[3] + v[5]) / 3.0;
             for k in 0..3 {
                 v[2 * k + 1] = cy + 0.1 * (v[2 * k + 1] - cy);
             }
             let projected = angle::project(&mut v, tan_tau);
-            tri.vertices[..6].copy_from_slice(&v);
+            tri.params[..6].copy_from_slice(&v);
             projected != angle::Projected::Unchanged
         });
         assert!(boundary.len() >= 12, "{} projected", boundary.len());
         let repaired = boundary
             .iter()
-            .filter(|tri| angle::snap(&std::array::from_fn(|k| tri.vertices[k]), QUANTUM).1)
+            .filter(|tri| angle::snap(&std::array::from_fn(|k| tri.params[k]), QUANTUM).1)
             .count();
         assert!(repaired >= 6, "{repaired} repaired");
         for v in vertices(&export(&scene, &boundary, &[], background)) {
@@ -918,7 +1034,7 @@ mod tests {
             .filter(|v| convex::is_valid(v) && v.iter().all(|c| (-10.0..50.0).contains(c)))
             .map(|vertices| Layer {
                 outline: Outline::Quad,
-                vertices,
+                params: vertices,
                 alpha: 128.0,
                 color: [128.0; 3],
             })
@@ -930,9 +1046,94 @@ mod tests {
         }
     }
 
-    /// In a drawing of every kind, the triangles and polygons move and
-    /// every other shape keeps its geometry exactly, while the colours and
-    /// opacities of all of them are optimised.
+    /// The axis-aligned rectangles of `drawing`, as `x, y, width, height`.
+    fn rects(drawing: &Drawing) -> Vec<[f64; 4]> {
+        drawing
+            .shapes
+            .iter()
+            .filter_map(|shape| match shape.geometry {
+                Geometry::Rect {
+                    x,
+                    y,
+                    width,
+                    height,
+                } => Some([x, y, width, height]),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Exported axis-aligned rectangles keep the rule, checked
+    /// independently on their sides, sit on their lattice, and lower the
+    /// model's error; so do rotated rectangles, checked by `acos` angles
+    /// and side lengths from their corners. Rectangles on the rule's
+    /// boundary, run and exported, keep it too.
+    #[test]
+    fn exported_rectangles_keep_the_rule() {
+        let target = target(48, 40);
+        let check_box = |r: [f64; 4]| {
+            let [x, y, w, h] = r;
+            assert!(
+                w >= 1.0 && h >= 1.0 && w <= 8.0 * h && h <= 8.0 * w,
+                "{r:?}"
+            );
+            for value in [x - 0.5, y - 0.5, w, h] {
+                assert_eq!((value / RECT_QUANTUM).fract(), 0.0, "{r:?}");
+            }
+        };
+        let model = greedy_kind(&target, 20, ShapeKind::Rectangle, Alpha::Auto);
+        let optimised =
+            optimise(&model, Alpha::Auto, settings(30), || false).expect("not cancelled");
+        let (before, after) = (score(&model, &model.drawing()), score(&model, &optimised));
+        assert!(after < 0.95 * before, "{before} -> {after}");
+        let exported = rects(&optimised);
+        assert_eq!(exported.len(), 20);
+        assert_ne!(exported, rects(&model.drawing()));
+        exported.into_iter().for_each(check_box);
+
+        let model = greedy_kind(&target, 20, ShapeKind::RotatedRectangle, Alpha::Auto);
+        let optimised =
+            optimise(&model, Alpha::Auto, settings(30), || false).expect("not cancelled");
+        let (before, after) = (score(&model, &model.drawing()), score(&model, &optimised));
+        assert!(after < 0.95 * before, "{before} -> {after}");
+        let exported = quads(&optimised);
+        assert_eq!(exported.len(), 20);
+        assert_ne!(exported, quads(&model.drawing()));
+        for v in exported {
+            assert!(rect::tests::acos_rectangle(&v, 1e-9), "{v:?}");
+        }
+
+        // Random rectangles on the rule's boundary, run and exported.
+        let mut rng = ChaCha8Rng::seed_from_u64(79);
+        let scene = diff::tests::random_scene::<f32>(&mut rng, 40, 32);
+        let mut layers = diff::tests::random_boxes(&mut rng, 30, 32.0);
+        layers.extend(diff::tests::random_rotated(&mut rng, 30, 32.0));
+        for (index, layer) in layers.iter_mut().enumerate() {
+            let p = &mut layer.params;
+            match (layer.outline, index % 3) {
+                (Outline::Rect, 0) => p[2] = p[0] + 1.0,
+                (Outline::Rect, 1) => p[3] = p[1] + 8.0 * (p[2] - p[0]),
+                (Outline::Rotated, 0) => p[4] = 0.5,
+                (Outline::Rotated, 1) => p[4] = 8.0 * p[2].hypot(p[3]),
+                _ => {}
+            }
+        }
+        run(&scene, &mut layers, 20, true, TAN_PROJECTION, &mut || false).expect("not cancelled");
+        let drawing = export(&scene, &layers, &[], Color::new(0, 0, 0, 255));
+        let exported = rects(&drawing);
+        assert_eq!(exported.len(), 30);
+        exported.into_iter().for_each(check_box);
+        let exported = quads(&drawing);
+        assert_eq!(exported.len(), 30);
+        for v in exported {
+            assert!(rect::tests::acos_rectangle(&v, 1e-9), "{v:?}");
+        }
+    }
+
+    /// In a drawing of every kind, the triangles, polygons and rectangles,
+    /// rotated or not, move and every other shape keeps its geometry
+    /// exactly, while the colours and opacities of all of them are
+    /// optimised.
     #[test]
     fn fixed_shapes_keep_their_geometry() {
         let target = target(64, 48);
@@ -946,7 +1147,10 @@ mod tests {
         for ((before, after), committed) in start.shapes.iter().zip(&optimised.shapes).zip(history)
         {
             match committed.shape {
-                Shape::Triangle(_) | Shape::Polygon(_) => {
+                Shape::Triangle(_)
+                | Shape::Polygon(_)
+                | Shape::Rectangle(_)
+                | Shape::RotatedRectangle(_) => {
                     if before.geometry != after.geometry {
                         moved += 1;
                     }
@@ -960,7 +1164,7 @@ mod tests {
                 }
             }
         }
-        assert!(fixed >= 10 && moved >= 5, "{fixed} fixed, {moved} moved");
+        assert!(fixed >= 8 && moved >= 10, "{fixed} fixed, {moved} moved");
         assert!(
             recoloured * 2 >= fixed,
             "{recoloured} of {fixed} recoloured"
@@ -984,10 +1188,8 @@ mod tests {
             },
         );
         for kind in [
-            ShapeKind::Rectangle,
             ShapeKind::Ellipse,
             ShapeKind::Circle,
-            ShapeKind::RotatedRectangle,
             ShapeKind::Quadratic,
             ShapeKind::RotatedEllipse,
         ]
@@ -1001,9 +1203,9 @@ mod tests {
         assert!((engine - joint).abs() < 0.002, "{engine} vs {joint}");
     }
 
-    /// A drawing of every kind, with one large triangle and one large
-    /// polygon that cross every band, gives the same result at 1, 2, 4
-    /// and 8 threads.
+    /// A drawing of every kind, with a large triangle, polygon, rectangle
+    /// and rotated rectangle that cross every band, gives the same result
+    /// at 1, 2, 4 and 8 threads.
     #[test]
     fn a_mixed_result_does_not_depend_on_the_thread_count() {
         let target = target(120, 100);
@@ -1022,6 +1224,19 @@ mod tests {
             order: 4,
             x: [5.0, 110.0, 100.0, 10.0],
             y: [-5.0, 10.0, 105.0, 90.0],
+        });
+        history[2].shape = Shape::Rectangle(crate::shapes::Rectangle {
+            x1: 2,
+            y1: 0,
+            x2: 30,
+            y2: 99,
+        });
+        history[3].shape = Shape::RotatedRectangle(crate::shapes::RotatedRectangle {
+            x: 60,
+            y: 50,
+            sx: 40,
+            sy: 110,
+            angle: 20,
         });
         assert!(
             history
@@ -1051,16 +1266,59 @@ mod tests {
         }
     }
 
-    /// Cancelling at any poll of a mixed drawing returns `None`.
+    /// Cancelling at any poll of a mixed drawing, with triangles, polygons,
+    /// rectangles, rotated rectangles and fixed shapes, returns `None`.
     #[test]
     fn cancelling_a_mixed_drawing_returns_none() {
         let target = target(40, 32);
         let model = greedy_kind(&target, 12, ShapeKind::Any, Alpha::Auto);
         let copy = model.drawing();
+        let (_, background, history) = model.joint_parts();
+        let mut history = history.to_vec();
+        history[0].shape = Shape::Rectangle(crate::shapes::Rectangle {
+            x1: 3,
+            y1: 4,
+            x2: 20,
+            y2: 12,
+        });
+        history[1].shape = Shape::RotatedRectangle(crate::shapes::RotatedRectangle {
+            x: 20,
+            y: 16,
+            sx: 12,
+            sy: 5,
+            angle: 33,
+        });
+        history[2].shape = Shape::Triangle(crate::shapes::Triangle {
+            x1: 2,
+            y1: 30,
+            x2: 38,
+            y2: 25,
+            x3: 15,
+            y3: 3,
+        });
+        history[3].shape = Shape::Polygon(crate::shapes::Polygon {
+            order: 4,
+            x: [5.0, 30.0, 35.0, 8.0],
+            y: [2.0, 4.0, 28.0, 25.0],
+        });
+        assert!(history.iter().any(|c| matches!(
+            c.shape,
+            Shape::Ellipse(_) | Shape::Circle(_) | Shape::Quadratic(_) | Shape::RotatedEllipse(_)
+        )));
         let iterations = 4;
+        let optimise = |cancelled: &mut dyn FnMut() -> bool| {
+            optimise_shapes(
+                &target,
+                background,
+                &history,
+                Alpha::Auto,
+                settings(iterations),
+                cancelled,
+            )
+        };
         let mut polls = 0;
         assert!(
-            optimise(&model, Alpha::Auto, settings(iterations), || {
+            optimise(&mut || {
                 polls += 1;
                 false
             })
@@ -1069,7 +1327,7 @@ mod tests {
         assert_eq!(polls, iterations as usize + 1);
         for cancel_at in 1..=polls {
             let mut count = 0;
-            let result = optimise(&model, Alpha::Auto, settings(iterations), || {
+            let result = optimise(&mut || {
                 count += 1;
                 count >= cancel_at
             });
