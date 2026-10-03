@@ -688,7 +688,9 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
   - Native and wasm output stay identical (the browser tripwire test). B's arithmetic uses only `+ − × ÷` and `sqrt`: no libm calls such as `hypot`, `atan2`, `cos`, `powi`, `exp`, and no `mul_add`.
   - Cancellation between iterations.
   - Checkpoint memory capped as in A1, with A1 as the fallback above a size threshold.
-  - Budget: B's extra time is at most 0.5× greedy at 1 thread and at most 1× at 8 threads, at 100–200 shapes. The pilot runs at 1.0× greedy at 8 threads with K = 50, because it barely uses threads.
+  - ~~Budget: B's extra time is at most 0.5× greedy at 1 thread and at most 1× at 8 threads, at 100–200 shapes.~~ **Superseded (user decision, 2026-10-03): quality comes first.** Extra time is acceptable when it buys quality, since `main` is already about 2–14× faster than Go `primitive`.
+    - Configurations are chosen by absolute quality at a fixed shape count, with pass and iteration counts set by diminishing returns. "Wins at equal time" is no longer the bar.
+    - Times are still reported. A kind that would become slower than Go `primitive` is flagged.
 - **User decisions.**
   - Polygons must be convex, with the 15° minimum interior angle, in every optimiser, greedy included. A crossed quad reads as two triangles.
   - Rotated rectangles get an aspect-ratio cap of 1:8, close to the flattest triangle the 15° rule allows (15°, 15°, 150°: about 1:7.5).
@@ -763,6 +765,7 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
 
          The iteration rule stays as it is for every kind.
        - **R refit passes, then B, on `any`** (R = 1–4): +0.5 to +2.5 points over equal-time A1, all below B alone at 100 and 200 shapes. The fixed layers' geometry is what limits B on `any`.
+     - **Quality-first final stage, after 4b.** For each kind, search the final stage for the best absolute quality: R refit passes, then B with K iterations, or refit passes alone for kinds B does not cover. Stop at diminishing returns, by a deterministic rule rather than a time budget. Check triangles at K above 150. With time free, the iteration rule and `any`'s pipeline are revisited.
      - **4b, next:** rectangles and rotated rectangles in B, both for their own kinds and inside `any`, where they raise B's share of the layers from about 52% to 65%. Then `any` is measured again.
        - A rotated rectangle is parametrised without trigonometry: centre, half-side vector and half-width, with corners computed by `sqrt` only.
        - Both kinds get the 1:8 aspect cap. It is new for axis-aligned rectangles, for consistency, and its cost is measured before it is adopted.
@@ -771,6 +774,7 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
   7. **Curved kinds** with their own smooth coverage: later, and perhaps never for `quadratic`.
 
 **Before merging the branch** (user decision: it merges once, when B's productisation is done too, with no intermediate merge):
+- a full review of the whole branch (user request);
 - regenerate the gallery, the README comparison images and the versus-Go numbers (`CONTRIBUTING.md`), which output changes make stale;
 - check by hand in the demo that "Refining" stays visible during a long single-threaded pass, and that Stop during it keeps the preview.
 
