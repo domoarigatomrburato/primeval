@@ -802,7 +802,7 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
   7. **Curved kinds** with their own smooth coverage: later, and perhaps never for `quadratic`.
 
 **Before merging the branch** (user decision: it merges once, when B's productisation is done too, with no intermediate merge):
-- a full review of the whole branch (user request);
+- a full review of the whole branch (user request), with the `/simplify` and `/code-review` skills;
 - regenerate the gallery, the README comparison images and the versus-Go numbers (`CONTRIBUTING.md`), which output changes make stale;
 - check by hand in the demo that "Refining" stays visible during a long single-threaded pass, and that Stop during it keeps the preview.
 
