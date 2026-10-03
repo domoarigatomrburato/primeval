@@ -200,10 +200,10 @@ fn decay(t: usize, iterations: usize) -> f64 {
 ///
 /// Every triangle is projected onto angles of at least `atan tan_tau`
 /// ([`angle::project`]) before the first step and after every step, after
-/// the clamp to the margin. A projected triangle keeps its second moments
-/// and loses the component of its first moment along the projection's
-/// displacement when that component pushes back out of the set
-/// (`m ← m − (m·d / d·d) d` if `m·d > 0`, the update being `−m`): the
+/// the clamp to the margin. A projected triangle loses the component of
+/// its first moment along the projection's displacement when that
+/// component pushes back out of the set, and its second moments rise to
+/// keep every step within the step size ([`redirect_momentum`]): the
 /// momentum keeps sliding along the boundary but stops pressing into it.
 fn run<F: Real>(
     scene: &Scene<F>,
@@ -254,7 +254,7 @@ fn run<F: Real>(
                 let v = &mut second[index][k];
                 *m = BETA1 * *m + (1.0 - BETA1) * grad[k];
                 *v = BETA2 * *v + (1.0 - BETA2) * grad[k] * grad[k];
-                let update = (*m / correction1) / ((*v / correction2).sqrt() + EPSILON);
+                let update = adam_update(*m, *v, (correction1, correction2));
                 let (value, rate, low, high) = match k {
                     6 => (&mut tri.alpha, LR_ALPHA, 1.0, 255.0),
                     k if k % 2 == 0 => (&mut tri.vertices[k], LR_VERTEX, -MARGIN, max_x),
@@ -263,19 +263,54 @@ fn run<F: Real>(
                 *value = (*value - rate * decay * update).clamp(low, high);
             }
             if let Some(displacement) = project(&mut tri.vertices) {
-                let m = &mut first[index];
-                let md: f64 = (0..6).map(|k| m[k] * displacement[k]).sum();
-                let dd: f64 = displacement.iter().map(|d| d * d).sum();
-                if md > 0.0 && dd > 0.0 {
-                    for k in 0..6 {
-                        m[k] -= md / dd * displacement[k];
-                    }
-                }
+                redirect_momentum(
+                    &mut first[index],
+                    &mut second[index],
+                    &displacement,
+                    (correction1, correction2),
+                );
             }
         }
     }
     diff::fit(scene, tris, &mut work);
     Some(())
+}
+
+/// Adam's update of one parameter, in units of its step size: the
+/// first moment `m` over the root of the second moment `v`, each divided
+/// by its bias correction `1 − β^t` in `corrections`.
+fn adam_update(m: f64, v: f64, corrections: (f64, f64)) -> f64 {
+    (m / corrections.0) / ((v / corrections.1).sqrt() + EPSILON)
+}
+
+/// The momentum correction of [`run`] after a projection moved a triangle
+/// by `displacement`, on the moments `first` and `second` of its
+/// parameters, with Adam's bias `corrections` at this step.
+///
+/// If the first moment `m` of the vertices pushes back out of the set
+/// (`m·d > 0`, the update being `−m`), its component along `d` is removed:
+/// `m ← m − (m·d / d·d) d`. That moves first moment into every coordinate
+/// the projection moved, including ones whose gradients were near zero,
+/// and Adam's step on such a coordinate, `m̂ / (√v̂ + ε)`, would then be
+/// about `m̂ / ε`. So each coordinate's second moment is raised, if
+/// needed, to the square of its new first moment (`v̂ ≥ m̂²`), as if that
+/// momentum had come from gradients of its size: its step is then at most
+/// the step size.
+fn redirect_momentum(
+    first: &mut [f64; PARAMS],
+    second: &mut [f64; PARAMS],
+    displacement: &[f64; 6],
+    (correction1, correction2): (f64, f64),
+) {
+    let md: f64 = (0..6).map(|k| first[k] * displacement[k]).sum();
+    let dd: f64 = displacement.iter().map(|d| d * d).sum();
+    if md > 0.0 && dd > 0.0 {
+        for k in 0..6 {
+            first[k] -= md / dd * displacement[k];
+            let m = first[k] / correction1;
+            second[k] = second[k].max(correction2 * m * m);
+        }
+    }
 }
 
 /// `tris` as a drawing on `background`: vertices snapped to [`QUANTUM`]
@@ -474,6 +509,90 @@ mod tests {
         for v in vertices(&export(&scene, &boundary, background)) {
             assert!(acos_valid(&v), "{v:?}");
         }
+    }
+
+    /// Adam's moments after `steps` steps of the constant gradient
+    /// `grad`, and their bias corrections.
+    fn moments(grad: &[f64; PARAMS], steps: i32) -> ([f64; PARAMS], [f64; PARAMS], (f64, f64)) {
+        let (mut first, mut second) = ([0.0; PARAMS], [0.0; PARAMS]);
+        for _ in 0..steps {
+            for k in 0..PARAMS {
+                first[k] = BETA1 * first[k] + (1.0 - BETA1) * grad[k];
+                second[k] = BETA2 * second[k] + (1.0 - BETA2) * grad[k] * grad[k];
+            }
+        }
+        (
+            first,
+            second,
+            (1.0 - BETA1.powi(steps), 1.0 - BETA2.powi(steps)),
+        )
+    }
+
+    /// A projection spreads its displacement over every vertex, so the
+    /// momentum correction moves first moment into coordinates whose
+    /// gradients were zero. Their second moments must follow, or Adam's
+    /// next step on them is the first moment over `ε`.
+    #[test]
+    fn the_momentum_correction_never_steps_beyond_the_learning_rate() {
+        // A sliver under the bound, flattened by a gradient on its apex's
+        // `y` alone.
+        let start = [0.0, 0.0, 20.0, 0.0, 10.0, 2.0];
+        let mut projected = start;
+        assert_eq!(
+            angle::project(&mut projected, TAN_PROJECTION),
+            angle::Projected::Moved
+        );
+        let displacement: [f64; 6] = std::array::from_fn(|k| projected[k] - start[k]);
+        let (mut first, mut second, corrections) =
+            moments(&[0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0], 10);
+        assert!(
+            first[5] * displacement[5] > 0.0,
+            "the momentum presses into the bound"
+        );
+        redirect_momentum(&mut first, &mut second, &displacement, corrections);
+        for k in 0..PARAMS {
+            let update = adam_update(first[k], second[k], corrections);
+            assert!(update.abs() <= 1.0 + 1e-12, "coordinate {k}: {update}");
+        }
+        // The first moment no longer presses into the bound.
+        let pressing: f64 = (0..6).map(|k| first[k] * displacement[k]).sum();
+        assert!(pressing <= 1e-12, "{pressing}");
+
+        // Random slivers and moments, some coordinates without gradients:
+        // no step grows beyond the larger of its own and the step size.
+        let mut rng = ChaCha8Rng::seed_from_u64(3);
+        let mut corrected = 0;
+        for _ in 0..500 {
+            let start: [f64; 6] = std::array::from_fn(|_| rng.random_range(0.0..30.0));
+            let mut projected = start;
+            if angle::project(&mut projected, TAN_PROJECTION) == angle::Projected::Unchanged {
+                continue;
+            }
+            let displacement: [f64; 6] = std::array::from_fn(|k| projected[k] - start[k]);
+            let grad: [f64; PARAMS] = std::array::from_fn(|_| {
+                if rng.random_bool(0.3) {
+                    0.0
+                } else {
+                    rng.random_range(-5.0..5.0)
+                }
+            });
+            let (mut first, mut second, corrections) = moments(&grad, rng.random_range(1..150));
+            let before = first;
+            let steps: [f64; PARAMS] =
+                std::array::from_fn(|k| adam_update(first[k], second[k], corrections));
+            redirect_momentum(&mut first, &mut second, &displacement, corrections);
+            if first != before {
+                corrected += 1;
+            }
+            for k in 0..PARAMS {
+                let update = adam_update(first[k], second[k], corrections).abs();
+                assert!(update <= steps[k].abs().max(1.0) + 1e-12, "{k}: {update}");
+            }
+            let pressing: f64 = (0..6).map(|k| first[k] * displacement[k]).sum();
+            let scale: f64 = (0..6).map(|k| (before[k] * displacement[k]).abs()).sum();
+            assert!(pressing <= 1e-12 * scale, "{pressing}");
+        }
+        assert!(corrected >= 50, "{corrected} corrected");
     }
 
     #[test]
