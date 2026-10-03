@@ -401,7 +401,7 @@ async function run() {
   };
   state.run = current;
   const isCurrent = () => state.run === current;
-  // Every step's progress arrived: the final refit pass runs until the result.
+  // Every step's progress arrived: the final stage runs until the result.
   const searched = () =>
     current.progress.total > 0 && current.progress.step === current.progress.total;
   const { signal } = current.controller;
@@ -471,7 +471,7 @@ async function run() {
     if (!isCurrent()) {
       return;
     }
-    // The refit pass after the last step can move, resize and recolour any
+    // The final stage after the last step can move, resize and recolour any
     // shape, so the final SVG replaces the live preview. A run stopped
     // before the result arrives keeps the preview instead.
     live.flush();

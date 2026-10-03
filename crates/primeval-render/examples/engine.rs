@@ -14,23 +14,32 @@
 //!                       (default: 50,100,200,500)
 //!   --refine SCHEDULE   refit passes (`Model::refine`, default: none):
 //!                       `end:P` runs P passes at each checkpoint,
-//!                       `every:K` one pass after every K-th step
+//!                       `every:K` one pass after every K-th step,
+//!                       `final` runs `approximate`'s final stage at each
+//!                       checkpoint
+//!   --iterations K      with `--refine final`: the joint optimisation's
+//!                       iteration count (default: `approximate`'s, 50)
 //! ```
 //!
 //! For every image × shape kind it runs one greedy search to the largest
 //! checkpoint, with seed 42 and default options otherwise. It drives
 //! [`primeval_core::Model`] itself through `primeval_render::lab`, which
 //! reproduces `approximate`'s search and encoding exactly. `approximate`
-//! ends with one refit pass, so the rows of `--refine end:1` are what it
-//! returns for that step count; rows without `--refine` are the greedy
-//! search alone. At each checkpoint it records one row.
+//! ends with its final stage: for triangles the joint gradient
+//! optimisation of every shape (`primeval_core::joint`), for every other
+//! kind one refit pass. The rows of `--refine final` are what it returns
+//! for that step count (and of `--refine end:1` too, for the kinds other
+//! than triangles); rows without `--refine` are the greedy search alone. At
+//! each checkpoint it records one row.
 //!
 //! With `--refine end:P`, each checkpoint clones the model, runs `P` refit
 //! passes on the clone and records the clone, while the search itself goes
 //! on greedily: each row is "greedy to n steps, then P passes". With
-//! `--refine every:K` the search itself runs one pass after every `K`-th
-//! step, so later steps build on the refitted shapes. Passes get the
-//! render's alpha.
+//! `--refine final`, each checkpoint runs `approximate`'s final stage on a
+//! clone (`lab::final_stage`) and records its drawing, in the same way.
+//! With `--refine every:K` the search itself runs one pass after every
+//! `K`-th step, so later steps build on the refitted shapes. Passes and the
+//! final stage get the render's alpha.
 //!
 //! Progress goes to stderr; stdout gets a header with the commit, the
 //! machine, the options and the refine schedule, the rows as a Markdown
@@ -66,14 +75,18 @@
 //!
 //! - `search_s`: cumulative wall time of the `Model::step` calls up to this
 //!   checkpoint, plus the refit passes: with `every:K` every pass so far,
-//!   with `end:P` only this checkpoint's passes. Decoding, the thumbnail,
-//!   the clone, the metrics and the encodings are outside the clock, as
-//!   are all the columns below.
+//!   with `end:P` only this checkpoint's passes, with `final` only this
+//!   checkpoint's final stage. Decoding, the thumbnail, the clone, the
+//!   metrics and the encodings are outside the clock, as are all the
+//!   columns below.
 //! - `refine_s`, only with `--refine`: the part of `search_s` spent in
-//!   refit passes.
+//!   refit passes or the final stage.
 //! - `score`: `Model::score_f64`, the normalised RGB RMSE between the
 //!   engine's own canvas and the working target. Most shape kinds draw on
-//!   that canvas with binary (not anti-aliased) coverage.
+//!   that canvas with binary (not anti-aliased) coverage. With `--refine
+//!   final`, the score `lab::final_stage` returns: for triangles, the joint
+//!   optimisation's model RMSE of its exported drawing (`joint::score`), so
+//!   `gap` measures how well that model agrees with the export.
 //! - `rmse256`: the normalised RGB RMSE between the PNG at the working
 //!   target's longer side, which has exactly the working target's
 //!   dimensions (scale 1 against the drawing's view box; the runner
@@ -127,6 +140,8 @@ struct Config {
     shapes: Vec<ShapeKind>,
     checkpoints: Vec<u32>,
     refine: Refine,
+    /// The joint optimisation's iteration count with `--refine final`.
+    iterations: Option<u32>,
 }
 
 /// When the search runs refit passes; see the doc comment.
@@ -137,11 +152,16 @@ enum Refine {
     End(u32),
     /// One pass after every this many steps.
     Every(u32),
+    /// `approximate`'s final stage on a clone at each checkpoint.
+    Final,
 }
 
 impl Refine {
     fn parse(value: &str) -> Result<Self, BoxError> {
-        let invalid = || format!("--refine: expected end:P or every:K, got {value}");
+        let invalid = || format!("--refine: expected end:P, every:K or final, got {value}");
+        if value == "final" {
+            return Ok(Self::Final);
+        }
         let (schedule, count) = value.split_once(':').ok_or_else(invalid)?;
         let count: u32 = count.parse().map_err(|_| invalid())?;
         if count == 0 {
@@ -159,6 +179,7 @@ impl Refine {
             Self::None => "none".to_owned(),
             Self::End(passes) => format!("end:{passes} ({passes} passes at each checkpoint)"),
             Self::Every(steps) => format!("every:{steps} (one pass after every {steps} steps)"),
+            Self::Final => "final (approximate's final stage at each checkpoint)".to_owned(),
         }
     }
 }
@@ -188,7 +209,13 @@ fn main() -> Result<(), BoxError> {
         let mut output_reference: Option<RgbImage> = None;
         for &shape in &config.shapes {
             eprintln!("{} {}", input.name, shape.as_str());
-            for checkpoint in search(&input.bytes, shape, &config.checkpoints, config.refine)? {
+            for checkpoint in search(
+                &input.bytes,
+                shape,
+                &config.checkpoints,
+                config.refine,
+                config.iterations,
+            )? {
                 let small_reference =
                     small_reference.get_or_insert_with(|| resampled(&original, &checkpoint.small));
                 let output_reference = output_reference
@@ -214,7 +241,7 @@ fn main() -> Result<(), BoxError> {
     });
 
     let refined = config.refine != Refine::None;
-    print_header(&config.checkpoints, config.refine);
+    print_header(&config.checkpoints, config.refine, config.iterations);
     let (refine_head, refine_rule) = if refined {
         (" refine_s |", " ---: |")
     } else {
@@ -269,6 +296,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
     let mut shapes = None;
     let mut checkpoints: Option<Vec<u32>> = None;
     let mut refine = Refine::None;
+    let mut iterations = None;
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{arg} needs a value"));
         match arg.as_str() {
@@ -292,6 +320,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
                 );
             }
             "--refine" => refine = Refine::parse(&value()?)?,
+            "--iterations" => iterations = Some(value()?.parse()?),
             other => return Err(format!("unknown argument {other}; see the doc comment").into()),
         }
     }
@@ -317,12 +346,16 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
     if checkpoints.first() == Some(&0) {
         return Err("--steps: checkpoints must be positive".into());
     }
+    if iterations.is_some() && refine != Refine::Final {
+        return Err("--iterations needs --refine final".into());
+    }
     Ok(Config {
         photos,
         synthetic,
         shapes,
         checkpoints,
         refine,
+        iterations,
     })
 }
 
@@ -341,13 +374,15 @@ struct Checkpoint {
 }
 
 /// Runs one search of `shape` to the last of `checkpoints` (sorted, unique
-/// and positive) exactly as `approximate` would, with the refit passes of
-/// `refine`, and records each checkpoint.
+/// and positive) exactly as `approximate` would, with the refit passes or
+/// final stage of `refine` (`iterations` overriding the joint
+/// optimisation's), and records each checkpoint.
 fn search(
     input: &[u8],
     shape: ShapeKind,
     checkpoints: &[u32],
     refine: Refine,
+    iterations: Option<u32>,
 ) -> Result<Vec<Checkpoint>, BoxError> {
     let last = *checkpoints.last().ok_or("--steps: no checkpoints")?;
     let mut render = RenderOptions::default();
@@ -360,7 +395,7 @@ fn search(
     let working_size = working.width().max(working.height());
     let mut options = ModelOptions::default();
     options.seed = render.seed;
-    let mut model = Model::new(target, background, options);
+    let mut model = Model::new(target.clone(), background, options);
 
     let mut search = Duration::ZERO;
     let mut refined = Duration::ZERO;
@@ -383,8 +418,7 @@ fn search(
         if next.next_if_eq(&step).is_none() {
             continue;
         }
-        let refitted;
-        let (model, search, refined) = match refine {
+        let (drawing, score, search, refined) = match refine {
             Refine::End(passes) => {
                 let mut clone = model.clone();
                 let start = Instant::now();
@@ -392,12 +426,24 @@ fn search(
                     clone.refine(render.alpha);
                 }
                 let elapsed = start.elapsed();
-                refitted = clone;
-                (&refitted, search + elapsed, elapsed)
+                (
+                    clone.drawing(),
+                    clone.score_f64(),
+                    search + elapsed,
+                    elapsed,
+                )
             }
-            Refine::None | Refine::Every(_) => (&model, search, refined),
+            Refine::Final => {
+                let mut clone = model.clone();
+                let start = Instant::now();
+                let (drawing, score) = lab::final_stage(&mut clone, &target, &render, iterations);
+                let elapsed = start.elapsed();
+                (drawing, score, search + elapsed, elapsed)
+            }
+            Refine::None | Refine::Every(_) => {
+                (model.drawing(), model.score_f64(), search, refined)
+            }
         };
-        let drawing = model.drawing();
         let exported = png(&drawing, working_size)?;
         assert_eq!(
             exported.dimensions(),
@@ -411,7 +457,7 @@ fn search(
             steps: step,
             search,
             refine: refined,
-            score: model.score_f64(),
+            score,
             rmse256: rgb_rmse(&exported, &working),
             small: png(&drawing, SMALL_SIZE)?,
             output: png(&drawing, render.output_size)?,
@@ -427,7 +473,7 @@ fn png(drawing: &Drawing, output_size: u32) -> Result<RgbImage, BoxError> {
     Ok(image::load_from_memory_with_format(&bytes, ImageFormat::Png)?.to_rgb8())
 }
 
-fn print_header(checkpoints: &[u32], refine: Refine) {
+fn print_header(checkpoints: &[u32], refine: Refine, iterations: Option<u32>) {
     let defaults = RenderOptions::default();
     println!("# primeval engine run");
     println!();
@@ -443,6 +489,9 @@ fn print_header(checkpoints: &[u32], refine: Refine) {
     println!("- checkpoints: {} steps", checkpoints.join(", "));
     if refine != Refine::None {
         println!("- refine: {}", refine.describe());
+    }
+    if let Some(iterations) = iterations {
+        println!("- joint optimisation: {iterations} iterations");
     }
     println!();
 }

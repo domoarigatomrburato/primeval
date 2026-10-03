@@ -77,8 +77,8 @@ export type ProgressInfo = {
   /**
    * The current fit: the RMSE between the working canvas and the resized
    * input over the RGB channels, divided by 255, from 0 (exact) to 1; lower
-   * is better. The final refit pass can lower it further, so the result can
-   * fit better than the last step reports.
+   * is better. The final stage can lower it further, so the result can fit
+   * better than the last step reports.
    */
   score: number;
   /**
@@ -88,11 +88,14 @@ export type ProgressInfo = {
    * working canvas.
    *
    * The shapes of every step, in order, draw a live preview. After the last
-   * step the render runs one refit pass that can move, resize and recolour
-   * any shape, so the result's shape lines can differ from the preview. The
-   * pass keeps their number, their order and each shape's kind, though an
-   * ellipse can turn into a `<circle>` or back when its radii become equal
-   * or unequal.
+   * step the render runs a final stage that can move, resize and recolour
+   * any shape, so the result's shape lines can differ from the preview. For
+   * triangles it is a joint gradient optimisation of every shape at once,
+   * whose coordinates are multiples of a quarter of a `viewBox` unit, so
+   * they can be fractional; for the other shapes it is one refit pass, which
+   * re-optimises one shape at a time. The stage keeps the shapes' number,
+   * their order and each shape's kind, though an ellipse can turn into a
+   * `<circle>` or back when its radii become equal or unequal.
    *
    * To draw the preview, wrap the shapes received so far in an `<svg>` with
    * the final document's `viewBox` and background, for example taken from a

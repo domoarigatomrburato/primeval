@@ -8,7 +8,7 @@
 
 use crate::{ApproximateError, ApproximateResult, OutputFormat, RenderOptions};
 use image::RgbImage;
-use primeval_core::{Buffer, Color, Drawing};
+use primeval_core::{Buffer, Color, Drawing, Model, joint};
 
 /// The working-resolution target and the resolved background for `input`:
 /// option validation, decoding, background resolution, flattening and the
@@ -34,6 +34,38 @@ pub fn working_target(
 /// The errors of [`working_target`].
 pub fn working_image(input: &[u8], render: &RenderOptions) -> Result<RgbImage, ApproximateError> {
     crate::working_image(input, render, || Ok(())).map(|(image, _)| image)
+}
+
+/// Runs [`crate::approximate`]'s final stage on `model`, a search after
+/// its last greedy step on `target`, the working target from
+/// [`working_target`], exactly as [`crate::approximate`] runs it: for
+/// triangles the joint optimisation of every shape, which leaves `model`
+/// unchanged, otherwise one refit pass of `model`. `iterations`, if set,
+/// overrides the joint optimisation's iteration count.
+///
+/// Returns the drawing [`crate::approximate`] would encode and its score:
+/// for the joint optimisation, its model's RMSE of that drawing
+/// ([`joint::score`]), otherwise the refitted model's
+/// [`Model::score_f64`].
+pub fn final_stage(
+    model: &mut Model,
+    target: &Buffer,
+    render: &RenderOptions,
+    iterations: Option<u32>,
+) -> (Drawing, f64) {
+    let mut settings = joint::Settings::default();
+    if let Some(iterations) = iterations {
+        settings.iterations = iterations;
+    }
+    let joint_target = crate::runs_joint(render.shape).then_some(target);
+    let drawing = crate::final_stage(model, joint_target, render.alpha, settings, || false)
+        .expect("a stage that is never cancelled finishes");
+    let score = if joint_target.is_some() {
+        joint::score(&drawing, target)
+    } else {
+        model.score_f64()
+    };
+    (drawing, score)
 }
 
 /// Encodes `drawing` as [`crate::approximate`] encodes its final drawing.
@@ -171,7 +203,7 @@ mod tests {
     use super::*;
     use crate::{Alpha, ApproximateRequest, BackgroundOption, Execution, ShapeKind, approximate};
     use image::{DynamicImage, ImageFormat, Rgb};
-    use primeval_core::{Model, ModelOptions};
+    use primeval_core::ModelOptions;
     use std::io::Cursor;
 
     fn png_bytes(image: &RgbImage) -> Vec<u8> {
@@ -193,14 +225,49 @@ mod tests {
         let (target, background) = working_target(input, render).expect("working target");
         let mut options = ModelOptions::default();
         options.seed = render.seed;
-        let mut model = Model::new(target, background, options);
+        let mut model = Model::new(target.clone(), background, options);
         for _ in 0..render.count {
             model.step(render.shape, render.alpha);
         }
-        model.refine(render.alpha);
-        encode(&model.drawing(), render.output_size, output)
+        let (drawing, _) = final_stage(&mut model, &target, render, None);
+        encode(&drawing, render.output_size, output)
             .expect("encode")
             .into_bytes()
+    }
+
+    /// The final stage's score is the joint optimisation's model RMSE of
+    /// its drawing for triangles, and the refitted model's score for the
+    /// other kinds; an iteration count overrides the joint optimisation's.
+    #[test]
+    fn the_final_stage_scores_its_drawing() {
+        let input = png_bytes(&fixture());
+        for shape in [ShapeKind::Triangle, ShapeKind::Ellipse] {
+            let render = RenderOptions {
+                count: 5,
+                seed: Some(11),
+                resize_input: 32,
+                shape,
+                ..RenderOptions::default()
+            };
+            let (target, background) = working_target(&input, &render).expect("working target");
+            let mut options = ModelOptions::default();
+            options.seed = render.seed;
+            let mut model = Model::new(target.clone(), background, options);
+            for _ in 0..render.count {
+                model.step(render.shape, render.alpha);
+            }
+            let greedy = model.clone();
+            let (drawing, score) = final_stage(&mut model, &target, &render, None);
+            if shape == ShapeKind::Triangle {
+                assert_eq!(score, primeval_core::joint::score(&drawing, &target));
+                let (fewer, _) = final_stage(&mut greedy.clone(), &target, &render, Some(1));
+                assert_ne!(fewer, drawing);
+            } else {
+                assert_eq!(score, model.score_f64());
+                assert_eq!(drawing, model.drawing());
+                assert!(score <= greedy.score_f64());
+            }
+        }
     }
 
     #[test]
