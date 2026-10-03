@@ -1,9 +1,9 @@
 use crate::alpha::Alpha;
 use crate::coarse::Coarse;
-use crate::drawing::{Drawing, DrawnShape};
+use crate::drawing::{Drawing, DrawnShape, Geometry, Point};
 use crate::error_grid::ErrorGrid;
 use crate::score;
-use crate::shapes::{Shape, ShapeKind};
+use crate::shapes::{Shape, ShapeKind, Triangle};
 use crate::state::State;
 use crate::worker::{SearchRound, WorkerCtx};
 use crate::{Buffer, Color};
@@ -133,6 +133,62 @@ impl Model {
             #[cfg(test)]
             reject_passes: false,
         }
+    }
+
+    /// Lab hook, not part of the supported API: a model whose committed
+    /// shapes are the triangles of `drawing`, painted in their colours on
+    /// `drawing.background`, as if a search had committed them.
+    ///
+    /// Every shape must be a three-vertex [`Geometry::Polygon`] whose
+    /// vertices are pixel centres (`v + 0.5` for integer `v`), which is how
+    /// [`Model::drawing`] writes triangles, and the drawing must have the
+    /// target's dimensions; otherwise `None`.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn from_drawing(target: Buffer, options: ModelOptions, drawing: &Drawing) -> Option<Self> {
+        if drawing.width != target.width() || drawing.height != target.height() {
+            return None;
+        }
+        let vertex = |point: &Point| {
+            let (x, y) = (point.x - 0.5, point.y - 0.5);
+            let integral = |v: f64| v.fract() == 0.0 && v.abs() < f64::from(1 << 30);
+            (integral(x) && integral(y)).then_some((x as i32, y as i32))
+        };
+        let history = drawing
+            .shapes
+            .iter()
+            .map(|drawn| {
+                let Geometry::Polygon(points) = &drawn.geometry else {
+                    return None;
+                };
+                let [a, b, c] = points.as_slice() else {
+                    return None;
+                };
+                let ((x1, y1), (x2, y2), (x3, y3)) = (vertex(a)?, vertex(b)?, vertex(c)?);
+                Some(CommittedShape {
+                    shape: Shape::Triangle(Triangle {
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        x3,
+                        y3,
+                    }),
+                    color: drawn.color,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let mut model = Self::new(target, drawing.background, options);
+        for committed in &history {
+            let lines = committed.shape.rasterize(&mut model.scratch);
+            score::draw_lines(&mut model.current, committed.color, lines);
+        }
+        model.history = history;
+        model.score = score::difference_full_raw(&model.target, &model.current);
+        if let Some(coarse) = &mut model.coarse {
+            coarse.sync(&model.current);
+        }
+        Some(model)
     }
 
     /// Searches for the best next shape of `kind` and paints it.
@@ -726,6 +782,40 @@ mod tests {
                 "{context}: coarse score"
             );
         }
+    }
+
+    #[test]
+    fn from_drawing_rebuilds_a_triangle_model() {
+        let model = stepped_model(5, (40, 30), ShapeKind::Triangle, 6);
+        let drawing = model.drawing();
+        let options = ModelOptions {
+            seed: Some(5),
+            ..ModelOptions::default()
+        };
+        let rebuilt =
+            Model::from_drawing(model.target.clone(), options, &drawing).expect("triangles");
+        assert_eq!(rebuilt.drawing(), drawing);
+        assert_eq!(rebuilt.score, model.score);
+        assert_consistent(&rebuilt, "rebuilt");
+        let mut refined = rebuilt.clone();
+        refined.refine(Alpha::Auto);
+        assert_consistent(&refined, "refined");
+        assert!(refined.score <= rebuilt.score);
+    }
+
+    #[test]
+    fn from_drawing_rejects_other_geometry() {
+        let model = stepped_model(5, (40, 30), ShapeKind::Ellipse, 2);
+        let options = ModelOptions::default();
+        assert!(Model::from_drawing(model.target.clone(), options, &model.drawing()).is_none());
+        let mut drawing = stepped_model(5, (40, 30), ShapeKind::Triangle, 1).drawing();
+        if let Geometry::Polygon(points) = &mut drawing.shapes[0].geometry {
+            points[0].x += 0.25;
+        }
+        assert!(Model::from_drawing(model.target.clone(), options, &drawing).is_none());
+        let mut wrong_size = model.drawing();
+        wrong_size.width += 1;
+        assert!(Model::from_drawing(model.target.clone(), options, &wrong_size).is_none());
     }
 
     fn every_kind() -> Vec<ShapeKind> {
