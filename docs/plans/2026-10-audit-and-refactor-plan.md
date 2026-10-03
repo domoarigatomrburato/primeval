@@ -653,13 +653,20 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
 7. B pilot (succeeded).
 8. Ablation (gradients matter at equal time).
 
-**Next: decide how to productise B** (the user decides; an independent review is advisable first). Candidate shape:
+**Requirement (user decision): shapes must read as their kind.**
+- Triangles keep the engine's 15° minimum angle (`Triangle::is_valid`) in every optimiser, B included. A sliver does not look like a triangle, and gains that come from slivers do not count.
+- Other kinds get the same question when an optimiser is extended to them.
+
+**Next:**
+
+9. **B with the minimum angle enforced.** Re-run the pilot's protocol with the rule kept throughout and checked on every exported triangle after the snap, with zero violations. B must still beat the equal-time A1 by at least 3 points at 100 and 200 shapes.
+10. **Decide how to productise B**, if step 9 passes. The user decides; an independent review is advisable first. Candidate shape:
 - B becomes the final stage of `approximate` and exports its 0.25 px drawing directly, with no A1 pass after it.
 - It starts with the polygonal kinds (triangle, then rectangle, rotated rectangle and convex polygon, which share the half-plane coverage). Layers of other kinds stay fixed in the composite.
 - **Needed:**
   - cancellation between iterations;
   - multi-threading by image bands;
-  - a sliver rule (keep the 15° minimum, or a penalty);
+  - the minimum-angle rule (step 9);
   - deterministic reductions, which the pilot already has;
   - a time budget per shape count that stays within 2× greedy in single-threaded wasm.
 - **Open questions:**
