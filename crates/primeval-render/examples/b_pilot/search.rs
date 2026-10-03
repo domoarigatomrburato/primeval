@@ -52,7 +52,7 @@ const POSITION_SIGMA: f64 = 16.0;
 const ALPHA_STEP: f64 = 10.0;
 const MIN_ALPHA_STEP: i32 = 3;
 /// The engine's smallest triangle angle.
-const MIN_DEGREES: f64 = 15.0;
+pub(crate) const MIN_DEGREES: f64 = 15.0;
 /// The tag of the climbs' random streams.
 const TAG: [u8; 8] = *b"S-A1 lab";
 
@@ -249,7 +249,7 @@ fn normal(rng: &mut ChaCha8Rng) -> f64 {
 
 /// Every angle of the triangle above [`MIN_DEGREES`], as the engine's
 /// `Triangle::is_valid`.
-fn is_valid(v: &[f64; 6]) -> bool {
+pub(crate) fn is_valid(v: &[f64; 6]) -> bool {
     let angle = |ax: f64, ay: f64, bx: f64, by: f64| {
         let (da, db) = (ax.hypot(ay), bx.hypot(by));
         if da == 0.0 || db == 0.0 {

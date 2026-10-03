@@ -5,6 +5,7 @@
 //! Coordinates are the engine's: the centre of pixel `(i, j)` is `(i, j)`,
 //! so a vertex `v` is the drawing's `v + 0.5`.
 
+use crate::angle;
 use rayon::prelude::*;
 use std::ops::{Add, AddAssign, Div, Mul, Neg, Sub};
 
@@ -704,6 +705,26 @@ pub(crate) struct Settings {
     /// the first `anneal` share of the iterations and stays there.
     pub(crate) filter_start: f64,
     pub(crate) anneal: f64,
+    /// How the engine's minimum angle is kept.
+    pub(crate) constraint: Constraint,
+}
+
+/// How [`optimise`] keeps the engine's minimum angle (step 9).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Constraint {
+    /// Not at all: the pilot.
+    Free,
+    /// (a) After every Adam step, every triangle with an angle below
+    /// `min_degrees` is projected back ([`angle::project`]).
+    Project { min_degrees: f64 },
+    /// (b) The same projection, and the penalty `weight Σ max(0, θ₀ − θ)²`
+    /// on the angles below `threshold` degrees ([`angle::penalty`]) added
+    /// to the loss, so the gradients steer away from slivers.
+    Penalty {
+        min_degrees: f64,
+        threshold: f64,
+        weight: f64,
+    },
 }
 
 impl Settings {
@@ -723,19 +744,62 @@ impl Settings {
     }
 }
 
+impl Constraint {
+    fn min_degrees(self) -> Option<f64> {
+        match self {
+            Self::Free => None,
+            Self::Project { min_degrees } | Self::Penalty { min_degrees, .. } => Some(min_degrees),
+        }
+    }
+}
+
+/// What [`optimise`] did.
+pub(crate) struct Optimised {
+    /// The initial loss, the loss after the colour fit of each step, and
+    /// the final one.
+    pub(crate) losses: Vec<f64>,
+    /// Projections that moved a triangle, over all steps.
+    pub(crate) projections: usize,
+    /// Of those, the degenerate ones rebuilt ([`angle::Projected::Rebuilt`]).
+    pub(crate) rebuilds: usize,
+}
+
 /// Runs `settings.iterations` Adam steps on the vertices and alphas of
 /// `tris` (alphas only when `auto_alpha`), each after one [`sweep`] that
 /// refits every colour; then one more sweep refits the colours of the
 /// final geometry. Vertices stay within `margin` pixels of the canvas, as
-/// the engine's do. Returns the initial loss, the loss after the colour fit
-/// of each step, and the final one.
+/// the engine's do, unless a projection moves them out.
+///
+/// With a [`Constraint`], every triangle is projected onto angles of at
+/// least `min_degrees` before the first step and after every step, after
+/// the clamp to the margin. A projected triangle keeps its second moments
+/// and loses the component of its first moment along the projection's
+/// displacement when that component pushes back out of the set
+/// (`m ← m − (m·d / d·d) d` if `m·d > 0`, the update being `−m`): the
+/// momentum keeps sliding along the boundary but stops pressing into it.
 pub(crate) fn optimise<F: Real>(
     scene: &mut Scene<F>,
     tris: &mut [Tri],
     settings: &Settings,
     auto_alpha: bool,
     margin: f64,
-) -> Vec<f64> {
+) -> Optimised {
+    let min_degrees = settings.constraint.min_degrees();
+    let (mut projections, mut rebuilds) = (0, 0);
+    let mut project = |vertices: &mut [f64; 6]| -> Option<[f64; 6]> {
+        let before = *vertices;
+        match angle::project(vertices, min_degrees?) {
+            angle::Projected::Unchanged => None,
+            outcome => {
+                projections += 1;
+                rebuilds += usize::from(outcome == angle::Projected::Rebuilt);
+                Some(std::array::from_fn(|k| vertices[k] - before[k]))
+            }
+        }
+    };
+    for tri in tris.iter_mut() {
+        project(&mut tri.vertices);
+    }
     let mut work = Workspace::default();
     let mut first = vec![[0.0; PARAMS]; tris.len()];
     let mut second = vec![[0.0; PARAMS]; tris.len()];
@@ -756,7 +820,16 @@ pub(crate) fn optimise<F: Real>(
         let correction1 = 1.0 - settings.beta1.powi(step);
         let correction2 = 1.0 - settings.beta2.powi(step);
         for (index, tri) in tris.iter_mut().enumerate() {
-            let grad = result.gradients[index];
+            let mut grad = result.gradients[index];
+            if let Constraint::Penalty {
+                threshold, weight, ..
+            } = settings.constraint
+            {
+                let (_, penalty) = angle::penalty(&tri.vertices, threshold, weight);
+                for (sum, d) in grad.iter_mut().zip(penalty) {
+                    *sum += d;
+                }
+            }
             for k in 0..PARAMS {
                 if k == 6 && !auto_alpha {
                     continue;
@@ -783,12 +856,26 @@ pub(crate) fn optimise<F: Real>(
                     _ => value.clamp(-margin, max_y),
                 };
             }
+            if let Some(displacement) = project(&mut tri.vertices) {
+                let m = &mut first[index];
+                let md: f64 = (0..6).map(|k| m[k] * displacement[k]).sum();
+                let dd: f64 = displacement.iter().map(|d| d * d).sum();
+                if md > 0.0 && dd > 0.0 {
+                    for k in 0..6 {
+                        m[k] -= md / dd * displacement[k];
+                    }
+                }
+            }
         }
     }
     scene.filter = 1.0;
     let result = sweep(scene, tris, true, false, &mut work);
     losses.push(result.fitted_loss);
-    losses
+    Optimised {
+        losses,
+        projections,
+        rebuilds,
+    }
 }
 
 #[cfg(test)]

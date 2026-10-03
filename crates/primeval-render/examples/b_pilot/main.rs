@@ -17,6 +17,14 @@
 //!   --filter-start X    initial filter width, annealed to 1 (default 1)
 //!   --anneal X          share of the iterations the annealing takes
 //!                       (default 0.5)
+//!   --constraints LIST  B arms: none, project, penalty (default all three)
+//!   --min-degrees X     the projection's bound, at least 15 (default 15.5)
+//!   --penalty-threshold X  angle below which the penalty acts, degrees
+//!                       (default 17)
+//!   --penalty-weight X  the penalty's weight (default 1e7)
+//!   --skip-search       skip the S-A1 arms
+//!   --save DIR          write every drawing as DIR/<image>-<steps>-<variant>.png
+//!                       at 512 px
 //! ```
 //!
 //! For every corpus image it runs one greedy triangle search (seed 42,
@@ -28,6 +36,12 @@
 //!   (`diff::optimise`), then vertices snapped to 0.25 px, alphas to
 //!   integers, one colour refit and the colours rounded; the export takes
 //!   these coordinates as they are, the engine cannot;
+//! - `Bp<K>@0.25`, `Bb<K>@0.25`: the same with the engine's minimum angle
+//!   kept (step 9, `angle.rs`): (a) projection after every step, (b) a
+//!   penalty on angles near 15° and the projection; the snap then takes
+//!   the closest valid lattice triangle where rounding breaks the rule;
+//! - `end@Bp<K>`, `end@Bb<K>`: the engine's refit passes matched to their
+//!   time;
 //! - `end@B<K>`: the engine's refit passes (`Model::refine`), as many as
 //!   fit `B<K>@0.25`'s time;
 //! - `S-A1@B<K>`: the engine's refit search on B's forward model with
@@ -44,13 +58,14 @@
 //! canvas (none for `@0.25` and `S-A1`), `rmse256` of the PNG at the working
 //! size, `ssim128`, `svg_bytes` at the default output size.
 
+mod angle;
 #[path = "../common/mod.rs"]
 mod common;
 mod diff;
 mod search;
 
 use common::{ALL_SHAPES, BoxError, SEED, rgb_rmse};
-use diff::{Scene, Settings, Tri};
+use diff::{Constraint, Scene, Settings, Tri};
 use image::{ImageFormat, RgbImage, imageops};
 use primeval_core::{Drawing, DrawnShape, Geometry, Model, ModelOptions, Point};
 use primeval_render::{Color, OutputFormat, RenderOptions, ShapeKind, lab};
@@ -71,6 +86,37 @@ struct Config {
     iterations: Vec<usize>,
     passes: u32,
     settings: Settings,
+    /// The B arms: unconstrained, (a) projection, (b) penalty and
+    /// projection.
+    constraints: Vec<Constraint>,
+    /// Skip the S-A1 arms.
+    skip_search: bool,
+    /// Where to write every drawing as a PNG.
+    save: Option<std::path::PathBuf>,
+}
+
+/// One B arm's time, the budget of its matched arms.
+struct Budget {
+    label: String,
+    constrained: bool,
+    iterations: usize,
+    /// The Adam iterations alone.
+    optimised: Duration,
+    /// With the snap.
+    total: Duration,
+}
+
+/// Upper ends, in degrees, of the bins of the smallest exported angle;
+/// the last bin is everything above.
+const ANGLE_BINS: [f64; 5] = [15.0, 16.0, 18.0, 20.0, 25.0];
+
+/// The name of a B arm.
+fn arm_label(constraint: Constraint) -> &'static str {
+    match constraint {
+        Constraint::Free => "B",
+        Constraint::Project { .. } => "Bp",
+        Constraint::Penalty { .. } => "Bb",
+    }
 }
 
 struct Row {
@@ -87,6 +133,11 @@ struct Row {
     rmse256: f64,
     ssim128: f64,
     svg_bytes: usize,
+    /// Exported triangles that break the engine's minimum angle.
+    violations: usize,
+    /// Exported triangles per bin of their smallest angle
+    /// ([`ANGLE_BINS`]).
+    bins: [usize; 6],
 }
 
 fn main() -> Result<(), BoxError> {
@@ -112,6 +163,7 @@ fn main() -> Result<(), BoxError> {
         config.passes
     );
     println!("- Adam: {:?}", config.settings);
+    println!("- B arms: {:?}", config.constraints);
     println!();
     let mut rows = Vec::new();
     for input in &inputs {
@@ -120,12 +172,14 @@ fn main() -> Result<(), BoxError> {
     }
     println!(
         "| image | variant | steps | passes | time_s | extra_s | score | rmse256 | ssim128 \
-         | svg_bytes | evaluations |"
+         | svg_bytes | evaluations | violations | min angle ≤15/≤16/≤18/≤20/≤25/>25 |"
     );
-    println!("| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
+    println!(
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |"
+    );
     for row in &rows {
         println!(
-            "| {} | {} | {} | {} | {:.3} | {:.3} | {} | {:.6} | {:.6} | {} | {} |",
+            "| {} | {} | {} | {} | {:.3} | {:.3} | {} | {:.6} | {:.6} | {} | {} | {} | {} |",
             row.image,
             row.variant,
             row.steps,
@@ -140,6 +194,8 @@ fn main() -> Result<(), BoxError> {
             row.svg_bytes,
             row.evaluations
                 .map_or("-".to_owned(), |evaluations| evaluations.to_string()),
+            row.violations,
+            bins_text(&row.bins),
         );
     }
     println!();
@@ -218,7 +274,21 @@ fn run_image(
                       drawing: &Drawing|
      -> Result<(), BoxError> {
         let (rmse256, ssim128, svg_bytes) = measure.measure(drawing)?;
+        if let Some(dir) = &config.save {
+            let path = dir.join(format!("{name}-{steps}-{variant}.png"));
+            std::fs::write(
+                path,
+                lab::encode(drawing, 512, OutputFormat::Png)?.into_bytes(),
+            )?;
+        }
+        let angles = exported_angles(drawing);
+        let mut bins = [0; 6];
+        for &(smallest, _) in &angles {
+            bins[ANGLE_BINS.partition_point(|&end| end < smallest)] += 1;
+        }
         rows.push(Row {
+            violations: angles.iter().filter(|(_, valid)| !valid).count(),
+            bins,
             image: name.to_owned(),
             variant,
             steps,
@@ -254,49 +324,70 @@ fn run_image(
         )?;
         let start_tris: Vec<Tri> = drawing.shapes.iter().map(to_tri).collect();
 
-        // B at every K: its time, without and with the snap, is the
-        // budget of the matched arms.
-        let mut budgets: Vec<(usize, Duration, Duration)> = Vec::new();
-        for &iterations in &config.iterations {
-            let settings = Settings {
-                iterations,
-                ..config.settings
-            };
-            let start = Instant::now();
-            let mut tris = start_tris.clone();
-            let losses = diff::optimise(&mut scene, &mut tris, &settings, true, MARGIN);
-            let optimised = start.elapsed();
-            let start = Instant::now();
-            let quarter = snap(&mut scene, &tris, 0.25, background);
-            let snapped = start.elapsed();
-            eprintln!(
-                "    B{iterations}: model rmse {:.6} -> {:.6} in {:.3}s (+{:.3}s snap), \
-                 {:.2} ms/iteration; {} of {} triangles with an angle <= 15°",
-                model_rmse(losses[0], &scene),
-                model_rmse(*losses.last().expect("a final loss"), &scene),
-                optimised.as_secs_f64(),
-                snapped.as_secs_f64(),
-                1e3 * optimised.as_secs_f64() / iterations as f64,
-                tris.iter()
-                    .filter(|tri| search::min_angle(&tri.vertices) <= 15.0)
-                    .count(),
-                tris.len()
-            );
-            record(
-                format!("B{iterations}@0.25"),
-                step,
-                greedy,
-                optimised + snapped,
-                None,
-                None,
-                None,
-                &quarter,
-            )?;
-            budgets.push((iterations, optimised, optimised + snapped));
+        // B at every K and constraint: its time, without and with the
+        // snap, is the budget of the matched arms.
+        let mut budgets: Vec<Budget> = Vec::new();
+        for &constraint in &config.constraints {
+            let constrained = constraint != Constraint::Free;
+            for &iterations in &config.iterations {
+                let settings = Settings {
+                    iterations,
+                    constraint,
+                    ..config.settings
+                };
+                let label = format!("{}{iterations}", arm_label(constraint));
+                let start = Instant::now();
+                let mut tris = start_tris.clone();
+                let result = diff::optimise(&mut scene, &mut tris, &settings, true, MARGIN);
+                let optimised = start.elapsed();
+                let start = Instant::now();
+                let (quarter, repaired) = snap(&mut scene, &tris, 0.25, background, constrained);
+                let snapped = start.elapsed();
+                let losses = &result.losses;
+                eprintln!(
+                    "    {label}: model rmse {:.6} -> {:.6} in {:.3}s (+{:.3}s snap), \
+                     {:.2} ms/iteration; {} of {} triangles with an angle <= 15° before the \
+                     snap; {} projections, {} rebuilt, {} snaps repaired",
+                    model_rmse(losses[0], &scene),
+                    model_rmse(*losses.last().expect("a final loss"), &scene),
+                    optimised.as_secs_f64(),
+                    snapped.as_secs_f64(),
+                    1e3 * optimised.as_secs_f64() / iterations as f64,
+                    tris.iter()
+                        .filter(|tri| search::min_angle(&tri.vertices) <= 15.0)
+                        .count(),
+                    tris.len(),
+                    result.projections,
+                    result.rebuilds,
+                    repaired,
+                );
+                record(
+                    format!("{label}@0.25"),
+                    step,
+                    greedy,
+                    optimised + snapped,
+                    None,
+                    None,
+                    None,
+                    &quarter,
+                )?;
+                budgets.push(Budget {
+                    label,
+                    constrained,
+                    iterations,
+                    optimised,
+                    total: optimised + snapped,
+                });
+            }
         }
-        let longest = budgets.iter().map(|budget| budget.2).max().ok_or("no K")?;
+        let longest = budgets
+            .iter()
+            .map(|budget| budget.total)
+            .max()
+            .ok_or("no K")?;
 
-        // The engine's refit passes, matched to B's time with its snap.
+        // The engine's refit passes, matched to each B arm's time with its
+        // snap.
         let mut refined = model.clone();
         let mut ends = vec![(Duration::ZERO, model.score_f64(), drawing.clone())];
         let mut extra = Duration::ZERO;
@@ -309,12 +400,12 @@ fn run_image(
         }
         let mut selected: Vec<(String, usize)> = budgets
             .iter()
-            .map(|&(iterations, _, budget)| {
+            .map(|budget| {
                 let passes = ends
                     .iter()
-                    .rposition(|end| end.0 <= budget)
+                    .rposition(|end| end.0 <= budget.total)
                     .expect("zero passes fit");
-                (format!("end@B{iterations}"), passes)
+                (format!("end@{}", budget.label), passes)
             })
             .collect();
         selected.extend(
@@ -337,9 +428,17 @@ fn run_image(
             )?;
         }
 
-        // S-A1, continuous and integer, matched to B's time without the
-        // snap, since they pay their own.
-        let smallest = budgets[0];
+        // S-A1, continuous and integer, matched to the unconstrained B's
+        // time without the snap, since they pay their own.
+        if config.skip_search {
+            continue;
+        }
+        let budgets: Vec<(usize, Duration)> = budgets
+            .iter()
+            .filter(|budget| !budget.constrained)
+            .map(|budget| (budget.iterations, budget.optimised))
+            .collect();
+        let smallest = *budgets.first().ok_or("S-A1 needs the unconstrained arm")?;
         for (arm, search, budgets) in [
             ("S-A1", Search::continuous(MARGIN, SEED), budgets.as_slice()),
             (
@@ -376,7 +475,7 @@ fn run_image(
             }
             let mut selected: Vec<(String, usize)> = budgets
                 .iter()
-                .map(|&(iterations, budget, _)| {
+                .map(|&(iterations, budget)| {
                     let passes = states
                         .iter()
                         .rposition(|state| state.0 <= budget)
@@ -389,7 +488,7 @@ fn run_image(
                 let (passes_time, evaluations, tris) = &states[passes];
                 let start = Instant::now();
                 let quantum = if search.integer { 1.0 } else { 0.25 };
-                let drawing = snap(&mut scene, tris, quantum, background);
+                let (drawing, _) = snap(&mut scene, tris, quantum, background, false);
                 let snapped = start.elapsed();
                 let score = if search.integer {
                     Some(
@@ -438,12 +537,28 @@ fn to_tri(shape: &DrawnShape) -> Tri {
 
 /// `tris` with vertices rounded to multiples of `quantum` px and alphas to
 /// integers, the colours refitted once (one top-down sweep at filter 1)
-/// and rounded, as a drawing.
-fn snap(scene: &mut Scene<f32>, tris: &[Tri], quantum: f64, background: Color) -> Drawing {
+/// and rounded, as a drawing. With `constrained`, a triangle whose
+/// rounding breaks the engine's minimum angle takes the closest valid
+/// lattice triangle instead ([`angle::snap`]); the second value counts
+/// them.
+fn snap(
+    scene: &mut Scene<f32>,
+    tris: &[Tri],
+    quantum: f64,
+    background: Color,
+    constrained: bool,
+) -> (Drawing, usize) {
+    let mut repaired = 0;
     let mut snapped: Vec<Tri> = tris
         .iter()
         .map(|tri| Tri {
-            vertices: tri.vertices.map(|v| (v / quantum).round() * quantum),
+            vertices: if constrained {
+                let (vertices, replaced) = angle::snap(&tri.vertices, quantum);
+                repaired += usize::from(replaced);
+                vertices
+            } else {
+                tri.vertices.map(|v| (v / quantum).round() * quantum)
+            },
             alpha: tri.alpha.round().clamp(1.0, 255.0),
             color: tri.color,
         })
@@ -456,7 +571,7 @@ fn snap(scene: &mut Scene<f32>, tris: &[Tri], quantum: f64, background: Color) -
         false,
         &mut diff::Workspace::default(),
     );
-    Drawing {
+    let drawing = Drawing {
         width: scene.width as u32,
         height: scene.height as u32,
         background,
@@ -475,13 +590,38 @@ fn snap(scene: &mut Scene<f32>, tris: &[Tri], quantum: f64, background: Color) -
                 }
             })
             .collect(),
-    }
+    };
+    (drawing, repaired)
+}
+
+/// The smallest angle, in degrees, of every triangle of `drawing` as it is
+/// exported, and whether it keeps the engine's rule.
+fn exported_angles(drawing: &Drawing) -> Vec<(f64, bool)> {
+    drawing
+        .shapes
+        .iter()
+        .map(|shape| {
+            let Geometry::Polygon(points) = &shape.geometry else {
+                panic!("triangles only");
+            };
+            let [a, b, c] = points.as_slice() else {
+                panic!("triangles only");
+            };
+            let v = [a.x, a.y, b.x, b.y, c.x, c.y];
+            (angle::min_angle(&v).to_degrees(), angle::is_valid(&v))
+        })
+        .collect()
 }
 
 /// `drawing` encoded as a PNG at `output_size` and decoded again.
 fn png(drawing: &Drawing, output_size: u32) -> Result<RgbImage, BoxError> {
     let bytes = lab::encode(drawing, output_size, OutputFormat::Png)?.into_bytes();
     Ok(image::load_from_memory_with_format(&bytes, ImageFormat::Png)?.to_rgb8())
+}
+
+/// Angle bins as `a/b/c/d/e/f`.
+fn bins_text(bins: &[usize; 6]) -> String {
+    bins.map(|count| count.to_string()).join("/")
 }
 
 /// The median of `values`, which is not empty.
@@ -501,9 +641,11 @@ fn summary(rows: &[Row], checkpoints: &[u32]) {
     println!(
         "| steps | variant | median score | median rmse256 | median ssim128 | mean svg_bytes \
          | total time_s | total extra_s | passes | median vs greedy, points | mean Δrmse256 vs \
-         greedy |"
+         greedy | violations | min angle ≤15/≤16/≤18/≤20/≤25/>25 |"
     );
-    println!("| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
+    println!(
+        "| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |"
+    );
     for &steps in checkpoints {
         let mut variants: Vec<&str> = Vec::new();
         for row in rows.iter().filter(|row| row.steps == steps) {
@@ -552,9 +694,15 @@ fn summary(rows: &[Row], checkpoints: &[u32]) {
                     .map(|row| row.rmse256)
                     .collect(),
             );
+            let mut bins = [0; 6];
+            for row in &group {
+                for (sum, count) in bins.iter_mut().zip(row.bins) {
+                    *sum += count;
+                }
+            }
             println!(
                 "| {steps} | {variant} | {score} | {:.6} | {:.6} | {:.1} | {:.3} | {:.3} | {passes} \
-                 | {:+.2} | {:+.2}% |",
+                 | {:+.2} | {:+.2}% | {} | {} |",
                 rmse,
                 median(group.iter().map(|row| row.ssim128).collect()),
                 group.iter().map(|row| row.svg_bytes as f64).sum::<f64>() / group.len() as f64,
@@ -562,6 +710,8 @@ fn summary(rows: &[Row], checkpoints: &[u32]) {
                 extra.as_secs_f64(),
                 100.0 * (rmse / greedy - 1.0),
                 100.0 * change,
+                group.iter().map(|row| row.violations).sum::<usize>(),
+                bins_text(&bins),
             );
         }
     }
@@ -706,6 +856,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
         checkpoints: vec![50, 100, 200],
         iterations: vec![50, 150],
         passes: 100,
+        constraints: Vec::new(),
+        skip_search: false,
+        save: None,
         settings: Settings {
             iterations: 0,
             lr_vertex: 1.0,
@@ -715,8 +868,19 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
             epsilon: 1e-8,
             filter_start: 1.0,
             anneal: 0.5,
+            constraint: Constraint::Free,
         },
     };
+    let (mut names, mut min_degrees, mut threshold, mut weight) = (
+        vec![
+            "none".to_owned(),
+            "project".to_owned(),
+            "penalty".to_owned(),
+        ],
+        15.5,
+        17.0,
+        1e7,
+    );
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{arg} needs a value"));
         match arg.as_str() {
@@ -732,8 +896,112 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
             "--lr-alpha" => config.settings.lr_alpha = value()?.parse()?,
             "--filter-start" => config.settings.filter_start = value()?.parse()?,
             "--anneal" => config.settings.anneal = value()?.parse()?,
+            "--constraints" => names = value()?.split(',').map(str::to_owned).collect(),
+            "--min-degrees" => min_degrees = value()?.parse()?,
+            "--penalty-threshold" => threshold = value()?.parse()?,
+            "--penalty-weight" => weight = value()?.parse()?,
+            "--skip-search" => config.skip_search = true,
+            "--save" => config.save = Some(value()?.into()),
             other => return Err(format!("unknown argument {other}").into()),
         }
     }
+    if !(search::MIN_DEGREES..60.0).contains(&min_degrees) {
+        return Err(format!("--min-degrees {min_degrees} is outside 15..60").into());
+    }
+    for name in names {
+        config.constraints.push(match name.as_str() {
+            "none" => Constraint::Free,
+            "project" => Constraint::Project { min_degrees },
+            "penalty" => Constraint::Penalty {
+                min_degrees,
+                threshold,
+                weight,
+            },
+            other => return Err(format!("unknown constraint {other}").into()),
+        });
+    }
     Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::{RngExt, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
+
+    /// On a small noisy target, from valid triangles as greedy's are, the
+    /// unconstrained arm exports slivers and both constrained arms export
+    /// none, after the 0.25 px snap and the colour refit.
+    #[test]
+    fn constrained_arms_export_no_violations() {
+        let mut rng = ChaCha8Rng::seed_from_u64(77);
+        let (width, height) = (40, 32);
+        let mut scene = Scene::<f32> {
+            width,
+            height,
+            target: (0..3 * width * height)
+                .map(|_| rng.random_range(0.0..255.0))
+                .collect(),
+            background: [90.0, 60.0, 30.0],
+            filter: 1.0,
+        };
+        let mut start = Vec::new();
+        while start.len() < 24 {
+            let vertices: [f64; 6] = std::array::from_fn(|_| rng.random_range(-2.0..42.0));
+            if angle::is_valid(&vertices) && angle::min_angle(&vertices) < 25_f64.to_radians() {
+                start.push(Tri {
+                    vertices,
+                    alpha: rng.random_range(60.0..250.0),
+                    color: [128.0; 3],
+                });
+            }
+        }
+        let background = Color::new(90, 60, 30, 255);
+        // No margin: the snap alone has to keep the rule.
+        let min_degrees = 15.0 + 1e-9;
+        for constraint in [
+            Constraint::Free,
+            Constraint::Project { min_degrees },
+            Constraint::Penalty {
+                min_degrees,
+                threshold: 20.0,
+                weight: 1e6,
+            },
+        ] {
+            let settings = Settings {
+                iterations: 40,
+                lr_vertex: 1.0,
+                lr_alpha: 10.0,
+                beta1: 0.9,
+                beta2: 0.999,
+                epsilon: 1e-8,
+                filter_start: 1.0,
+                anneal: 0.5,
+                constraint,
+            };
+            let mut tris = start.clone();
+            diff::optimise(&mut scene, &mut tris, &settings, true, MARGIN);
+            let free = constraint == Constraint::Free;
+            let (drawing, repaired) = snap(&mut scene, &tris, 0.25, background, !free);
+            let violations = exported_angles(&drawing)
+                .iter()
+                .filter(|(_, valid)| !valid)
+                .count();
+            eprintln!(
+                "{constraint:?}: {violations} of {} violate, {repaired} snaps repaired",
+                tris.len()
+            );
+            if free {
+                assert!(violations > 0);
+            } else {
+                // Projected triangles sit at the boundary, so some
+                // roundings break the rule and need the repair; the
+                // penalty keeps them away from it.
+                if let Constraint::Project { .. } = constraint {
+                    assert!(repaired > 0);
+                }
+                assert_eq!(violations, 0);
+            }
+        }
+    }
 }
