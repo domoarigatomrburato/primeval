@@ -618,20 +618,21 @@ mod tests {
     }
 
     /// Pins the greedy search, so that a change to the refit's moves cannot
-    /// change it: the digests of seeded drawings of every kind, recorded
-    /// before the refit got moves of its own.
+    /// change it: the digests of seeded drawings of every kind. Recorded
+    /// when the blend became the exact composite rounded once per layer,
+    /// an intended change of the greedy output.
     #[test]
     fn seeded_greedy_output_is_pinned() {
         let pinned = [
-            (ShapeKind::Any, 0x9151b875372b0724),
+            (ShapeKind::Any, 0x7cb08f5094a3ceb3),
             (ShapeKind::Triangle, 0x0b2c1d60c966824f),
             (ShapeKind::Rectangle, 0xdf2ad63d0504df61),
-            (ShapeKind::Ellipse, 0x76faeeaf75e15ce4),
+            (ShapeKind::Ellipse, 0xdd99e621c00e71b6),
             (ShapeKind::Circle, 0x1cc7d6677aa8b599),
-            (ShapeKind::RotatedRectangle, 0xf5a0269435bfd504),
-            (ShapeKind::Quadratic, 0x1debfcef3c5c8312),
-            (ShapeKind::RotatedEllipse, 0x3ac662fa31867a07),
-            (ShapeKind::Polygon, 0xbf98d658c01b88e1),
+            (ShapeKind::RotatedRectangle, 0xe87987e1ea55666e),
+            (ShapeKind::Quadratic, 0xcd117f6ece2a71a0),
+            (ShapeKind::RotatedEllipse, 0xf9f17763932224cc),
+            (ShapeKind::Polygon, 0x0e723a2d35e4b3d8),
         ];
         assert_eq!(pinned.len(), every_kind().len());
         let actual: Vec<_> = pinned
@@ -646,7 +647,7 @@ mod tests {
         assert_eq!(actual, pinned);
         assert_eq!(
             digest(&seeded_drawing_of(42, 2, 2, ShapeKind::Any, true, COARSE)),
-            0x4a7372c32d09ea93,
+            0x5cc74b039241a980,
             "with a coarse random phase"
         );
     }

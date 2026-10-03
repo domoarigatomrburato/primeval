@@ -1,8 +1,10 @@
 //! Scoring and blending routines for the energy minimization loop.
 //!
-//! Blending and scoring keep the Go original's integer arithmetic,
-//! truncation semantics, and accumulator widths; the colour fit weights
-//! pixels by coverage instead. Buffers are opaque RGB, so every kernel
+//! A blend is the exact composite rounded once to the 8-bit grid, in
+//! fixed point ([`LineBlend`]): the composite every output writer should
+//! reproduce, so the search optimises what is exported. Scoring keeps the
+//! Go original's accumulator widths; the colour fit weights pixels by
+//! coverage. Buffers are opaque RGB, so every kernel
 //! works on the three colour channels only. On aarch64, hot paths use NEON
 //! intrinsics to process 8 pixels per iteration.
 //!
@@ -39,7 +41,7 @@ fn channel_count(width: u32, height: u32) -> f64 {
     f64::from(width) * f64::from(height) * BYTES_PER_PIXEL as f64
 }
 
-/// Exclusive upper bound of every blend value `v` passed to [`div_by_m`]:
+/// Exclusive upper bound of the values [`div_by_m`] divides exactly:
 /// `M * (M + 1) = 0xFFFF_0000`, which fits in `u32`.
 const BLEND_BOUND: u32 = M * (M + 1);
 
@@ -56,20 +58,52 @@ fn div_by_m(value: u32) -> u32 {
     (value + 1 + (value >> 16)) >> 16
 }
 
-/// Blends one 8-bit channel: `current` scaled by `a`, plus the premultiplied
-/// 16-bit `source` scaled by the coverage `ma`, back to 8 bits.
+/// One scanline's blend in fixed point: with `k` the line's
+/// [`blend_weight`] and `w = k / M`, channel value `c` becomes
+/// `round((1 − w) · c + w · s)`, the exact composite rounded once.
 ///
-/// Overflow bound: with `sa` the colour's premultiplied alpha,
-/// `a = (M - sa * ma / M) * 0x101`, `source <= sa` and `ma <= M`, and
-/// `k = sa * ma / M` (rounded down), so `sa * ma < (k + 1) * M`. Then
-/// `v = current * a + source * ma <= M * (M - k) + sa * ma
-/// < M * (M - k) + M * (k + 1) = M * (M + 1)`, where `current * 0x101 <= M`.
-/// The NEON blend computes the same `v` per lane, so the bound holds there too.
+/// Scaled by `M`, that is `⌊(c · (M − k) + k · s + (M − 1) / 2) / M⌋`: `M` is
+/// odd, so no value is halfway between two levels and the rounding is
+/// exact. A line with `k = 0` leaves its pixels unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LineBlend {
+    /// `M − k`, the factor of the canvas value.
+    keep: u32,
+    /// `k · s + (M − 1) / 2` per RGB channel.
+    terms: [u32; 3],
+}
+
+impl LineBlend {
+    /// The blend of `color` along a line of `coverage`.
+    #[inline]
+    fn new(color: Color, coverage: u32) -> Self {
+        let k = blend_weight(i32::from(color.a), coverage);
+        let term = |s: u8| k * u32::from(s) + M / 2;
+        Self {
+            keep: M - k,
+            terms: [term(color.r), term(color.g), term(color.b)],
+        }
+    }
+}
+
+/// Exclusive upper bound of every blend value `v` of [`blend_channel_scalar`]:
+/// with `k <= M`, `v = c · (M − k) + k · s + (M − 1) / 2
+/// <= 255 · M + (M − 1) / 2 < 256 · M`, so `v / M` fits in a byte, and `v`
+/// is far below [`BLEND_BOUND`], where [`div_by_m`] is exact.
+const BLEND_VALUE_BOUND: u32 = 256 * M;
+const _: () = assert!(BLEND_VALUE_BOUND <= BLEND_BOUND);
+
+/// Blends one 8-bit channel, `current`, with its [`LineBlend`] `keep` and
+/// channel `term`: `(current · keep + term) / M`, rounded down. The NEON
+/// blend computes the same value per lane.
 #[inline]
-fn blend_channel_scalar(current: u8, source: u32, ma: u32, a: u32) -> u8 {
-    debug_assert!(ma <= M && source <= M, "source={source} ma={ma}");
-    let value = u32::from(current) * a + source * ma;
-    (div_by_m(value) >> 8) as u8
+fn blend_channel_scalar(current: u8, term: u32, keep: u32) -> u8 {
+    let value = u32::from(current) * keep + term;
+    debug_assert!(
+        value < BLEND_VALUE_BOUND,
+        "blend value {value} out of range"
+    );
+    div_by_m(value) as u8
 }
 
 /// Weighted least-squares fit of a shape's colour, accumulated one scanline
@@ -230,17 +264,14 @@ trait LineKernels {
     /// canvas over `pixels` pixels from byte offset `start`.
     unsafe fn line_error(t_pix: &[u8], c_pix: &[u8], start: usize, pixels: usize) -> u64;
 
-    /// The same sum after blending premultiplied `source` channels onto the
-    /// canvas with coverage `ma` and canvas factor `a`, as [`draw_lines`]
-    /// would.
+    /// The same sum after blending the canvas with `blend`, as
+    /// [`draw_lines`] would.
     unsafe fn line_after(
         t_pix: &[u8],
         c_pix: &[u8],
         start: usize,
         pixels: usize,
-        source: [u32; 3],
-        ma: u32,
-        a: u32,
+        blend: LineBlend,
     ) -> u64;
 }
 
@@ -370,7 +401,6 @@ fn energy_with<K: LineKernels>(
     limit: Option<i64>,
 ) -> Option<u64> {
     assert_same_dimensions(target, current);
-    let [sr, sg, sb, sa] = fit.color.to_premultiplied_rgba();
     let w = target.width() as i32;
     let h = target.height() as i32;
     let t_pix = target.pixels();
@@ -385,13 +415,12 @@ fn energy_with<K: LineKernels>(
         let Some((x1, x2)) = clamp_line(line, w, h) else {
             continue;
         };
-        let ma = line.alpha;
-        let a = (M - sa * ma / M) * 0x101;
+        let blend = LineBlend::new(fit.color, line.alpha);
         let pixels = (x2 - x1 + 1) as usize;
         let start = target.pix_offset(x1, line.y);
         // SAFETY: as in `fit_with`, the clamped line lies inside `target`,
         // and `current` has the same dimensions.
-        let after = unsafe { K::line_after(t_pix, c_pix, start, pixels, [sr, sg, sb], ma, a) };
+        let after = unsafe { K::line_after(t_pix, c_pix, start, pixels, blend) };
         total = total.wrapping_add(after as i64);
         if reached(total) {
             return None;
@@ -429,11 +458,9 @@ impl LineKernels for Scalar {
         c_pix: &[u8],
         start: usize,
         pixels: usize,
-        source: [u32; 3],
-        ma: u32,
-        a: u32,
+        blend: LineBlend,
     ) -> u64 {
-        scalar::line_after(t_pix, c_pix, start, pixels, source, ma, a)
+        scalar::line_after(t_pix, c_pix, start, pixels, blend)
     }
 }
 
@@ -466,17 +493,15 @@ impl LineKernels for Neon {
         c_pix: &[u8],
         start: usize,
         pixels: usize,
-        source: [u32; 3],
-        ma: u32,
-        a: u32,
+        blend: LineBlend,
     ) -> u64 {
         // SAFETY: this method's contract is `neon::line_after`'s.
-        unsafe { neon::line_after(t_pix, c_pix, start, pixels, source, ma, a) }
+        unsafe { neon::line_after(t_pix, c_pix, start, pixels, blend) }
     }
 }
 
 mod scalar {
-    use super::{BYTES_PER_PIXEL, Buffer, SpanSums, blend_channel_scalar};
+    use super::{BYTES_PER_PIXEL, Buffer, LineBlend, SpanSums, blend_channel_scalar};
 
     /// The sums of [`SpanSums`] over `pixels` pixels from byte offset
     /// `start`, in one pass over the pixels; for the short lines that are
@@ -565,7 +590,7 @@ mod scalar {
     }
 
     /// The squared channel differences between the target and the canvas
-    /// blended with `source`, over `pixels` pixels from byte offset `start`.
+    /// blended with `blend`, over `pixels` pixels from byte offset `start`.
     #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
     #[inline]
     pub(super) fn line_after(
@@ -573,9 +598,7 @@ mod scalar {
         c_pix: &[u8],
         start: usize,
         pixels: usize,
-        source: [u32; 3],
-        ma: u32,
-        a: u32,
+        blend: LineBlend,
     ) -> u64 {
         let end = start + pixels * BYTES_PER_PIXEL;
         let (t_px3, _) = t_pix[start..end].as_chunks::<3>();
@@ -584,7 +607,7 @@ mod scalar {
         for (t_px, c_px) in t_px3.iter().zip(c_px3) {
             let mut after = 0_u32;
             for channel in 0..3 {
-                let blended = blend_channel_scalar(c_px[channel], source[channel], ma, a);
+                let blended = blend_channel_scalar(c_px[channel], blend.terms[channel], blend.keep);
                 let d = u32::from(t_px[channel].abs_diff(blended));
                 after += d * d;
             }
@@ -596,48 +619,49 @@ mod scalar {
 
 #[cfg(target_arch = "aarch64")]
 mod neon {
-    use super::{BYTES_PER_PIXEL, Buffer, blend_channel_scalar, scalar};
+    use super::{BYTES_PER_PIXEL, Buffer, LineBlend, blend_channel_scalar, scalar};
     use std::arch::aarch64::*;
 
     /// Bytes in a chunk of 8 RGB pixels, the unit of every `vld3_u8`.
     const CHUNK_BYTES: usize = 8 * BYTES_PER_PIXEL;
 
+    /// `value / M` per lane, as [`super::div_by_m`], narrowed to 16 bits.
+    ///
     /// # Safety
     ///
     /// Requires NEON, which every aarch64 target provides.
-    unsafe fn div_by_m_u32x4(value: uint32x4_t) -> uint32x4_t {
+    unsafe fn div_by_m_narrow_u32x4(value: uint32x4_t) -> uint16x4_t {
         // SAFETY: register-only NEON intrinsics with no memory access. NEON is a
         // baseline feature of every aarch64 target and this module only compiles
         // for aarch64, so the required target feature is always available.
         unsafe {
             let plus_one = vdupq_n_u32(1);
             let adjusted = vaddq_u32(vaddq_u32(value, plus_one), vshrq_n_u32(value, 16));
-            vshrq_n_u32(adjusted, 16)
+            vshrn_n_u32(adjusted, 16)
         }
     }
 
+    /// [`blend_channel_scalar`] on 8 lanes: `(current · keep + term) / M`.
+    ///
     /// # Safety
     ///
     /// Requires NEON, which every aarch64 target provides.
-    unsafe fn blend_vector_u8x8(current: uint8x8_t, source: u32, ma: u32, a: u32) -> uint8x8_t {
+    unsafe fn blend_vector_u8x8(current: uint8x8_t, term: u32, keep: u32) -> uint8x8_t {
+        // `keep = M − k` fits in 16 bits, so the products are widening
+        // 16-bit multiplies accumulated onto the term.
+        let keep = keep as u16;
         // SAFETY: register-only NEON intrinsics with no memory access. NEON is a
         // baseline feature of every aarch64 target and this module only compiles
         // for aarch64, so the required target feature is always available.
         unsafe {
             let current16 = vmovl_u8(current);
-            let source_term = vdupq_n_u32(source * ma);
-
-            let current_low = vmovl_u16(vget_low_u16(current16));
-            let current_high = vmovl_u16(vget_high_u16(current16));
-
-            let blended_low = div_by_m_u32x4(vaddq_u32(vmulq_n_u32(current_low, a), source_term));
-            let blended_high = div_by_m_u32x4(vaddq_u32(vmulq_n_u32(current_high, a), source_term));
-
-            let blended16 = vcombine_u16(
-                vmovn_u32(vshrq_n_u32(blended_low, 8)),
-                vmovn_u32(vshrq_n_u32(blended_high, 8)),
-            );
-            vmovn_u16(blended16)
+            let terms = vdupq_n_u32(term);
+            let low = vmlal_n_u16(terms, vget_low_u16(current16), keep);
+            let high = vmlal_n_u16(terms, vget_high_u16(current16), keep);
+            vmovn_u16(vcombine_u16(
+                div_by_m_narrow_u32x4(low),
+                div_by_m_narrow_u32x4(high),
+            ))
         }
     }
 
@@ -645,19 +669,14 @@ mod neon {
     ///
     /// Requires NEON, which every aarch64 target provides.
     #[cfg(test)]
-    pub(super) unsafe fn blend_chunk_u8x8(
-        current: [u8; 8],
-        source: u32,
-        ma: u32,
-        a: u32,
-    ) -> [u8; 8] {
+    pub(super) unsafe fn blend_chunk_u8x8(current: [u8; 8], term: u32, keep: u32) -> [u8; 8] {
         let mut out = [0_u8; 8];
         // SAFETY: `vld1_u8` reads and `vst1_u8` writes exactly 8 bytes, and both
         // pointers come from local `[u8; 8]` arrays. The remaining calls are
         // register-only NEON operations; NEON is a baseline aarch64 feature.
         unsafe {
             let current_vec = vld1_u8(current.as_ptr());
-            let blended = blend_vector_u8x8(current_vec, source, ma, a);
+            let blended = blend_vector_u8x8(current_vec, term, keep);
             vst1_u8(out.as_mut_ptr(), blended);
         }
         out
@@ -856,7 +875,7 @@ mod neon {
     }
 
     /// The squared channel differences between the target and the canvas
-    /// blended with `source`; matches [`scalar::line_after`].
+    /// blended with `blend`; matches [`scalar::line_after`].
     ///
     /// # Safety
     ///
@@ -867,11 +886,10 @@ mod neon {
         c_pix: &[u8],
         start: usize,
         pixels: usize,
-        source: [u32; 3],
-        ma: u32,
-        a: u32,
+        blend: LineBlend,
     ) -> u64 {
-        let [sr, sg, sb] = source;
+        let LineBlend { keep, terms } = blend;
+        let [sr, sg, sb] = terms;
         let mut total = 0_u64;
         let mut byte_index = start;
 
@@ -885,9 +903,9 @@ mod neon {
             unsafe {
                 let t = vld3_u8(t_pix.as_ptr().add(byte_index));
                 let c = vld3_u8(c_pix.as_ptr().add(byte_index));
-                total += sum_squared_diff_u8x8(t.0, blend_vector_u8x8(c.0, sr, ma, a));
-                total += sum_squared_diff_u8x8(t.1, blend_vector_u8x8(c.1, sg, ma, a));
-                total += sum_squared_diff_u8x8(t.2, blend_vector_u8x8(c.2, sb, ma, a));
+                total += sum_squared_diff_u8x8(t.0, blend_vector_u8x8(c.0, sr, keep));
+                total += sum_squared_diff_u8x8(t.1, blend_vector_u8x8(c.1, sg, keep));
+                total += sum_squared_diff_u8x8(t.2, blend_vector_u8x8(c.2, sb, keep));
             }
             byte_index += CHUNK_BYTES;
         }
@@ -904,16 +922,16 @@ mod neon {
                 let mask = tail_mask(tail);
                 let t = vld3_u8(t_pix.as_ptr().add(byte_index));
                 let c = vld3_u8(c_pix.as_ptr().add(byte_index));
-                let after_r = vbsl_u8(mask, blend_vector_u8x8(c.0, sr, ma, a), t.0);
-                let after_g = vbsl_u8(mask, blend_vector_u8x8(c.1, sg, ma, a), t.1);
-                let after_b = vbsl_u8(mask, blend_vector_u8x8(c.2, sb, ma, a), t.2);
+                let after_r = vbsl_u8(mask, blend_vector_u8x8(c.0, sr, keep), t.0);
+                let after_g = vbsl_u8(mask, blend_vector_u8x8(c.1, sg, keep), t.1);
+                let after_b = vbsl_u8(mask, blend_vector_u8x8(c.2, sb, keep), t.2);
                 total += sum_squared_diff_u8x8(t.0, after_r);
                 total += sum_squared_diff_u8x8(t.1, after_g);
                 total += sum_squared_diff_u8x8(t.2, after_b);
             }
         } else {
             for _ in 0..tail {
-                for (channel, &source) in source.iter().enumerate() {
+                for (channel, &term) in terms.iter().enumerate() {
                     // SAFETY: the tail reads the last `tail` pixels of the
                     // line, which end at `start + pixels * 3`, within both
                     // slices by the caller's contract.
@@ -923,7 +941,7 @@ mod neon {
                             *c_pix.as_ptr().add(byte_index + channel),
                         )
                     };
-                    let d = u32::from(t.abs_diff(blend_channel_scalar(c, source, ma, a)));
+                    let d = u32::from(t.abs_diff(blend_channel_scalar(c, term, keep)));
                     total += u64::from(d * d);
                 }
                 byte_index += BYTES_PER_PIXEL;
@@ -998,7 +1016,6 @@ fn assert_same_dimensions(target: &Buffer, current: &Buffer) {
 /// `src`'s dimensions.
 #[cfg(test)]
 pub(crate) fn copy_and_draw_lines(dst: &mut Buffer, src: &Buffer, c: Color, lines: &[Scanline]) {
-    let [sr, sg, sb, sa] = c.to_premultiplied_rgba();
     let w = dst.width() as i32;
     let h = dst.height() as i32;
 
@@ -1011,13 +1028,13 @@ pub(crate) fn copy_and_draw_lines(dst: &mut Buffer, src: &Buffer, c: Color, line
             Some(v) => v,
             None => continue,
         };
-        let ma = line.alpha;
-        let a = (M - sa * ma / M) * 0x101;
+        let LineBlend { keep, terms } = LineBlend::new(c, line.alpha);
         let mut i = (line.y as usize * w as usize + x1 as usize) * BYTES_PER_PIXEL;
         for _ in x1..=x2 {
-            dst_pix[i] = blend_channel_scalar(src_pix[i], sr, ma, a);
-            dst_pix[i + 1] = blend_channel_scalar(src_pix[i + 1], sg, ma, a);
-            dst_pix[i + 2] = blend_channel_scalar(src_pix[i + 2], sb, ma, a);
+            for channel in 0..3 {
+                dst_pix[i + channel] =
+                    blend_channel_scalar(src_pix[i + channel], terms[channel], keep);
+            }
             i += BYTES_PER_PIXEL;
         }
     }
@@ -1025,7 +1042,6 @@ pub(crate) fn copy_and_draw_lines(dst: &mut Buffer, src: &Buffer, c: Color, line
 
 /// Blends color `c` onto the existing pixels of `im` along the given scanlines.
 pub(crate) fn draw_lines(im: &mut Buffer, c: Color, lines: &[Scanline]) {
-    let [sr, sg, sb, sa] = c.to_premultiplied_rgba();
     let w = im.width() as i32;
     let h = im.height() as i32;
     let pix = im.pixels_mut();
@@ -1035,13 +1051,12 @@ pub(crate) fn draw_lines(im: &mut Buffer, c: Color, lines: &[Scanline]) {
             Some(v) => v,
             None => continue,
         };
-        let ma = line.alpha;
-        let a = (M - sa * ma / M) * 0x101;
+        let LineBlend { keep, terms } = LineBlend::new(c, line.alpha);
         let mut i = (line.y as usize * w as usize + x1 as usize) * BYTES_PER_PIXEL;
         for _ in x1..=x2 {
-            pix[i] = blend_channel_scalar(pix[i], sr, ma, a);
-            pix[i + 1] = blend_channel_scalar(pix[i + 1], sg, ma, a);
-            pix[i + 2] = blend_channel_scalar(pix[i + 2], sb, ma, a);
+            for channel in 0..3 {
+                pix[i + channel] = blend_channel_scalar(pix[i + channel], terms[channel], keep);
+            }
             i += BYTES_PER_PIXEL;
         }
     }
@@ -1304,17 +1319,16 @@ mod tests {
             *value = (index as u8).wrapping_mul(31).wrapping_add(7);
         }
 
-        for source in 0_u32..=255 {
-            let expanded = source | (source << 8);
-            for alpha in [0_u32, 1, 127, 128, 192, 255] {
-                let ma = alpha * 0x101;
-                let a = (0xFFFF - ma) * 0x101;
+        for source in 0_u8..=255 {
+            for alpha in [1_u8, 127, 128, 192, 255] {
+                let blend = LineBlend::new(Color::new(source, 0, 0, alpha), M);
+                let (term, keep) = (blend.terms[0], blend.keep);
 
                 // SAFETY: only requires NEON, a baseline aarch64 feature; the
                 // test is compiled for aarch64 only.
-                let simd = unsafe { neon::blend_chunk_u8x8(current, expanded, ma, a) };
+                let simd = unsafe { neon::blend_chunk_u8x8(current, term, keep) };
                 for lane in 0..8 {
-                    let scalar = blend_channel_scalar(current[lane], expanded, ma, a);
+                    let scalar = blend_channel_scalar(current[lane], term, keep);
                     assert_eq!(simd[lane], scalar, "src={source} alpha={alpha} lane={lane}");
                 }
             }
@@ -1422,15 +1436,50 @@ mod tests {
             alpha: 0xFFFF,
         }];
 
+        // At alpha 255 and full coverage the weight is 1, so the fit is the
+        // target itself.
         let c = compute_color(&target, &current, &lines, 255);
-        // With alpha=255: a = 0x101 * 255 / 255 = 0x101 = 257
-        // rsum = (255 - 0) * 257 + 0 * 257 = 65535
-        // count = 1
-        // r = (65535 / 1) >> 8 = 65535 >> 8 = 255
         assert_eq!(c.r, 255);
         assert_eq!(c.g, 0);
         assert_eq!(c.b, 0);
         assert_eq!(c.a, 255);
+    }
+
+    /// Every blend is the exact composite rounded once to the 8-bit grid:
+    /// `round((1 − w) · c + w · s)` with `w = k / M` the line's
+    /// [`blend_weight`], which is `alpha / 255` at full coverage. Checked
+    /// for every canvas value at a spread of colours, alphas and coverages.
+    #[test]
+    fn draw_lines_rounds_the_exact_blend_once() {
+        let canvas: Vec<u8> = (0..=255).flat_map(|c| [c, c, c]).collect();
+        let coverages = [0, 1, 0x7FFF, 0x8000, 0xA5A5, 0xFFFE, M];
+        for alpha in (1..=255).step_by(2) {
+            for s in [0_u8, 1, 37, 128, 200, 254, 255] {
+                let color = Color::new(s, 255 - s, s / 2, alpha);
+                for coverage in coverages {
+                    let mut im = Buffer::from_rgb(128, 2, canvas.clone()).expect("buffer");
+                    let lines = [0, 1].map(|y| Scanline {
+                        y,
+                        x1: 0,
+                        x2: 127,
+                        alpha: coverage,
+                    });
+                    draw_lines(&mut im, color, &lines);
+                    let w = f64::from(blend_weight(i32::from(alpha), coverage)) / f64::from(M);
+                    for (x, pixel) in im.pixels().as_chunks::<3>().0.iter().enumerate() {
+                        let c = x as f64;
+                        for (got, s) in pixel.iter().zip([color.r, color.g, color.b]) {
+                            let expected = ((1.0 - w) * c + w * f64::from(s)).round();
+                            assert_eq!(
+                                f64::from(*got),
+                                expected,
+                                "c={c} s={s} alpha={alpha} coverage={coverage}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -1883,22 +1932,20 @@ mod tests {
         color: Color,
         score: u64,
     ) -> u64 {
-        let [sr, sg, sb, sa] = color.to_premultiplied_rgba();
         let (w, h) = (target.width() as i32, target.height() as i32);
         let mut total = score;
         for line in lines {
             let Some((x1, x2)) = clamp_line(line, w, h) else {
                 continue;
             };
-            let ma = line.alpha;
-            let a = (M - sa * ma / M) * 0x101;
+            let blend = LineBlend::new(color, line.alpha);
             for x in x1..=x2 {
                 let i = target.pix_offset(x, line.y);
-                for (channel, source) in [sr, sg, sb].into_iter().enumerate() {
+                for (channel, term) in blend.terms.into_iter().enumerate() {
                     let t = i64::from(target.pixels()[i + channel]);
                     let c = current.pixels()[i + channel];
                     let d1 = t - i64::from(c);
-                    let d2 = t - i64::from(blend_channel_scalar(c, source, ma, a));
+                    let d2 = t - i64::from(blend_channel_scalar(c, term, blend.keep));
                     total = total.wrapping_sub((d1 * d1) as u64);
                     total = total.wrapping_add((d2 * d2) as u64);
                 }
@@ -2019,20 +2066,20 @@ mod tests {
         let _ = energy_from_lines_raw(&target, &current, &[full_row(3, 16)], color, 0);
     }
 
-    /// The blend computes `v = current * a + source * ma` with
-    /// `a = (M - sa * ma / M) * 0x101`. `v` is largest for `current = 255`
-    /// and a white source (`source = sa`); check the documented bound
-    /// `v < M * (M + 1)` for every colour alpha and every coverage.
+    /// The blend computes `v = current · keep + term`, largest for
+    /// `current = 255` and a white colour; check the documented bound
+    /// `v < 256 · M`, so `v / M` fits in a byte, for every colour alpha and
+    /// every coverage.
     #[test]
     fn blend_value_stays_below_the_overflow_bound() {
-        let bound = u64::from(M) * u64::from(M + 1);
-        for alpha in 0_u8..=255 {
-            let [source, .., sa] = Color::new(255, 255, 255, alpha).to_premultiplied_rgba();
-            assert_eq!(source, sa);
-            for ma in 0..=M {
-                let a = (M - sa * ma / M) * 0x101;
-                let value = 255 * u64::from(a) + u64::from(source) * u64::from(ma);
-                assert!(value < bound, "alpha={alpha} ma={ma} value={value}");
+        for alpha in 1_u8..=255 {
+            for coverage in 0..=M {
+                let blend = LineBlend::new(Color::new(255, 255, 255, alpha), coverage);
+                let value = 255 * u64::from(blend.keep) + u64::from(blend.terms[0]);
+                assert!(
+                    value < u64::from(BLEND_VALUE_BOUND),
+                    "alpha={alpha} coverage={coverage} value={value}"
+                );
             }
         }
     }
@@ -2056,8 +2103,8 @@ mod tests {
 mod neon_parity {
     use super::fixtures::{random_buffer, random_lines};
     use super::{
-        Fit, LineKernels, M, Neon, Scalar, blend_channel_scalar, energy_with, fit_with, neon,
-        scalar,
+        Fit, LineBlend, LineKernels, M, Neon, Scalar, blend_channel_scalar, energy_with, fit_with,
+        neon, scalar,
     };
     use crate::buffer::Buffer;
     use crate::color::Color;
@@ -2162,9 +2209,8 @@ mod neon_parity {
                 for pixels in 0..=total - first {
                     let start = first * 3;
                     let color = Color::new(rng.random(), rng.random(), rng.random(), rng.random());
-                    let [sr, sg, sb, sa] = color.to_premultiplied_rgba();
-                    let ma = rng.random_range(0..=M);
-                    let a = (M - sa * ma / M) * 0x101;
+                    let coverage = rng.random_range(0..=M);
+                    let blend = LineBlend::new(color, coverage);
                     // SAFETY: `start + pixels * 3` is at most `total * 3`,
                     // the length of both buffers.
                     unsafe {
@@ -2179,9 +2225,9 @@ mod neon_parity {
                             "{first} {pixels}"
                         );
                         assert_eq!(
-                            Neon::line_after(t_pix, c_pix, start, pixels, [sr, sg, sb], ma, a),
-                            Scalar::line_after(t_pix, c_pix, start, pixels, [sr, sg, sb], ma, a),
-                            "{first} {pixels} {color:?} {ma}"
+                            Neon::line_after(t_pix, c_pix, start, pixels, blend),
+                            Scalar::line_after(t_pix, c_pix, start, pixels, blend),
+                            "{first} {pixels} {color:?} {coverage}"
                         );
                     }
                 }
@@ -2224,16 +2270,19 @@ mod neon_parity {
         let mut rng = ChaCha8Rng::seed_from_u64(0xb1e4);
         for alpha in 1..=255 {
             let color = Color::new(rng.random(), rng.random(), rng.random(), alpha);
-            let [sr, _, _, sa] = color.to_premultiplied_rgba();
-            for ma in [0, 1, M / 2, M - 1, M, rng.random_range(0..=M)] {
-                let a = (M - sa * ma / M) * 0x101;
+            for coverage in [0, 1, M / 2, M - 1, M, rng.random_range(0..=M)] {
+                let blend = LineBlend::new(color, coverage);
+                let (term, keep) = (blend.terms[0], blend.keep);
                 for chunk in 0_u8..32 {
                     let current: [u8; 8] = std::array::from_fn(|lane| chunk * 8 + lane as u8);
                     // SAFETY: only requires NEON, a baseline aarch64 feature.
-                    let simd = unsafe { neon::blend_chunk_u8x8(current, sr, ma, a) };
+                    let simd = unsafe { neon::blend_chunk_u8x8(current, term, keep) };
                     for lane in 0..8 {
-                        let expected = blend_channel_scalar(current[lane], sr, ma, a);
-                        assert_eq!(simd[lane], expected, "alpha={alpha} ma={ma} lane={lane}");
+                        let expected = blend_channel_scalar(current[lane], term, keep);
+                        assert_eq!(
+                            simd[lane], expected,
+                            "alpha={alpha} coverage={coverage} lane={lane}"
+                        );
                     }
                 }
             }

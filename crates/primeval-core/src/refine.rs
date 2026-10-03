@@ -7,21 +7,19 @@
 //! # The layer model
 //!
 //! The canvas is opaque RGB, and [`score::draw_lines`] blends each pixel of
-//! a scanline in fixed point. With `k` the line's [`score::blend_weight`],
-//! `w = k / M` and `s` the shape's channel value, one blend is, up to the
-//! rounding of its fixed-point factors,
-//! `x ← ⌊γ · ((1 − w) · x + w · s)⌋` with `γ = 257 / 256`: the 8-bit canvas
-//! is widened to 16 bits by `· 0x101` and narrowed back by `>> 8`. The model
-//! replaces the floor by its mean, so a blend is the affine map
-//! `x ← γ (1 − w) · x + γ w · s − β` with `β = 1/2` ([`GAIN`], [`BIAS`]).
-//! A line with `k = 0` leaves its pixels exactly unchanged.
+//! a scanline exactly and rounds once: with `k` the line's
+//! [`score::blend_weight`], `w = k / M` and `s` the shape's channel value,
+//! one blend is `x ← round((1 − w) · x + w · s)`. The model drops the
+//! rounding, whose error has mean zero, so a blend is the affine map
+//! `x ← (1 − w) · x + w · s`. A line with `k = 0` leaves its pixels exactly
+//! unchanged.
 //!
 //! The layers above layer `i` therefore act on every pixel as one affine
 //! map, `final = A · X_i + B`, where `X_i` is the canvas just after layer `i`,
-//! `A` the product of the `γ (1 − w)` above it and `B` an RGB offset
+//! `A` the product of the `(1 − w)` above it and `B` an RGB offset
 //! ([`Above`]). With `d` the exact canvas below layer `i` (`X_{i−1}`), a
 //! candidate at layer `i` with weight `w` gives, per pixel and channel,
-//! `final = T − q + g · s` with `g = A γ w` and `q = T − B − A (γ (1 − w) d − β)`,
+//! `final = T − q + g · s` with `g = A w` and `q = T − B − A (1 − w) d`,
 //! so its error is `(q − g · s)²`, and the error with layer `i` removed is
 //! `r² = (T − B − A · d)²`. Over the covered pixels the best colour is
 //! `s* = Σ g · q / Σ g²` per channel, rounded and clamped to the stored u8,
@@ -30,16 +28,15 @@
 //! layer shares the removed energy, so the search compares only the second
 //! term, which one pass over the covered pixels gives for any colour
 //! ([`Sums`]). At the top layer
-//! (`A = 1`, `B = 0`) and without the gain and bias this is exactly the
-//! greedy fit of [`score::fit`]. A pixel with `A = 0` has no influence, and a
-//! shape without any (`Σ g² = 0`) keeps its colour.
+//! (`A = 1`, `B = 0`) this is exactly the greedy fit of [`score::fit`]. A
+//! pixel with `A = 0` has no influence, and a shape without any
+//! (`Σ g² = 0`) keeps its colour.
 //!
-//! The gain and bias fold the mean truncation of the integer pipeline into
-//! the model: without them each covering blend is off by `x / 256 − 1/2`
-//! on average, which accumulates through deep stacks. The bound that
-//! remains is pinned by `layer_model_matches_the_exact_composite`. `A` and
-//! `B` are `f32` planes, the canvas below stays the exact u8 canvas, and
-//! the sums are `f64`.
+//! The only error of the model is the rounding of the blends between
+//! layer `i` and the top, each within half a level and attenuated by the
+//! layers above it; the bound is pinned by
+//! `layer_model_matches_the_exact_composite`. `A` and `B` are `f32` planes,
+//! the canvas below stays the exact u8 canvas, and the sums are `f64`.
 //!
 //! # A pass
 //!
@@ -158,13 +155,7 @@ const CHECKPOINT_BUDGET: usize = 64 << 20;
 /// `M` of the fixed-point blend, as a float.
 const M: f32 = 65535.0;
 
-/// The blend's widening gain, `0x101 / 256`; see the module doc.
-const GAIN: f32 = 257.0 / 256.0;
-
-/// The mean truncation of one blend; see the module doc.
-const BIAS: f32 = 0.5;
-
-/// One line's blend in the model: `x ← keep · x + paint · s − BIAS`.
+/// One line's blend in the model: `x ← keep · x + paint · s`.
 #[derive(Clone, Copy)]
 struct Blend {
     keep: f32,
@@ -180,8 +171,8 @@ impl Blend {
         (k != 0).then(|| {
             let w = k as f32 / M;
             Self {
-                keep: GAIN * (1.0 - w),
-                paint: GAIN * w,
+                keep: 1.0 - w,
+                paint: w,
             }
         })
     }
@@ -211,7 +202,7 @@ impl Above {
     }
 
     /// Folds a layer drawn along `lines` in `color` in under the layers
-    /// already folded: `B ← B + A · (paint · s − BIAS)`, `A ← A · keep`.
+    /// already folded: `B ← B + A · paint · s`, `A ← A · keep`.
     pub(crate) fn fold(&mut self, lines: &[Scanline], color: Color) {
         let s = [color.r, color.g, color.b].map(f32::from);
         // The layer's own lines blend in order, so the last one is the
@@ -223,7 +214,7 @@ impl Above {
             let Some(blend) = Blend::new(color.a, line.alpha) else {
                 continue;
             };
-            let paint = s.map(|s| blend.paint * s - BIAS);
+            let paint = s.map(|s| blend.paint * s);
             let row = line.y as usize * self.width as usize;
             for p in row + x1 as usize..=row + x2 as usize {
                 let a = self.transmittance[p];
@@ -247,7 +238,7 @@ pub(crate) struct Layer<'a> {
 impl Layer<'_> {
     /// Calls `visit(p, g, q, r)` for every pixel `p` of `lines` that the
     /// shape at `alpha` influences, a pixel once per line that covers it,
-    /// with `g = A γ w`, and `q` and `r` per channel; see the module doc.
+    /// with `g = A w`, and `q` and `r` per channel; see the module doc.
     #[inline]
     fn visit(
         &self,
@@ -276,7 +267,7 @@ impl Layer<'_> {
                     let i = 3 * p + c;
                     let rest = f32::from(t[i]) - above.offset[i];
                     let d = f32::from(d[i]);
-                    q[c] = rest - a * (blend.keep * d - BIAS);
+                    q[c] = rest - a * blend.keep * d;
                     r[c] = rest - a * d;
                 }
                 visit(p, a * blend.paint, q, r);
@@ -583,18 +574,20 @@ mod tests {
 
     /// The largest error of the layer model against the exact composite,
     /// in levels per channel, and the largest mean absolute error of one
-    /// predicted image; see `layer_model_matches_the_exact_composite`.
-    /// Measured: 1.65 and 0.45 (0.38 without a candidate), with a mean
-    /// signed error of −0.005. Without [`GAIN`] and [`BIAS`] the same stacks
-    /// give 2.91 and 0.69, with a mean signed error of +0.03.
+    /// predicted image of at least [`Errors::MEAN_VALUES`] values; see
+    /// `layer_model_matches_the_exact_composite`. The model is the exact
+    /// composite without the per-layer rounding, so both come from the
+    /// rounding of the layers above the predicted one. Measured: 1.70 and
+    /// 0.35, with and without a candidate, and a mean signed error of
+    /// −0.004.
     const MAX_ERROR: f32 = 1.75;
-    const MEAN_ERROR: f64 = 0.5;
+    const MEAN_ERROR: f64 = 0.4;
 
     /// The largest difference between the model's energy of a top-layer
     /// shape and its exact energy, per covered channel value. Measured:
-    /// 44.8 (88.0 without [`GAIN`] and [`BIAS`]) on noise targets, where the
-    /// errors the model is off by are largest.
-    const TOP_ENERGY_ERROR: f64 = 48.0;
+    /// 39.0 on noise targets, where the errors the model is off by are
+    /// largest.
+    const TOP_ENERGY_ERROR: f64 = 42.0;
 
     fn noise(rng: &mut ChaCha8Rng, width: u32, height: u32) -> Buffer {
         let mut pixels = vec![0_u8; (width * height * 3) as usize];
@@ -689,6 +682,12 @@ mod tests {
     }
 
     impl Errors {
+        /// Images with fewer channel values than this count towards the
+        /// largest error only. A 2 × 2 image under shapes that cover all of
+        /// it holds 3 independent values, one per channel, so its mean is a
+        /// sample of three rounding errors rather than an average.
+        const MEAN_VALUES: usize = 300;
+
         fn add(&mut self, exact: &Buffer, predicted: &[f32]) {
             let mut sum = 0.0;
             for (&e, &p) in exact.pixels().iter().zip(predicted) {
@@ -699,7 +698,9 @@ mod tests {
                 self.signed += f64::from(error);
             }
             self.values += predicted.len();
-            self.worst_mean = self.worst_mean.max(sum / predicted.len() as f64);
+            if predicted.len() >= Self::MEAN_VALUES {
+                self.worst_mean = self.worst_mean.max(sum / predicted.len() as f64);
+            }
         }
     }
 
@@ -749,8 +750,9 @@ mod tests {
 
     /// At the top layer the model is the greedy fit: the same colour within
     /// one level, and the exact energy of drawing it within the pinned
-    /// bound. The model's truncation term can move a channel further where
-    /// the exact energy is flat; there its colour must be exactly as good.
+    /// bound. The model's `f32` planes can round a channel the other way
+    /// where the exact energy is flat; there its colour must be exactly as
+    /// good.
     #[test]
     fn top_layer_matches_the_greedy_fit() {
         let mut rng = ChaCha8Rng::seed_from_u64(0x70b);

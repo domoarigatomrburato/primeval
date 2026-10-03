@@ -46,36 +46,6 @@ impl Color {
         };
         Some(Self { r, g, b, a: 255 })
     }
-
-    /// Converts to premultiplied RGBA in the 0..=0xFFFF range.
-    ///
-    /// This matches Go's `color.NRGBA.RGBA()` exactly:
-    /// ```text
-    /// r32 = u32(r) | u32(r) << 8   // 0x0101 * r
-    /// r32 = r32 * u32(a) / 0xff
-    /// a32 = u32(a) | u32(a) << 8
-    /// ```
-    #[must_use]
-    #[inline]
-    pub(crate) fn to_premultiplied_rgba(self) -> [u32; 4] {
-        let expand = |ch: u8, alpha: u8| -> u32 {
-            let v = u32::from(ch);
-            let v = v | (v << 8);
-            v * u32::from(alpha) / 0xff
-        };
-
-        let a32 = {
-            let v = u32::from(self.a);
-            v | (v << 8)
-        };
-
-        [
-            expand(self.r, self.a),
-            expand(self.g, self.a),
-            expand(self.b, self.a),
-            a32,
-        ]
-    }
 }
 
 /// Parses a single hex character and doubles it (e.g. `b'A'` -> `0xAA`).
@@ -204,55 +174,5 @@ mod tests {
         assert!(Color::from_hex("ab€").is_none());
         assert!(Color::from_hex("").is_none());
         assert!(Color::from_hex("#").is_none());
-    }
-
-    #[test]
-    fn premultiplied_rgba_opaque_white() {
-        let c = Color::new(255, 255, 255, 255);
-        let [r, g, b, a] = c.to_premultiplied_rgba();
-        // Go: 0xFF | 0xFF<<8 = 0xFFFF; 0xFFFF * 0xFF / 0xFF = 0xFFFF
-        assert_eq!(r, 0xFFFF);
-        assert_eq!(g, 0xFFFF);
-        assert_eq!(b, 0xFFFF);
-        assert_eq!(a, 0xFFFF);
-    }
-
-    #[test]
-    fn premultiplied_rgba_transparent_black() {
-        let c = Color::new(0, 0, 0, 0);
-        let [r, g, b, a] = c.to_premultiplied_rgba();
-        assert_eq!(r, 0);
-        assert_eq!(g, 0);
-        assert_eq!(b, 0);
-        assert_eq!(a, 0);
-    }
-
-    #[test]
-    fn premultiplied_rgba_half_alpha() {
-        // Go: r = 128 | 128<<8 = 0x8080; r * 128 / 255 = 32896 * 128 / 255 = 16_512
-        let c = Color::new(128, 0, 0, 128);
-        let [r, g, b, a] = c.to_premultiplied_rgba();
-        // Manual calculation: 0x8080 * 128 / 255 = 32896 * 128 / 255 = 16512
-        assert_eq!(r, 16512);
-        assert_eq!(g, 0);
-        assert_eq!(b, 0);
-        // a = 128 | 128<<8 = 0x8080 = 32896
-        assert_eq!(a, 0x8080);
-    }
-
-    #[test]
-    fn premultiplied_rgba_matches_go_nrgba() {
-        // Test with Color{R:200, G:100, B:50, A:128}
-        // Go NRGBA{200,100,50,128}.RGBA():
-        //   r = 200 | 200<<8 = 0xC8C8 = 51400; 51400 * 128 / 255 = 25804 (truncated)
-        //   g = 100 | 100<<8 = 0x6464 = 25700; 25700 * 128 / 255 = 12901 (truncated)
-        //   b = 50  | 50<<8  = 0x3232 = 12850; 12850 * 128 / 255 = 6447 (truncated)
-        //   a = 128 | 128<<8 = 0x8080 = 32896
-        let c = Color::new(200, 100, 50, 128);
-        let [r, g, b, a] = c.to_premultiplied_rgba();
-        assert_eq!(r, 51400_u32 * 128 / 255);
-        assert_eq!(g, 25700_u32 * 128 / 255);
-        assert_eq!(b, 12850_u32 * 128 / 255);
-        assert_eq!(a, 32896);
     }
 }

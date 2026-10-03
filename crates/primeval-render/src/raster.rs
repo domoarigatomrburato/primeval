@@ -23,6 +23,11 @@ pub(crate) fn render_rgb(drawing: &Drawing, width: u32, height: u32) -> Option<V
         let color = shape.color;
         paint.set_color_rgba8(color.r, color.g, color.b, color.a);
         paint.anti_alias = true;
+        // The low-precision pipeline divides by 255 with `(v + 255) >> 8`,
+        // which rounds every blend up: deep stacks drift by about half a
+        // level. The high-precision one blends in `f32` and rounds once
+        // per layer, the composite the engine optimises.
+        paint.force_hq_pipeline = true;
 
         match &shape.geometry {
             Geometry::Quadratic {
@@ -253,6 +258,77 @@ mod tests {
         // Rotated by 90 degrees, the long axis is vertical.
         assert_eq!(pixel(&rgb, 40, 20, 6), [255, 0, 0]);
         assert_eq!(pixel(&rgb, 40, 6, 20), [255, 255, 255]);
+    }
+
+    /// The exact composite of opaque `background` and the `layers` drawn over
+    /// the whole canvas, each blend rounded to the 8-bit grid once:
+    /// `round((1 − a) · d + a · s)` with `a = alpha / 255`.
+    fn rounded_once(background: Color, layers: &[Color]) -> [f64; 3] {
+        let mut canvas = [background.r, background.g, background.b].map(f64::from);
+        for layer in layers {
+            let a = f64::from(layer.a) / 255.0;
+            let source = [layer.r, layer.g, layer.b].map(f64::from);
+            for (d, s) in canvas.iter_mut().zip(source) {
+                *d = ((1.0 - a) * *d + a * s).round();
+            }
+        }
+        canvas
+    }
+
+    /// Deep stacks of translucent full-canvas layers render as the exact
+    /// composite rounded once per layer: no edges, so only the blend
+    /// arithmetic differs. Measured: an exact match (mean and RMSE 0).
+    /// tiny-skia's low-precision pipeline is off by +0.5 levels on average
+    /// here, because its `div255` rounds up.
+    #[test]
+    fn stacked_layers_match_the_composite_rounded_once() {
+        // SplitMix64, so the stacks are fixed without a dependency.
+        let mut state = 0x5eed_u64;
+        let mut next = move || {
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        };
+        let mut byte = move || (next() >> 56) as u8;
+
+        let (mut sum, mut squares, mut values) = (0.0, 0.0, 0.0);
+        for _ in 0..300 {
+            let background = Color::new(byte(), byte(), byte(), 255);
+            let layers: Vec<Color> = (0..20)
+                .map(|_| Color::new(byte(), byte(), byte(), byte().max(1)))
+                .collect();
+            let shapes = layers
+                .iter()
+                .map(|&color| DrawnShape {
+                    geometry: Geometry::Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 2.0,
+                        height: 2.0,
+                    },
+                    color,
+                })
+                .collect();
+            let drawing = Drawing {
+                width: 2,
+                height: 2,
+                background,
+                shapes,
+            };
+            let rgb = render_rgb(&drawing, 2, 2).expect("render");
+            let expected = rounded_once(background, &layers);
+            for (&got, want) in rgb[..3].iter().zip(expected) {
+                let error = f64::from(got) - want;
+                sum += error;
+                squares += error * error;
+                values += 1.0;
+            }
+        }
+        let (mean, rmse) = (sum / values, (squares / values).sqrt());
+        assert!(mean.abs() < 0.1, "mean signed error {mean}");
+        assert!(rmse < 0.5, "rmse {rmse}");
     }
 
     #[test]
