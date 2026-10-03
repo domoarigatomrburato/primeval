@@ -576,21 +576,38 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
 - **Why.** Greedy leaves almost no harmful shapes: 2 of 13,500 contribute negatively, and 7 after a pass. Its weakest shapes are worth about as much as one more greedy step.
 - **Open option:** a second pass in `approximate` buys a further 1–3% for about 10% more time. It is a product choice between time and quality, not taken yet.
 
+**Fix `quadratic` (step 6, `0a28286`).**
+- **Change.**
+  - The engine covers each pixel by the exact share of its area under the stroke, as tiny-skia's anti-aliased stroke does.
+  - Butt caps cut through pixels, and joins are round where the curve turns.
+  - Flattening is finer (0.25 px).
+  - The width is 2 px. tiny-skia draws a stroke of 1 px or less as a hairline at the working size, so 1 px could not agree with the SVG and the larger PNGs.
+- **Effect** (median rmse256 against the 1 px stroke, refit pass included):
+
+  | Shapes | Change |
+  | ---: | ---: |
+  | 50 | −9% |
+  | 100 | −15% |
+  | 200 | −24% |
+  | 500 | −49% |
+
+  - The gap is 0.5–2.0%.
+  - SVG bytes rise 2–6%.
+  - Search time for `quadratic` is about 1.75×: rasterization is 3× slower, and colour fit and energy 50% slower.
+  - `any` is unchanged within noise.
+  - 3 px would fit better still (−26% and −54% at 100 and 200), but changes the look more.
+- **Still open:** `quadratic`'s ssim128 still falls from 50 to 100 shapes.
+
 **Done:**
 1. The measurement fix (runner metrics and summaries).
 2. A1 in `approximate` (`192714e`).
 3. Step-adapted refit moves (`7250faf`).
 4. Engine and export agreement (`8c1ee09`).
 5. Remove and re-add (killed).
+6. Fix `quadratic` (`0a28286`).
 
-**Next, in order.** This order was decided after an independent review, and revised after steps 3 and 5; B is not next. Success and kill thresholds are on median rmse256, overall and for `any` and `triangle`; overall medians alone can sit on a kind that does not react.
+**Next.** Success and kill thresholds are on median rmse256, overall and for `any` and `triangle`; overall medians alone can sit on a kind that does not react.
 
-6. **Fix `quadratic`** (moved ahead of B: cheap, and independent of it).
-   - Its stroke width is a constant 1 px; 1.5 px measured about 6% better.
-   - At the 256 px export, tiny-skia draws the 1 px stroke as a hairline. On a diagonal the engine covers 255 plus 74 on each side, while tiny-skia covers 255 only, so `quadratic` has the largest gaps.
-   - Its ssim128 falls from 50 to 100 shapes.
-   - **Change:** make the engine's coverage of the stroke match what the export draws, and choose the width (1, 1.5 or 2 px) by measurement. Add no new option.
-   - **Success:** `quadratic`'s median rmse256 improves by at least 5% at 100 and 200 shapes, its gap falls below 2%, and `any` is no worse. **Kill:** less than 2%.
 7. **B pilot** (step 3 showed that fine polish pays).
    - The gap diagnosis removed the fidelity argument for smooth coverage, and step-adapted moves already capture much of the polish, so B must win on search quality alone, against the adapted refit.
    - **Design:** triangles only; colour stays the closed-form fit; Adam on geometry and alpha; coordinates quantised to 0.25 px at export; then snap, exact verify, and one cheap A1 pass.
