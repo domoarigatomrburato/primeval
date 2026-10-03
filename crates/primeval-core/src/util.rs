@@ -5,13 +5,6 @@ pub(crate) fn radians(degrees: f64) -> f64 {
     degrees * std::f64::consts::PI / 180.0
 }
 
-/// Converts radians to degrees.
-#[must_use]
-#[inline]
-pub(crate) fn degrees(radians: f64) -> f64 {
-    radians * 180.0 / std::f64::consts::PI
-}
-
 /// Rotates point `(x, y)` using pre-computed sine and cosine values.
 ///
 /// Use this when the same angle is applied to many points to avoid
@@ -40,14 +33,6 @@ mod tests {
     #[test]
     fn entropy_seeds_differ() {
         assert_ne!(entropy_seed(), entropy_seed());
-    }
-
-    #[test]
-    fn radians_and_degrees_roundtrip() {
-        let deg = 45.0;
-        let rad = radians(deg);
-        let back = degrees(rad);
-        assert!((back - deg).abs() < 1e-12);
     }
 
     #[test]

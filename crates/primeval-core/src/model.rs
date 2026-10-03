@@ -622,19 +622,23 @@ mod tests {
     /// when the blend became the exact composite rounded once per layer,
     /// an intended change of the greedy output; `quadratic` and `any`
     /// (which draws quadratics too) were recorded again when the quadratic
-    /// stroke became 2 px wide with area coverage, another intended change.
+    /// stroke became 2 px wide with area coverage, another intended change;
+    /// `polygon`, `rotated-rectangle` and `any` (both coarse and not) were
+    /// recorded again when polygons became strictly convex with every
+    /// angle above 15° and rotated rectangles got their 1:8 aspect-ratio
+    /// cap, the legibility rules.
     #[test]
     fn seeded_greedy_output_is_pinned() {
         let pinned = [
-            (ShapeKind::Any, 0x5051def3fa76c190),
+            (ShapeKind::Any, 0xe58047d2db16df10),
             (ShapeKind::Triangle, 0x0b2c1d60c966824f),
             (ShapeKind::Rectangle, 0xdf2ad63d0504df61),
             (ShapeKind::Ellipse, 0xdd99e621c00e71b6),
             (ShapeKind::Circle, 0x1cc7d6677aa8b599),
-            (ShapeKind::RotatedRectangle, 0xe87987e1ea55666e),
+            (ShapeKind::RotatedRectangle, 0x52186adc7569380b),
             (ShapeKind::Quadratic, 0xcae94d8b21013775),
             (ShapeKind::RotatedEllipse, 0xf9f17763932224cc),
-            (ShapeKind::Polygon, 0x0e723a2d35e4b3d8),
+            (ShapeKind::Polygon, 0xb57dc794666b2a2b),
         ];
         assert_eq!(pinned.len(), every_kind().len());
         let actual: Vec<_> = pinned
@@ -649,7 +653,7 @@ mod tests {
         assert_eq!(actual, pinned);
         assert_eq!(
             digest(&seeded_drawing_of(42, 2, 2, ShapeKind::Any, true, COARSE)),
-            0x5cc74b039241a980,
+            0xb9d43f5ae39f6f0b,
             "with a coarse random phase"
         );
     }

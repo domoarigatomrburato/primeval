@@ -35,7 +35,7 @@ Browse the full example gallery in [`docs/gallery.md`](docs/gallery.md). The sam
 ## Highlights
 
 - Fast multi-threaded search: hill climbing adds one shape per step, then a final stage revises every shape against the others (for triangles, a joint gradient optimisation of every shape at once, on a model of the anti-aliased output); seeded output does not depend on the number of CPU cores
-- Nine shape modes in the CLI: mixed (`any`), triangle, rectangle, ellipse, circle, rotated rectangle, quadratic curve, rotated ellipse, and polygon
+- Nine shape modes in the CLI: mixed (`any`), triangle, rectangle, ellipse, circle, rotated rectangle, quadratic curve, rotated ellipse, and polygon. Every shape reads as its kind: triangles keep every angle above 15°, polygons are convex quadrilaterals with every angle above 15°, and a rotated rectangle's long side is at most 8 times its short side
 - Optimization at a small working resolution, with the same shapes exported at a high output resolution
 - Vector export via SVG, plus raster output as PNG
 - The same API in the browser, through WebAssembly, multi-threaded on cross-origin isolated pages

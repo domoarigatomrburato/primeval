@@ -1,7 +1,7 @@
 use crate::drawing::{Geometry, Point};
 use crate::error::ParseError;
 use crate::scanline::Scanline;
-use crate::util::{degrees, radians, rotate_sc};
+use crate::util::{radians, rotate_sc};
 use crate::worker::{SearchRound, WorkerCtx};
 use rand::{Rng, RngExt};
 use rand_distr::{Distribution, StandardNormal};
@@ -26,13 +26,15 @@ pub enum ShapeKind {
     Ellipse,
     /// Circles.
     Circle,
-    /// Rectangles rotated about their centre.
+    /// Rectangles rotated about their centre, the long side at most 8 times
+    /// the short one.
     RotatedRectangle,
     /// Stroked quadratic Bézier curves.
     Quadratic,
     /// Ellipses rotated about their centre.
     RotatedEllipse,
-    /// Quadrilaterals, whose edges may cross.
+    /// Simple, strictly convex quadrilaterals, every angle strictly above
+    /// 15°.
     Polygon,
 }
 
@@ -149,12 +151,17 @@ pub(crate) struct Circle {
     pub(crate) r: i32,
 }
 
-/// A rectangle of `sx` × `sy` rotated by `angle` degrees about `(x, y)`.
+/// A rectangle of `sx` × `sy` rotated by `angle` degrees about `(x, y)`,
+/// its long side at most [`MAX_ASPECT`] (8) times the short one
+/// ([`Self::is_valid`]), so that it reads as a rectangle and not a line.
 ///
-/// Unlike Go's `primitive`, it intentionally has no aspect-ratio limit:
-/// enforcing Go's limit (long side at most 5 × the short side) measurably
-/// hurt quality, for example the synthetic-texture rotated-rectangle score
-/// got 44% worse at 100 steps and 20% worse at 200.
+/// The cap costs quality mostly on fine detail. Measured with the engine
+/// runner (seed 42, `--refine final`, the RMSE of the PNG at the working
+/// size), it made the synthetic-texture rotated-rectangle result 39% worse
+/// at 50 steps, 23% at 100 and 6.5% at 200, while the median over the
+/// corpus got 0.3%, 1.2% and 0.7% worse. Go's `primitive` caps the ratio
+/// at 1:5; an earlier measurement of that cap, without the refit pass,
+/// found the synthetic-texture score 44% worse at 100 steps and 20% at 200.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RotatedRectangle {
     pub(crate) x: i32,
@@ -184,6 +191,9 @@ pub(crate) struct RotatedEllipse {
     pub(crate) angle: f64,
 }
 
+/// A polygon through `(x[i], y[i])` for `i < order`; the search makes
+/// quadrilaterals. It is simple and strictly convex with every angle
+/// strictly above 15° ([`Self::is_valid`]), so that it reads as a polygon.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Polygon {
     pub(crate) order: usize,
@@ -462,42 +472,16 @@ impl Triangle {
         triangle
     }
 
+    /// Whether every angle is strictly above 15° ([`is_legible_convex`]).
+    /// The products of integer coordinates are exact, and no lattice
+    /// triangle has an angle of exactly 15°.
     #[must_use]
     pub(crate) fn is_valid(&self) -> bool {
-        const MIN_DEGREES: f64 = 15.0;
-
-        fn angle(ax: i32, ay: i32, bx: i32, by: i32) -> Option<f64> {
-            let ax = ax as f64;
-            let ay = ay as f64;
-            let bx = bx as f64;
-            let by = by as f64;
-            let da = (ax * ax + ay * ay).sqrt();
-            let db = (bx * bx + by * by).sqrt();
-            if da == 0.0 || db == 0.0 {
-                return None;
-            }
-            let dot = ((ax / da) * (bx / db) + (ay / da) * (by / db)).clamp(-1.0, 1.0);
-            Some(degrees(dot.acos()))
-        }
-
-        let Some(a1) = angle(
-            self.x2 - self.x1,
-            self.y2 - self.y1,
-            self.x3 - self.x1,
-            self.y3 - self.y1,
-        ) else {
-            return false;
-        };
-        let Some(a2) = angle(
-            self.x1 - self.x2,
-            self.y1 - self.y2,
-            self.x3 - self.x2,
-            self.y3 - self.y2,
-        ) else {
-            return false;
-        };
-        let a3 = 180.0 - a1 - a2;
-        a1 > MIN_DEGREES && a2 > MIN_DEGREES && a3 > MIN_DEGREES
+        is_legible_convex(&[
+            (f64::from(self.x1), f64::from(self.y1)),
+            (f64::from(self.x2), f64::from(self.y2)),
+            (f64::from(self.x3), f64::from(self.y3)),
+        ])
     }
 
     fn rasterize<'a, R>(&self, worker: &'a mut WorkerCtx<R>) -> &'a [Scanline] {
@@ -691,17 +675,32 @@ impl RotatedRectangle {
         })
     }
 
+    /// A random rectangle near a sampled point, its sides drawn from
+    /// `1..=32` again until they keep the aspect-ratio cap, then moved once.
     fn random<R: Rng>(worker: &mut WorkerCtx<R>, round: &SearchRound<'_>) -> Self {
         let (x, y) = worker.sample_xy(round);
+        let (sx, sy) = loop {
+            let sx = worker.rng.random_range(1..33);
+            let sy = worker.rng.random_range(1..33);
+            if sx.max(sy) <= MAX_ASPECT * sx.min(sy) {
+                break (sx, sy);
+            }
+        };
         let mut rect = Self {
             x,
             y,
-            sx: worker.rng.random_range(1..33),
-            sy: worker.rng.random_range(1..33),
+            sx,
+            sy,
             angle: worker.rng.random_range(0..360),
         };
         rect.mutate(worker, Step::Coarse);
         rect
+    }
+
+    /// Whether the long side is at most [`MAX_ASPECT`] times the short one.
+    #[must_use]
+    pub(crate) fn is_valid(&self) -> bool {
+        self.sx.max(self.sy) <= MAX_ASPECT * self.sx.min(self.sy)
     }
 
     fn rasterize<'a, R>(&self, worker: &'a mut WorkerCtx<R>) -> &'a [Scanline] {
@@ -715,19 +714,32 @@ impl RotatedRectangle {
         &worker.lines
     }
 
+    /// Moves the centre, the sides or the angle. A move that breaks the
+    /// aspect-ratio cap ([`Self::is_valid`]) is undone and a new one drawn,
+    /// so the moves are the unconstrained ones restricted to valid
+    /// rectangles. Only a move of the sides can break it, and from a valid
+    /// rectangle every other move keeps it, so the loop ends.
     fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>, step: Step) {
-        match worker.rng.random_range(0..3) {
-            0 => {
-                let (dx, dy) = step.offsets(&mut worker.rng, POSITION_SIGMA);
-                self.x = (self.x + dx).clamp(0, worker.width - 1);
-                self.y = (self.y + dy).clamp(0, worker.height - 1);
+        debug_assert!(self.is_valid(), "{self:?}");
+        let start = *self;
+        loop {
+            match worker.rng.random_range(0..3) {
+                0 => {
+                    let (dx, dy) = step.offsets(&mut worker.rng, POSITION_SIGMA);
+                    self.x = (self.x + dx).clamp(0, worker.width - 1);
+                    self.y = (self.y + dy).clamp(0, worker.height - 1);
+                }
+                1 => {
+                    let (dsx, dsy) = step.offsets(&mut worker.rng, POSITION_SIGMA);
+                    self.sx = (self.sx + dsx).clamp(1, worker.width - 1);
+                    self.sy = (self.sy + dsy).clamp(1, worker.height - 1);
+                }
+                _ => self.angle += step.offset(&mut worker.rng, ANGLE_SIGMA),
             }
-            1 => {
-                let (dsx, dsy) = step.offsets(&mut worker.rng, POSITION_SIGMA);
-                self.sx = (self.sx + dsx).clamp(1, worker.width - 1);
-                self.sy = (self.sy + dsy).clamp(1, worker.height - 1);
+            if self.is_valid() {
+                return;
             }
-            _ => self.angle += step.offset(&mut worker.rng, ANGLE_SIGMA),
+            *self = start;
         }
     }
 }
@@ -1070,19 +1082,35 @@ impl Polygon {
         )
     }
 
+    /// A random polygon around a sampled vertex, its other vertices drawn
+    /// within 20 px of it again until the polygon is valid, then moved
+    /// once.
     fn random<R: Rng>(worker: &mut WorkerCtx<R>, round: &SearchRound<'_>, order: usize) -> Self {
         let mut x = [0.0; 4];
         let mut y = [0.0; 4];
         let (x0, y0) = worker.sample_xy_float(round);
         x[0] = x0;
         y[0] = y0;
-        for i in 1..order {
-            x[i] = x0 + worker.rng.random::<f64>() * 40.0 - 20.0;
-            y[i] = y0 + worker.rng.random::<f64>() * 40.0 - 20.0;
-        }
-        let mut polygon = Self { order, x, y };
+        let mut polygon = loop {
+            for i in 1..order {
+                x[i] = x0 + worker.rng.random::<f64>() * 40.0 - 20.0;
+                y[i] = y0 + worker.rng.random::<f64>() * 40.0 - 20.0;
+            }
+            let polygon = Self { order, x, y };
+            if polygon.is_valid() {
+                break polygon;
+            }
+        };
         polygon.mutate(worker, Step::Coarse);
         polygon
+    }
+
+    /// Whether the polygon is simple and strictly convex with every angle
+    /// strictly above 15° ([`is_legible_convex`]).
+    #[must_use]
+    pub(crate) fn is_valid(&self) -> bool {
+        let vertices: [(f64, f64); 4] = std::array::from_fn(|i| (self.x[i], self.y[i]));
+        is_legible_convex(&vertices[..self.order])
     }
 
     fn rasterize<'a, R>(&self, worker: &'a mut WorkerCtx<R>) -> &'a [Scanline] {
@@ -1102,21 +1130,74 @@ impl Polygon {
         &worker.lines
     }
 
+    /// Moves one vertex. A move that breaks the rule ([`Self::is_valid`])
+    /// is undone and a new one drawn, so the moves are the unconstrained
+    /// ones restricted to valid polygons; small enough moves keep a valid
+    /// polygon valid, so the loop ends. There is no vertex-swap move: on a
+    /// strictly convex quad, swapping two neighbours always crosses it and
+    /// swapping opposite vertices leaves its outline unchanged.
     fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>, step: Step) {
         const MARGIN: f64 = 16.0;
-        if worker.rng.random::<f64>() < 0.25 {
-            let i = worker.rng.random_range(0..self.order);
-            let j = worker.rng.random_range(0..self.order);
-            self.x.swap(i, j);
-            self.y.swap(i, j);
-        } else {
+        debug_assert!(self.is_valid(), "{self:?}");
+        let start = *self;
+        loop {
             let i = worker.rng.random_range(0..self.order);
             self.x[i] = (self.x[i] + step.offset_f64(&mut worker.rng, POSITION_SIGMA))
                 .clamp(-MARGIN, f64::from(worker.width - 1) + MARGIN);
             self.y[i] = (self.y[i] + step.offset_f64(&mut worker.rng, POSITION_SIGMA))
                 .clamp(-MARGIN, f64::from(worker.height - 1) + MARGIN);
+            if self.is_valid() {
+                return;
+            }
+            *self = start;
         }
     }
+}
+
+/// `tan 15°`, the bound of the minimum-angle rule. The validity checks
+/// compare tangents instead of computing angles, so they call no libm
+/// function, whose results can differ between platforms: native and wasm
+/// output stay identical.
+const TAN_MIN_ANGLE: f64 = 0.267_949_192_431_122_7;
+
+/// The longest side of a rotated rectangle, in multiples of its shortest.
+const MAX_ASPECT: i32 = 8;
+
+/// Whether the polygon through `vertices`, three or four of them in either
+/// orientation, is simple and strictly convex with every interior angle
+/// strictly above 15°: the rule that keeps triangles and polygons reading
+/// as their kind.
+///
+/// At each vertex, with `u` and `w` the edges to the next and the previous
+/// vertex, the interior angle `θ` has `sin θ ∝ s · (u × w)` and
+/// `cos θ ∝ u · w`, where `s = ±1` is the orientation, taken from the first
+/// vertex. A vertex passes if `s · (u × w) > 0`, a strict turn the same way
+/// as at the first vertex (no straight or reflex angle, no coincident
+/// vertices), and `s · (u × w) > tan 15° · (u · w)`, so `θ > 15°`; an angle
+/// of 90° or more passes on the first condition alone. With a strict turn
+/// the same way at every vertex, every exterior angle is below 180° and
+/// they sum to a multiple of 360°, which for at most four vertices can
+/// only be 360°: the polygon is simple and convex.
+fn is_legible_convex(vertices: &[(f64, f64)]) -> bool {
+    debug_assert!((3..=4).contains(&vertices.len()));
+    let n = vertices.len();
+    let mut orientation = 1.0;
+    for i in 0..n {
+        let (px, py) = vertices[i];
+        let (nx, ny) = vertices[(i + 1) % n];
+        let (qx, qy) = vertices[(i + n - 1) % n];
+        let (ux, uy) = (nx - px, ny - py);
+        let (wx, wy) = (qx - px, qy - py);
+        let cross = ux * wy - uy * wx;
+        if i == 0 && cross < 0.0 {
+            orientation = -1.0;
+        }
+        let turn = orientation * cross;
+        if !(turn > 0.0 && turn > TAN_MIN_ANGLE * (ux * wx + uy * wy)) {
+            return false;
+        }
+    }
+    true
 }
 
 fn gaussian_sample<R: Rng>(rng: &mut R, sigma: f64) -> f64 {
@@ -1444,6 +1525,225 @@ mod tests {
             y3: 2,
         };
         assert!(!triangle.is_valid());
+    }
+
+    #[test]
+    fn the_minimum_angle_literal_is_the_tangent_of_15_degrees() {
+        let tan = 15.0_f64.to_radians().tan();
+        assert!((TAN_MIN_ANGLE - tan).abs() <= 1e-16 * tan, "{tan}");
+    }
+
+    /// `Triangle::is_valid` before it compared tangents: every angle by
+    /// `acos`, the third as `180° − a1 − a2`, strictly above 15°.
+    fn acos_valid(triangle: &Triangle) -> bool {
+        fn angle(ax: i32, ay: i32, bx: i32, by: i32) -> Option<f64> {
+            let (ax, ay, bx, by) = (f64::from(ax), f64::from(ay), f64::from(bx), f64::from(by));
+            let da = (ax * ax + ay * ay).sqrt();
+            let db = (bx * bx + by * by).sqrt();
+            if da == 0.0 || db == 0.0 {
+                return None;
+            }
+            let dot = ((ax / da) * (bx / db) + (ay / da) * (by / db)).clamp(-1.0, 1.0);
+            Some(dot.acos().to_degrees())
+        }
+        let t = triangle;
+        let Some(a1) = angle(t.x2 - t.x1, t.y2 - t.y1, t.x3 - t.x1, t.y3 - t.y1) else {
+            return false;
+        };
+        let Some(a2) = angle(t.x1 - t.x2, t.y1 - t.y2, t.x3 - t.x2, t.y3 - t.y2) else {
+            return false;
+        };
+        let a3 = 180.0 - a1 - a2;
+        a1 > 15.0 && a2 > 15.0 && a3 > 15.0
+    }
+
+    /// The tangent comparison agrees with the `acos` rule it replaced on
+    /// lattice triangles of every size the search makes: random ones, and
+    /// ones built around an angle within half a degree of 15°, where the
+    /// two could disagree.
+    #[test]
+    fn triangle_validity_agrees_with_the_acos_rule() {
+        let mut rng = crate::rng::create_rng(0x7a11);
+        let (mut valid, mut invalid, mut near) = (0, 0, 0);
+        for sample in 0..400_000 {
+            let triangle = if sample % 2 == 0 {
+                let mut coordinate = || rng.random_range(-16..300);
+                Triangle {
+                    x1: coordinate(),
+                    y1: coordinate(),
+                    x2: coordinate(),
+                    y2: coordinate(),
+                    x3: coordinate(),
+                    y3: coordinate(),
+                }
+            } else {
+                let degrees = 15.0 + rng.random_range(-0.5..0.5);
+                let turn: f64 = rng.random_range(0.0..360.0);
+                let (l1, l2) = (rng.random_range(5.0..300.0), rng.random_range(5.0..300.0));
+                let (x1, y1) = (rng.random_range(-16..300), rng.random_range(-16..300));
+                let at = |length: f64, angle: f64| {
+                    let (sin, cos) = angle.to_radians().sin_cos();
+                    ((length * cos).round() as i32, (length * sin).round() as i32)
+                };
+                let (dx2, dy2) = at(l1, turn);
+                let (dx3, dy3) = at(l2, turn + degrees);
+                near += 1;
+                Triangle {
+                    x1,
+                    y1,
+                    x2: x1 + dx2,
+                    y2: y1 + dy2,
+                    x3: x1 + dx3,
+                    y3: y1 + dy3,
+                }
+            };
+            assert_eq!(triangle.is_valid(), acos_valid(&triangle), "{triangle:?}");
+            if triangle.is_valid() {
+                valid += 1;
+            } else {
+                invalid += 1;
+            }
+        }
+        assert!(
+            valid > 50_000 && invalid > 50_000 && near > 0,
+            "{valid} {invalid}"
+        );
+    }
+
+    fn quad(points: [(f64, f64); 4]) -> Polygon {
+        Polygon {
+            order: 4,
+            x: points.map(|(x, _)| x),
+            y: points.map(|(_, y)| y),
+        }
+    }
+
+    /// The same quad with its vertices in the opposite order.
+    fn reversed(polygon: Polygon) -> Polygon {
+        let mut reversed = polygon;
+        reversed.x.reverse();
+        reversed.y.reverse();
+        reversed
+    }
+
+    /// A strictly convex quad whose angle at the origin is `degrees`,
+    /// between edges of 100 px; its fourth vertex lies on the bisector,
+    /// 20 px beyond the chord of the other two.
+    fn quad_with_angle(degrees: f64) -> Polygon {
+        let (sin, cos) = degrees.to_radians().sin_cos();
+        let (half_sin, half_cos) = (degrees / 2.0).to_radians().sin_cos();
+        let reach = 100.0 * half_cos + 20.0;
+        let polygon = quad([
+            (0.0, 0.0),
+            (100.0, 0.0),
+            (reach * half_cos, reach * half_sin),
+            (100.0 * cos, 100.0 * sin),
+        ]);
+        let turns: Vec<f64> = (0..4)
+            .map(|i| {
+                let (j, k) = ((i + 1) % 4, (i + 2) % 4);
+                (polygon.x[j] - polygon.x[i]) * (polygon.y[k] - polygon.y[j])
+                    - (polygon.y[j] - polygon.y[i]) * (polygon.x[k] - polygon.x[j])
+            })
+            .collect();
+        assert!(turns.iter().all(|&turn| turn > 0.0), "{turns:?}");
+        polygon
+    }
+
+    #[test]
+    fn polygon_validity_accepts_strictly_convex_quads_in_either_orientation() {
+        let square = quad([(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]);
+        let kite = quad([(0.0, 0.0), (30.0, -4.0), (40.0, 0.0), (30.0, 4.0)]);
+        for polygon in [square, kite, quad_with_angle(15.1)] {
+            assert!(polygon.is_valid(), "{polygon:?}");
+            assert!(reversed(polygon).is_valid(), "{polygon:?}");
+        }
+    }
+
+    #[test]
+    fn polygon_validity_rejects_crossed_concave_and_degenerate_quads() {
+        let crossed = quad([(0.0, 0.0), (10.0, 10.0), (10.0, 0.0), (0.0, 10.0)]);
+        let concave = quad([(0.0, 0.0), (10.0, 0.0), (3.0, 3.0), (0.0, 10.0)]);
+        // A vertex on its neighbours' edge (an angle of 180°), and a
+        // repeated vertex.
+        let straight = quad([(0.0, 0.0), (5.0, 0.0), (10.0, 0.0), (5.0, 8.0)]);
+        let repeated = quad([(0.0, 0.0), (10.0, 0.0), (10.0, 0.0), (0.0, 10.0)]);
+        for polygon in [crossed, concave, straight, repeated] {
+            assert!(!polygon.is_valid(), "{polygon:?}");
+            assert!(!reversed(polygon).is_valid(), "{polygon:?}");
+        }
+    }
+
+    #[test]
+    fn polygon_validity_rejects_an_angle_of_15_degrees_or_less() {
+        for degrees in [14.9, 10.0, 1.0] {
+            let polygon = quad_with_angle(degrees);
+            assert!(!polygon.is_valid(), "{degrees}");
+            assert!(!reversed(polygon).is_valid(), "{degrees}");
+        }
+    }
+
+    #[test]
+    fn rotated_rectangle_validity_caps_the_aspect_ratio_at_8() {
+        let rect = |sx, sy| RotatedRectangle {
+            x: 8,
+            y: 8,
+            sx,
+            sy,
+            angle: 30,
+        };
+        for (sx, sy) in [(1, 1), (8, 1), (1, 8), (80, 10), (10, 80), (255, 32)] {
+            assert!(rect(sx, sy).is_valid(), "{sx} × {sy}");
+        }
+        for (sx, sy) in [(9, 1), (1, 9), (81, 10), (10, 81), (17, 2), (255, 31)] {
+            assert!(!rect(sx, sy).is_valid(), "{sx} × {sy}");
+        }
+    }
+
+    /// The legibility rules hold for every shape the search makes and
+    /// moves: random polygons and rotated rectangles, and every greedy and
+    /// refit move of them, over many seeds and canvas sizes.
+    #[test]
+    fn random_and_mutate_keep_polygons_and_rotated_rectangles_valid() {
+        fn assert_valid(shape: &Shape, context: &str) {
+            match shape {
+                Shape::Polygon(polygon) => assert!(polygon.is_valid(), "{context}: {polygon:?}"),
+                Shape::RotatedRectangle(rect) => assert!(rect.is_valid(), "{context}: {rect:?}"),
+                _ => {}
+            }
+        }
+        let steps = [
+            Step::Coarse,
+            Step::Scaled(1.0),
+            Step::Scaled(0.3),
+            Step::Scaled(crate::refine::MIN_SCALE),
+        ];
+        let (mut polygons, mut rects) = (0, 0);
+        for seed in 0..40 {
+            for (width, height) in [(2, 2), (3, 7), (64, 48), (256, 171)] {
+                let (mut worker, round) = make_test_round(width, height, 0x1e91 + seed);
+                for kind in [
+                    ShapeKind::Polygon,
+                    ShapeKind::RotatedRectangle,
+                    ShapeKind::Any,
+                ] {
+                    for sample in 0..10 {
+                        let mut shape = Shape::random(kind, &mut worker, &round);
+                        let context = format!("{kind:?} {width}×{height} seed {seed} #{sample}");
+                        assert_valid(&shape, &context);
+                        polygons += usize::from(matches!(shape, Shape::Polygon(_)));
+                        rects += usize::from(matches!(shape, Shape::RotatedRectangle(_)));
+                        for step in steps {
+                            for _ in 0..25 {
+                                shape.mutate(&mut worker, step);
+                                assert_valid(&shape, &format!("{context} {step:?}"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(polygons > 1000 && rects > 1000, "{polygons} {rects}");
     }
 
     #[test]
