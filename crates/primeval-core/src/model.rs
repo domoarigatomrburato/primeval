@@ -179,8 +179,10 @@ impl Model {
     ///
     /// Every step runs 16 independent search rounds, 32 for
     /// [`ShapeKind::Any`], polygons, quadratics and rotated ellipses, as
-    /// rayon tasks in the current pool: the global pool, unless the caller runs `step` inside
-    /// [`rayon::ThreadPool::install`]. Each round draws from its own random
+    /// rayon tasks in the current pool: the global pool, unless the caller
+    /// runs `step` inside [`rayon::ThreadPool::install`]. A step of
+    /// [`ShapeKind::Quadratic`] or [`ShapeKind::RotatedEllipse`] also
+    /// climbs twice as long. Each round draws from its own random
     /// stream, derived from the seed, the step index and the round index,
     /// and the best round wins, ties going to the lowest round index, so the
     /// result does not depend on the number of threads or on scheduling.

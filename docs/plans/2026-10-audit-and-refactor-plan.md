@@ -801,13 +801,16 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
   6. **Scale guard** at `resizeInput` 1024 and 2048 and counts of 500 and 2000: peak memory and time ratio. This sets the fallback threshold.
   7. **Curved kinds** with their own smooth coverage: later, and perhaps never for `quadratic`.
 
-**Quality-first pipeline: work in progress, interrupted** (2026-10-03, committed as WIP when the work moved to a cloud machine):
+**Quality-first pipeline: work in progress** (2026-10-03; committed as WIP, then tested):
 - **State of the code.** `crates/primeval-render/src/pipeline.rs` gives each kind a pipeline, which `approximate` and the `lab` path share:
   - refit passes during the search on a `Spaced` schedule: every `interval` steps up to `interval · divisor`, then geometrically spaced, so the cost grows linearly with the count;
   - final refit passes;
   - B with a multiple of its default iteration count.
   
-  The model also gets a per-kind search effort (`Effort`: rounds and climb age, 32 rounds for `any`), with lab overrides behind `primeval-core`'s new `lab` feature. The code compiles and is formatted. **Neither the tests nor the full gate have been run** on this state; one planned test (a per-kind thread-count test in `pipeline.rs`) was being written when the work stopped.
+  The model also gets a per-kind search effort (`Effort`: rounds and climb age, 32 rounds for `any`), with lab overrides behind `primeval-core`'s new `lab` feature. **Tested** (2026-10-03, local machine): the tests pass and `npm run verify` is green, with no code fix needed and no digest pin changed beyond the WIP's three greedy pins for the new effort (quadratic, rotated ellipse, polygon).
+  - The lab identity test now covers all nine kinds and asserts that each runs at least one refit pass during the search.
+  - The browser native–wasm tripwire adds ellipse and circle and runs 20 steps instead of 12, so every kind reaches its first refit pass. It now takes about 58 s on the single-threaded build.
+  - Known gap: `approximate`'s cancellation test would pass even if a refit pass in the search ignored the token, since the next step returns `Aborted` anyway. The pipeline's unit test covers the pass itself.
 - **The chosen pipelines,** as in `pipeline()`:
 
   | Kind | During the search | Final refit passes | B (× default K) |
@@ -836,11 +839,9 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
     - synthetic-shapes in triangle at 200 (+8.1%) and synthetic-gradient in triangle at 200 (+3.1%);
     - synthetic-shapes in ellipse at 500 (+19.5%).
 - **Time: unreliable.** The machine was shared with other work. As measured: 2.2–5.2× greedy's time at 8 threads, against 1.0–1.6× for the previous `approximate`. Polygon and quadratic would then be slower than Go `primitive` (polygon 2.7× against Go's 2.1× speedup, quadratic 4.4× against 3.8×). Every timing in this section is redone on one dedicated machine.
-- **Next, on the cloud machine:**
-  1. Set up the toolchain: the pinned nightly with `rust-src`, `wasm-bindgen-cli` at the `Cargo.lock` version, and Playwright's Chromium.
-  2. Finish the pipeline's tests (deterministic stop rules, thread-count identity per kind, cancellation during refits in the search, the lab identity test, pinned digests) and run `npm run verify`.
-  3. Re-baseline every benchmark on that one machine: `main` against the branch, per kind, the pipeline's time, and versus-Go. Decide polygon's and quadratic's pipelines with those times.
-  4. Experiment 6 (memory guard at `resizeInput` 1024 / 2048), the single-threaded browser time of "Refining", then the pre-merge list below.
+- **Next, on one dedicated machine** (the toolchain and the pipeline's tests are done, above):
+  1. Re-baseline every benchmark on that one machine: `main` against the branch, per kind, the pipeline's time, and versus-Go. Decide polygon's and quadratic's pipelines with those times.
+  2. Experiment 6 (memory guard at `resizeInput` 1024 / 2048), the single-threaded browser time of "Refining", then the pre-merge list below.
 
 **Before merging the branch** (user decision: it merges once, when B's productisation is done too, with no intermediate merge):
 - a full review of the whole branch (user request), with the `/simplify` and `/code-review` skills;

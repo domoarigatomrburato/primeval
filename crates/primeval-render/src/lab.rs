@@ -317,20 +317,24 @@ mod tests {
         })
     }
 
-    fn lab_render(input: &[u8], render: &RenderOptions, output: OutputFormat) -> Vec<u8> {
+    /// The lab path with `approximate`'s pipeline for `render`: the encoded
+    /// output, and the number of refit passes that ran during the search.
+    fn lab_render(input: &[u8], render: &RenderOptions, output: OutputFormat) -> (Vec<u8>, u32) {
         let (target, background) = working_target(input, render).expect("working target");
         let mut options = ModelOptions::default();
         options.seed = render.seed;
         let mut model = Model::new(target, background, options);
         let stages = pipeline(render.shape);
+        let mut passes = 0;
         for step in 1..=render.count {
             model.step(render.shape, render.alpha);
-            after_step(&mut model, stages, step, render.alpha);
+            passes += u32::from(after_step(&mut model, stages, step, render.alpha));
         }
         let (drawing, _) = final_stage(&mut model, render, stages, None);
-        encode(&drawing, render.output_size, output)
+        let bytes = encode(&drawing, render.output_size, output)
             .expect("encode")
-            .into_bytes()
+            .into_bytes();
+        (bytes, passes)
     }
 
     /// The final stage's score is the joint optimisation's model RMSE of
@@ -386,6 +390,8 @@ mod tests {
         }
     }
 
+    /// For every kind, the lab path with `approximate`'s pipeline and the
+    /// model's default search effort gives `approximate`'s exact output.
     /// With 21 shapes every kind's search runs at least one refit pass.
     #[test]
     fn the_lab_path_reproduces_approximate() {
@@ -419,6 +425,18 @@ mod tests {
                 ..base
             },
             RenderOptions {
+                shape: ShapeKind::Rectangle,
+                ..base
+            },
+            RenderOptions {
+                shape: ShapeKind::Quadratic,
+                ..base
+            },
+            RenderOptions {
+                shape: ShapeKind::RotatedEllipse,
+                ..base
+            },
+            RenderOptions {
                 shape: ShapeKind::Ellipse,
                 alpha: Alpha::Fixed(std::num::NonZeroU8::new(160).expect("non-zero")),
                 background: BackgroundOption::Color(Color::new(10, 20, 30, 255)),
@@ -426,6 +444,10 @@ mod tests {
                 ..base
             },
         ];
+        let mut kinds: Vec<_> = option_sets.iter().map(|render| render.shape).collect();
+        kinds.sort_by_key(|kind| format!("{kind:?}"));
+        kinds.dedup();
+        assert_eq!(kinds.len(), 9, "every kind once");
         for render in option_sets {
             // The encoding is shared; one set also checks the PNG.
             let outputs: &[OutputFormat] = if render.shape == ShapeKind::Ellipse {
@@ -444,11 +466,9 @@ mod tests {
                 )
                 .expect("approximate")
                 .into_bytes();
-                assert_eq!(
-                    lab_render(&input, &render, output),
-                    expected,
-                    "{render:?} {output:?}"
-                );
+                let (actual, passes) = lab_render(&input, &render, output);
+                assert!(passes > 0, "{render:?}: no refit pass in the search");
+                assert_eq!(actual, expected, "{render:?} {output:?}");
             }
         }
     }

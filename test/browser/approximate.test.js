@@ -695,18 +695,23 @@ for (const isolated of [true, false]) {
     // identical for fixed seeds, but libm differences between platforms are
     // only absorbed by rounding today (see the WebAssembly plan, W0 results).
     test(`SVG output equals the native addon's for fixed seeds (${variant} build)`, async () => {
+      // Every shape kind, with enough steps that each kind's search runs at
+      // least one refit pass (the first comes at step 5, 10 or 20) before
+      // its final stage.
       const renders = [];
       for (const seed of [1, 2, 3]) {
         for (const shape of [
           "triangle",
           "rectangle",
+          "ellipse",
+          "circle",
           "rotated-rectangle",
           "rotated-ellipse",
           "quadratic",
           "polygon",
           "any",
         ]) {
-          renders.push({ count: 12, resizeInput: 64, outputSize: 128, seed, shape });
+          renders.push({ count: 20, resizeInput: 64, outputSize: 128, seed, shape });
         }
       }
 
