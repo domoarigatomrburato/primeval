@@ -536,17 +536,40 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
 - **Fine polish pays**, so step 6 stays open.
 - **The engine–export gap widens.** At 200 shapes the score falls 9.6% but rmse256 only 5.4%, and the median gap at 500 rises to +6.6%. The search increasingly fits the engine's own rounding, which makes the agreement step the next one.
 
+**Engine and export agreement (step 4, `8c1ee09`).**
+- **Investigation.** Split of the canvas-to-export difference (about 2 levels RMSE at every count) into three parts: engine arithmetic, geometry (each renderer's coverage) and exporter arithmetic.
+  - The engine's per-layer rounding does not drift: errors saturate within 5–10 layers. The gap grows only because the score shrinks. The step's hypothesis is ruled out.
+  - At 500 shapes on the photos the gap splits into:
+    - geometry, about 3.8 of 6.4 points: binary triangle edges, and the 1 px `quadratic` stroke, which tiny-skia draws as a hairline at 256 px;
+    - tiny-skia's low-precision `div255`, which rounds up, about 2.2 points: a bias of +0.4 to +1.0 levels;
+    - the engine's own rounding, about 0.4 points.
+  - The SVG's 3-decimal opacity had no measurable effect.
+- **Change.** The engine blend and the PNG output (tiny-skia's high-precision pipeline) both compute the exact composite rounded once per layer. The refit's layer model is then exact up to that rounding and drops its gain and bias.
+- **Effect.**
+  - The 500-shape median gap with the refit pass falls from +6.6% to +0.6%.
+  - At 500 shapes with the refit, rmse256 improves by 2.8% overall, 3.8% for `any` and 3.9% for `triangle`.
+  - At lower counts the changes are within search noise (+0.8% to −2.6%).
+  - Energy kernels are 5–8% faster for most kinds and 7–8% slower for polygon and `quadratic`, which are mostly one-pixel lines.
+- **Caveat: browsers.** Headless Chromium's software raster uses Skia's legacy source-over, which truncates downwards: −0.5 levels on average. It is unchanged overall by this change but loses 2–3% on dark images such as the Mona Lisa, which shared the old engine's downward bias. GPU raster, Firefox and Safari are unmeasured. The exact composite stays the reference.
+- **The main lever left for SVG is geometry:** anti-aliased coverage for the binary kinds, and step 7's wider `quadratic` stroke, which also leaves the hairline path.
+
+**Baseline after steps 3 and 4** (`8c1ee09`; median score / rmse256; this is what `approximate` returns):
+
+| Shapes | Greedy, all kinds | With the pass, all kinds | With the pass, `any` | With the pass, `triangle` | Search s with the pass, all rows |
+| ---: | --- | --- | --- | --- | ---: |
+| 50 | 0.0647 / 0.0647 | 0.0615 / 0.0615 | 0.0517 / 0.0513 | 0.0553 / 0.0538 | 25.9 |
+| 100 | 0.0519 / 0.0498 | 0.0482 / 0.0465 | 0.0394 / 0.0391 | 0.0429 / 0.0419 | 42.5 |
+| 200 | 0.0406 / 0.0391 | 0.0370 / 0.0376 | 0.0304 / 0.0303 | 0.0336 / 0.0328 | 72.2 |
+| 500 | 0.0291 / 0.0294 | 0.0255 / 0.0260 | 0.0220 / 0.0223 | 0.0243 / 0.0245 | 151.1 |
+
 **Done:**
 1. The measurement fix (runner metrics and summaries).
 2. A1 in `approximate` (`192714e`).
-3. Step-adapted refit moves.
+3. Step-adapted refit moves (`7250faf`).
+4. Engine and export agreement (`8c1ee09`).
 
 **Next, in order.** This order was decided after an independent review, and revised after step 3; B is not next. Success and kill thresholds are on median rmse256, overall and for `any` and `triangle`; overall medians alone can sit on a kind that does not react.
 
-4. **Engine and export agreement.**
-   - **Check:** does the engine's per-layer integer rounding explain the gap and its growth with the layer count? Compare the engine's blend with the exporter's compositing on a long stack of layers.
-   - **Change, if it does:** make the engine round as the export does, so that the search optimises what it exports. Greedy changes too, so this needs a new baseline.
-   - **Success:** the 500-shape median gap falls below 2% and rmse256 improves at every checkpoint. **Kill:** the gap has another cause.
 5. **Remove and re-add the weakest shapes.**
    - A1's per-layer bar already gives each shape's leave-one-out energy.
    - Re-add the lowest-contributing 10% by greedy steps.
