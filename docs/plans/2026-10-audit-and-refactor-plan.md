@@ -731,7 +731,19 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
        - **Fix:** the correction now raises each coordinate's second moment to at least the square of its new first moment, so no step exceeds plain Adam's bound. On the corpus no step exceeds 3×.
        - **Effect:** median rmse256 changes by +0.16 / +0.13 / −0.33 points at K = 50 and +0.16 / −0.02 / −0.21 at K = 150. ω = 1.3, 1.5 and 1.7 now land within 0.21 points of each other, and 1.5 stays.
        - **Rejected:** weakening the correction instead, by resetting the moment, dropping or shrinking the correction, cost up to 19 points on the synthetic texture, which relies on momentum moving along the bound.
-  3. **K per shape count**, from {32, 64, 100, 150} at 50 to 500 shapes: the smallest K within 0.5 points of 150 that meets the budget.
+  3. **K per shape count**, from {32, 64, 100, 150} at 50 to 500 shapes: the smallest K within 0.5 points of 150 that meets the budget. **Done** (after `17bd46b`, triangles, the default corpus):
+
+     | Shapes | K = 50 | K = 64 | K = 100 | K = 150 |
+     | ---: | --- | --- | --- | --- |
+     | 50 | +0.97 pt, 0.30× | +0.56, 0.39× | +0.03, 0.61× | 0, 0.91× |
+     | 100 | +2.04, 0.27× | +1.65, 0.34× | +0.72, 0.53× | 0, 0.79× |
+     | 200 | +1.43, 0.21× | +0.95, 0.27× | +0.48, 0.41× | 0, 0.62× |
+     | 500 | +2.7, 0.14× | +1.8, 0.18× | +0.75, 0.28× | 0, 0.43× |
+
+     - Each cell gives the points behind K = 150, then B's extra time over greedy's at 1 thread. Points are of greedy's median rmse256; at 500 shapes, of main's greedy median, 0.0274.
+     - At 8 threads the time ratios are within 0.04 of these, since B now scales like greedy.
+     - Quality does not saturate by K = 100 as expected, so the 0.5-point rule cannot be met within the budget at 50 and 100 shapes, and the budget decides.
+     - **Decision:** K grows with the count, the largest that keeps B's extra time near 0.5× greedy at 1 thread: 80 up to 50 shapes, linear to 120 at 200 and to 160 at 500, then 160. It uses integer arithmetic, so native and wasm agree. Against K = 50 it gains 1–3 points.
   4. **`any`**: curved layers fixed, plus rectangle, rotated rectangle and convex polygon, each with its legibility rule. Success: at least 3 points over equal-time A1 at 100 and 200 shapes, zero violations, SVG bytes at most +3%. Kill: under 2 points; then B covers triangles and rectangles only, and the plan is revisited.
   5. **A1 then B** at equal time. Keep only if it gains at least 0.5 points.
   6. **Scale guard** at `resizeInput` 1024 and 2048 and counts of 500 and 2000: peak memory and time ratio. This sets the fallback threshold.
