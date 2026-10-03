@@ -735,16 +735,18 @@ impl RotatedRectangle {
 impl Quadratic {
     const MUTATE_MARGIN: f64 = 16.0;
     const MAX_MUTATE_ATTEMPTS: u32 = 6;
-    /// Stroke width in working pixels. The colour fit weights pixels by
-    /// coverage, while the output draws the stroke at its scaled width,
-    /// where it is mostly fully covered. A stroke narrower than one pixel
-    /// never fully covers one, so its fitted colour over-saturates to make
-    /// up for the partial coverage and the output is worse. One pixel is
-    /// the narrowest width that fully covers the centre line. Wider strokes
-    /// score better still (1.5 measured about 6% better than 1.0), but they
-    /// change the look of the curves and cost more time, so the width stays
-    /// at the minimum that fixes the mismatch.
-    const STROKE_WIDTH: f64 = 1.0;
+    /// Stroke width in working pixels. The rasterizer covers each pixel by
+    /// the share of its area under the stroke, as the exporter draws it,
+    /// so the colour fit sees the coverage the output has. tiny-skia draws
+    /// a stroke at most 1 px wide as a hairline, thinner than its width on
+    /// a diagonal, so the PNG at the working size would disagree with the
+    /// SVG and every larger PNG. Among the widths measured with the engine
+    /// runner (1, 1.5, 2 and 3 px, refit pass included), wider strokes fit
+    /// better: 2 px cut the median RMSE of the working-size PNG by 15% at
+    /// 100 shapes and 24% at 200 against the earlier 1 px stroke, 3 px by
+    /// 26% and 54%. Wider strokes change the look of the curves more and
+    /// cost more time, so the width stays at 2 px.
+    const STROKE_WIDTH: f64 = 2.0;
 
     /// The stroke rasterizer measures distances in continuous coordinates,
     /// so the control points map unchanged.

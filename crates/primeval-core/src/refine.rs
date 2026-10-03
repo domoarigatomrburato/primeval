@@ -577,10 +577,12 @@ mod tests {
     /// predicted image of at least [`Errors::MEAN_VALUES`] values; see
     /// `layer_model_matches_the_exact_composite`. The model is the exact
     /// composite without the per-layer rounding, so both come from the
-    /// rounding of the layers above the predicted one. Measured: 1.70 and
+    /// rounding of the layers above the predicted one. Measured: 1.94 and
     /// 0.35, with and without a candidate, and a mean signed error of
-    /// −0.004.
-    const MAX_ERROR: f32 = 1.75;
+    /// −0.004. The maximum is from quadratic stacks, and rose from 1.70
+    /// when their strokes became wider and anti-aliased by area: more of
+    /// their pixels are partly covered, and each such layer rounds.
+    const MAX_ERROR: f32 = 2.0;
     const MEAN_ERROR: f64 = 0.4;
 
     /// The largest difference between the model's energy of a top-layer
