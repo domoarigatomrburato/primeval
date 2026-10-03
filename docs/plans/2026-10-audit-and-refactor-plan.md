@@ -657,16 +657,33 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
 - Triangles keep the engine's 15° minimum angle (`Triangle::is_valid`) in every optimiser, B included. A sliver does not look like a triangle, and gains that come from slivers do not count.
 - Other kinds get the same question when an optimiser is extended to them.
 
+**B with the minimum angle (step 9, `lab/b-pilot`, `7476ad0`): passed.**
+- **Enforcement.** Two approaches:
+  - (a) a minimal Gauss–Newton projection after every Adam step, lifting violated angles to 15.5°, with Adam's first moment cleared along the projection;
+  - (b) a penalty below 17° plus the same projection.
+
+  The 0.25 px snap repairs a rounded triangle to the nearest valid lattice triangle. Every exported triangle is checked: zero violations, against 53–310 per run for unconstrained B.
+- **Lead over the equal-time A1** (points of greedy's median rmse256):
+
+| Shapes | Unconstrained | (a) projection | (b) penalty |
+| ---: | ---: | ---: | ---: |
+| 100 | 5.7–5.9 | 5.3 | 5.1–5.2 |
+| 200 | 9.1–9.5 | 8.2–8.6 | 8.7–8.8 |
+
+  - SVG bytes are 1.4–3.0% below greedy's, and B takes at most 1.8× greedy's single-threaded time at 100–200 shapes.
+  - The rule costs 0.3–0.9 points, mostly on the synthetic texture and shapes. The paintings lose under 0.01.
+- **Look.** Projected triangles cluster just above 15°, as greedy's integer triangles already do; the penalty moves that cluster to 16–18°. On the paintings the output reads as ordinary triangles with sharper features than A1's.
+- **Choice.** (a) and (b) differ by at most 0.5 points; either works.
+
 **Next:**
 
-9. **B with the minimum angle enforced.** Re-run the pilot's protocol with the rule kept throughout and checked on every exported triangle after the snap, with zero violations. B must still beat the equal-time A1 by at least 3 points at 100 and 200 shapes.
-10. **Decide how to productise B**, if step 9 passes. The user decides; an independent review is advisable first. Candidate shape:
+10. **Decide how to productise B** (step 9 passed). The user decides; an independent review is advisable first. Candidate shape:
 - B becomes the final stage of `approximate` and exports its 0.25 px drawing directly, with no A1 pass after it.
 - It starts with the polygonal kinds (triangle, then rectangle, rotated rectangle and convex polygon, which share the half-plane coverage). Layers of other kinds stay fixed in the composite.
 - **Needed:**
   - cancellation between iterations;
   - multi-threading by image bands;
-  - the minimum-angle rule (step 9);
+  - the minimum-angle rule, as in step 9;
   - deterministic reductions, which the pilot already has;
   - a time budget per shape count that stays within 2× greedy in single-threaded wasm.
 - **Open questions:**
