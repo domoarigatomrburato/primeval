@@ -562,25 +562,41 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
 | 200 | 0.0406 / 0.0391 | 0.0370 / 0.0376 | 0.0304 / 0.0303 | 0.0336 / 0.0328 | 72.2 |
 | 500 | 0.0291 / 0.0294 | 0.0255 / 0.0260 | 0.0220 / 0.0223 | 0.0243 / 0.0245 | 151.1 |
 
+**Remove and re-add the weakest shapes (step 5, killed).**
+- **Method.**
+  - Rank shapes by their leave-one-out contribution from the refit's layer model. Its ranking matches exact removal: Spearman ≥ 0.999.
+  - Remove the weakest 5–20%, re-add as many by greedy steps on top, and keep the result only if the exact score improves.
+  - The patch is kept outside the repository.
+- **Result.**
+  - Pruning before the pass gains at most about 1% median rmse256 over one pass alone. Pruning between two passes mostly reverts.
+  - At equal time, more passes win at every checkpoint:
+    - `end:2` gains −1.2 / −1.2 / −3.3% over `end:1` at 50 / 100 / 200 shapes;
+    - `end:3` gains −1.4 / −1.6 / −4.7%;
+    - at 500 shapes, `end:3` gains −4.5% against −3.2% for the best prune variant, at the same time.
+- **Why.** Greedy leaves almost no harmful shapes: 2 of 13,500 contribute negatively, and 7 after a pass. Its weakest shapes are worth about as much as one more greedy step.
+- **Open option:** a second pass in `approximate` buys a further 1–3% for about 10% more time. It is a product choice between time and quality, not taken yet.
+
 **Done:**
 1. The measurement fix (runner metrics and summaries).
 2. A1 in `approximate` (`192714e`).
 3. Step-adapted refit moves (`7250faf`).
 4. Engine and export agreement (`8c1ee09`).
+5. Remove and re-add (killed).
 
-**Next, in order.** This order was decided after an independent review, and revised after step 3; B is not next. Success and kill thresholds are on median rmse256, overall and for `any` and `triangle`; overall medians alone can sit on a kind that does not react.
+**Next, in order.** This order was decided after an independent review, and revised after steps 3 and 5; B is not next. Success and kill thresholds are on median rmse256, overall and for `any` and `triangle`; overall medians alone can sit on a kind that does not react.
 
-5. **Remove and re-add the weakest shapes.**
-   - A1's per-layer bar already gives each shape's leave-one-out energy.
-   - Re-add the lowest-contributing 10% by greedy steps.
-   - **Success:** a further 3%, with unchanged bytes. **Kill:** less than 1%.
-6. **B pilot** (step 3 showed that fine polish pays).
+6. **Fix `quadratic`** (moved ahead of B: cheap, and independent of it).
+   - Its stroke width is a constant 1 px; 1.5 px measured about 6% better.
+   - At the 256 px export, tiny-skia draws the 1 px stroke as a hairline. On a diagonal the engine covers 255 plus 74 on each side, while tiny-skia covers 255 only, so `quadratic` has the largest gaps.
+   - Its ssim128 falls from 50 to 100 shapes.
+   - **Change:** make the engine's coverage of the stroke match what the export draws, and choose the width (1, 1.5 or 2 px) by measurement. Add no new option.
+   - **Success:** `quadratic`'s median rmse256 improves by at least 5% at 100 and 200 shapes, its gap falls below 2%, and `any` is no worse. **Kill:** less than 2%.
+7. **B pilot** (step 3 showed that fine polish pays).
    - The gap diagnosis removed the fidelity argument for smooth coverage, and step-adapted moves already capture much of the polish, so B must win on search quality alone, against the adapted refit.
    - **Design:** triangles only; colour stays the closed-form fit; Adam on geometry and alpha; coordinates quantised to 0.25 px at export; then snap, exact verify, and one cheap A1 pass.
-   - **Baseline:** the best A1 at equal time, not greedy.
+   - **Baseline:** the best A1 at equal time, not greedy. More passes keep paying (step 5), so the baseline is `end:P` with P chosen to match B's time.
    - **Success:** at least 3 points better, at most +10% SVG bytes, and at most 2× greedy time in single-threaded wasm.
    - **Context:** the literature (ES-CLIP; Optimize & Reduce, AAAI 2024) shows step-adapted joint search matching gradient descent at this shape count, and has no greedy-plus-gradient comparison.
-7. **Fix `quadratic`.** Its stroke width is a constant 1 px; 1.5 px measured about 6% better. It also has the largest gaps, and its ssim128 falls from 50 to 100 shapes.
 
 **Before merging the branch:**
 - regenerate the gallery, the README comparison images and the versus-Go numbers (`CONTRIBUTING.md`), which output changes make stale;
