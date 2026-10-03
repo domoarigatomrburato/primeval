@@ -726,7 +726,11 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
      - K = 50, against experiment 1: +0.42 / +0.04 / +0.10 points at 50 / 100 / 200 shapes (K = 150 at 1 thread: +0.23 / −0.27 / +0.25);
      - B's extra time at 8 threads falls from 0.92× / 0.87× / 0.72× greedy to 0.29× / 0.24× / 0.18×, 3.2–4.0× less. B itself now speeds up 3.8–4.1× from 1 to 8 threads, against 1.07–1.30×. At 1 thread it is unchanged (0.28× / 0.24× / 0.19×);
      - output is identical at 1, 2, 4 and 8 threads, and the native–wasm tripwire passes.
-     - **Open bug** (also in experiment 1): the projection's momentum correction `m[k] -= md/dd · displacement[k]` can inflate a coordinate whose second moment is near zero, so Adam then takes a huge step (a 269 px jump was traced). It causes single-image outliers and makes small comparisons noisy, so it is fixed before experiment 3.
+     - **Open bug** (also in experiment 1): the projection's momentum correction `m[k] -= md/dd · displacement[k]` can inflate a coordinate whose second moment is near zero, so Adam then takes a huge step (a 269 px jump was traced). It causes single-image outliers and makes small comparisons noisy, so it is fixed before experiment 3. **Fixed** (`17bd46b`):
+       - **Cause:** the correction moved first moment into coordinates with near-zero second moment; steps reached 2e4× the learning rate, 100–550 times per run.
+       - **Fix:** the correction now raises each coordinate's second moment to at least the square of its new first moment, so no step exceeds plain Adam's bound. On the corpus no step exceeds 3×.
+       - **Effect:** median rmse256 changes by +0.16 / +0.13 / −0.33 points at K = 50 and +0.16 / −0.02 / −0.21 at K = 150. ω = 1.3, 1.5 and 1.7 now land within 0.21 points of each other, and 1.5 stays.
+       - **Rejected:** weakening the correction instead, by resetting the moment, dropping or shrinking the correction, cost up to 19 points on the synthetic texture, which relies on momentum moving along the bound.
   3. **K per shape count**, from {32, 64, 100, 150} at 50 to 500 shapes: the smallest K within 0.5 points of 150 that meets the budget.
   4. **`any`**: curved layers fixed, plus rectangle, rotated rectangle and convex polygon, each with its legibility rule. Success: at least 3 points over equal-time A1 at 100 and 200 shapes, zero violations, SVG bytes at most +3%. Kill: under 2 points; then B covers triangles and rectangles only, and the plan is revisited.
   5. **A1 then B** at equal time. Keep only if it gains at least 0.5 points.
