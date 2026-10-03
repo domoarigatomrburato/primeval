@@ -745,6 +745,18 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
      - Quality does not saturate by K = 100 as expected, so the 0.5-point rule cannot be met within the budget at 50 and 100 shapes, and the budget decides.
      - **Decision:** K grows with the count, the largest that keeps B's extra time near 0.5× greedy at 1 thread: 80 up to 50 shapes, linear to 120 at 200 and to 160 at 500, then 160. It uses integer arithmetic, so native and wasm agree. Against K = 50 it gains 1–3 points.
   4. **`any`**: curved layers fixed, plus rectangle, rotated rectangle and convex polygon, each with its legibility rule. Success: at least 3 points over equal-time A1 at 100 and 200 shapes, zero violations, SVG bytes at most +3%. Kill: under 2 points; then B covers triangles and rectangles only, and the plan is revisited.
+     - **4a, convex polygons and fixed layers** (`4e0c49f`):
+       - **Design.** B reads the shapes and kinds from the model.
+         - Fixed layers use a coverage mask from the engine's own rasterizer, so B computes no trigonometry itself.
+         - Polygons keep strict convexity and every angle above 15° by projection: residuals per vertex, with angles held at or below 179.5°. A 165° upper bound would be one more residual.
+         - Per-kind pixel loops keep the triangle path as fast as before; triangle rows are unchanged.
+       - **Polygon passes; `approximate` runs B for it.** Points over equal-time A1 at 8 threads: +3.7 / +5.2 / +7.5 at 50 / 100 / 200 shapes. At 1 thread whole passes cannot match B's time, and interpolated it is about +3.7 at 100.
+         - SVG is 13% smaller than greedy's, with zero violations; 18 of 1,750 exported quads needed the lattice repair.
+         - A1 then B is worse for polygons.
+       - **`any` misses.** B alone, with curved layers, rectangles and rotated rectangles fixed: −0.1 / +2.5 / +3.2 points at 8 threads, and +0.5 at 200 shapes at 1 thread. A1 then B: +0.8 / +1.6 / +2.0. `any` keeps the refit pass.
+       - **Time.** B's extra time is only 0.10–0.16× greedy's for these kinds, since greedy is slower on them, so the iteration rule calibrated on triangles leaves most of the budget unused.
+       - **Outlier.** synthetic-shapes has large model–export gaps in every variant, greedy included; on polygons B loses to A1 there.
+       - The browser tripwire's shape list lacks `polygon`, which now runs B.
   5. **A1 then B** at equal time. Keep only if it gains at least 0.5 points.
   6. **Scale guard** at `resizeInput` 1024 and 2048 and counts of 500 and 2000: peak memory and time ratio. This sets the fallback threshold.
   7. **Curved kinds** with their own smooth coverage: later, and perhaps never for `quadratic`.
