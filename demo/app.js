@@ -471,9 +471,10 @@ async function run() {
     if (!isCurrent()) {
       return;
     }
-    // The final stage after the last step can move, resize and recolour any
-    // shape, so the final SVG replaces the live preview. A run stopped
-    // before the result arrives keeps the preview instead.
+    // The refit passes during the search and the final stage after the last
+    // step can move, resize and recolour any shape, so the final SVG replaces
+    // the live preview. A run stopped before the result arrives keeps the
+    // preview instead.
     live.flush();
     ui.result.innerHTML = result.data;
     outcome = "done";

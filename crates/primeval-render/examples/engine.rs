@@ -15,8 +15,9 @@
 //!   --refine SCHEDULE   refit passes (`Model::refine`, default: none):
 //!                       `end:P` runs P passes at each checkpoint,
 //!                       `every:K` one pass after every K-th step,
-//!                       `final` runs `approximate`'s final stage at each
-//!                       checkpoint, `joint:R` (lab only) R refit passes
+//!                       `final` runs `approximate`'s pipeline: its refit
+//!                       passes during the search and its final stage at
+//!                       each checkpoint, `joint:R` (lab only) R refit passes
 //!                       then the joint optimisation of the triangles,
 //!                       polygons and rectangles, rotated or not, every
 //!                       other shape fixed in geometry, at
@@ -26,29 +27,54 @@
 //!                       optimisation's iteration count (default:
 //!                       `approximate`'s, which grows with the shape
 //!                       count: 80 up to 50 shapes, 160 from 500)
+//!   --during SCHEDULE   refit passes of the search itself, combined with
+//!                       any `--refine` but `every:K`: `none`, `every:K`
+//!                       one pass after every K-th step, `spaced:K:C`
+//!                       after step K, then each max(K, s / C) steps after
+//!                       the pass at step s (default: `approximate`'s for
+//!                       the kind with `--refine final`, otherwise none)
+//!   --final-refits R    with `--refine final` or `joint:R`: the final
+//!                       stage's refit passes, `R` passes or `until:G:C`,
+//!                       passes until one lowers the score by less than G
+//!                       ten-thousandths, at most C (default:
+//!                       `approximate`'s, or R of `joint:R`)
+//!   --joint-scale M     with `--refine final` or `joint:R`: the joint
+//!                       optimisation's iterations as M times its default,
+//!                       0 for none (default: `approximate`'s, or 1 with
+//!                       `joint:R`)
+//!   --effort R:C:A      the greedy search's rounds per step, and the
+//!                       multiples of each round's random candidates and
+//!                       climb age (default: the model's for the kind, 16
+//!                       or 32 rounds and 1 or 2 times the age)
 //! ```
 //!
 //! For every image × shape kind it runs one greedy search to the largest
 //! checkpoint, with seed 42 and default options otherwise. It drives
 //! [`primeval_core::Model`] itself through `primeval_render::lab`, which
 //! reproduces `approximate`'s search and encoding exactly. `approximate`
-//! ends with its final stage: for triangles, polygons, rectangles and
+//! runs the pipeline of its kind (`lab::pipeline`): refit passes during the
+//! search, then its final stage: for triangles, polygons, rectangles and
 //! rotated rectangles the joint gradient optimisation of every shape
-//! (`primeval_core::joint`), for every other kind one refit pass. The rows of `--refine final` are what it returns
-//! for that step count (and of `--refine end:1` too, for the other kinds);
-//! rows without `--refine` are the greedy search alone. At each checkpoint
-//! it records one row.
+//! (`primeval_core::joint`), for `any` one refit pass then the joint
+//! optimisation, for every other kind one refit pass. The rows of
+//! `--refine final` are what it returns for that step count; rows without
+//! `--refine` are the greedy search alone. At each checkpoint it records
+//! one row.
 //!
 //! With `--refine end:P`, each checkpoint clones the model, runs `P` refit
 //! passes on the clone and records the clone, while the search itself goes
 //! on greedily: each row is "greedy to n steps, then P passes". With
-//! `--refine final`, each checkpoint runs `approximate`'s final stage on a
-//! clone (`lab::final_stage`) and records its drawing, in the same way.
-//! With `--refine every:K` the search itself runs one pass after every
-//! `K`-th step, so later steps build on the refitted shapes. With `--refine
-//! joint:R`, each checkpoint runs `lab::joint_stage` on a clone: `R` refit
-//! passes (none with `joint:0`), then the joint optimisation. Passes and the
-//! final stage get the render's alpha.
+//! `--refine final`, the search itself runs the pipeline's refit passes
+//! (`lab::after_step`), and each checkpoint runs its final stage on a clone
+//! (`lab::final_stage`) and records its drawing, in the same way. With
+//! `--refine every:K` the search itself runs one pass after every `K`-th
+//! step, so later steps build on the refitted shapes; `--during` gives any
+//! other `--refine` such passes too. With `--refine joint:R`, each
+//! checkpoint runs `lab::final_stage` on a clone with `R` refit passes (none
+//! with `joint:0`), then the joint optimisation. Passes and the final stage
+//! get the render's alpha. A schedule of passes during the search depends
+//! only on the step number, never on the shape count, so a checkpoint of a
+//! longer search is what `approximate` returns for that count.
 //!
 //! Progress goes to stderr; stdout gets a header with the commit, the
 //! machine, the options and the refine schedule, the rows as a Markdown
@@ -83,9 +109,10 @@
 //! Columns:
 //!
 //! - `search_s`: cumulative wall time of the `Model::step` calls up to this
-//!   checkpoint, plus the refit passes: with `every:K` every pass so far,
-//!   with `end:P` only this checkpoint's passes, with `final` only this
-//!   checkpoint's final stage. Decoding, the thumbnail, the clone, the
+//!   checkpoint, plus the refit passes: every pass during the search so
+//!   far (`every:K` or `--during`), and with `end:P` this checkpoint's
+//!   passes, with `final` or `joint:R` this checkpoint's final stage.
+//!   Decoding, the thumbnail, the clone, the
 //!   metrics and the encodings are outside the clock, as are all the
 //!   columns below.
 //! - `refine_s`, only with `--refine`: the part of `search_s` spent in
@@ -93,8 +120,7 @@
 //! - `score`: `Model::score_f64`, the normalised RGB RMSE between the
 //!   engine's own canvas and the working target. Most shape kinds draw on
 //!   that canvas with binary (not anti-aliased) coverage. With `--refine
-//!   final` or `joint:R`, the score `lab::final_stage` or `lab::joint_stage`
-//!   returns: after the joint optimisation, its model's RMSE of its exported
+//!   final` or `joint:R`, the score `lab::final_stage` returns: after the joint optimisation, its model's RMSE of its exported
 //!   drawing (`joint::score`), so `gap` measures how well that model agrees
 //!   with the export.
 //! - `rmse256`: the normalised RGB RMSE between the PNG at the working
@@ -144,6 +170,7 @@ mod common;
 use common::{ALL_SHAPES, BoxError, SEED, rgb_rmse};
 use image::{ImageFormat, RgbImage, imageops};
 use primeval_core::{Drawing, Geometry, Model, ModelOptions};
+use primeval_render::lab::{During, Pipeline, Refits};
 use primeval_render::{OutputFormat, RenderOptions, ShapeKind, lab};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -161,6 +188,105 @@ struct Config {
     refine: Refine,
     /// The joint optimisation's iteration count with `--refine final`.
     iterations: Option<u32>,
+    /// Overrides of the pipeline: `--during`, `--final-refits` and
+    /// `--joint-scale`.
+    during: Option<During>,
+    final_refits: Option<Refits>,
+    joint_scale: Option<u32>,
+    /// `--effort`: rounds, candidate and age multiples.
+    effort: Option<(u64, usize, usize)>,
+}
+
+impl Config {
+    /// The pipeline of a search of `shape`: `approximate`'s for the kind
+    /// with the overrides applied, its final stage used only with
+    /// `--refine final` or `joint:R`.
+    fn pipeline(&self, shape: ShapeKind) -> Pipeline {
+        let mut pipeline = lab::pipeline(shape);
+        match self.refine {
+            Refine::Final => {}
+            Refine::Joint(refits) => {
+                pipeline.during = During::Never;
+                pipeline.refits = Refits::Passes(refits);
+                pipeline.joint = Some(1);
+            }
+            _ => pipeline.during = During::Never,
+        }
+        if let Some(during) = self.during {
+            pipeline.during = during;
+        }
+        if let Some(refits) = self.final_refits {
+            pipeline.refits = refits;
+        }
+        if let Some(scale) = self.joint_scale {
+            pipeline.joint = (scale > 0).then_some(scale);
+        }
+        pipeline
+    }
+}
+
+fn parse_during(value: &str) -> Result<During, BoxError> {
+    let invalid = || format!("--during: expected none, every:K or spaced:K:C, got {value}");
+    let numbers: Vec<u32> = value
+        .split(':')
+        .skip(1)
+        .map(str::parse)
+        .collect::<Result<_, _>>()
+        .map_err(|_| invalid())?;
+    if numbers.contains(&0) {
+        return Err(invalid().into());
+    }
+    match (value.split(':').next(), numbers.as_slice()) {
+        (Some("none"), []) => Ok(During::Never),
+        (Some("every"), &[every]) => Ok(During::Every(every)),
+        (Some("spaced"), &[interval, divisor]) => Ok(During::Spaced { interval, divisor }),
+        _ => Err(invalid().into()),
+    }
+}
+
+fn parse_refits(value: &str) -> Result<Refits, BoxError> {
+    let invalid = || format!("--final-refits: expected R or until:G:C, got {value}");
+    if let Some(rest) = value.strip_prefix("until:") {
+        let (gain, cap) = rest.split_once(':').ok_or_else(invalid)?;
+        return Ok(Refits::Until {
+            min_gain: gain.parse().map_err(|_| invalid())?,
+            cap: cap.parse().map_err(|_| invalid())?,
+        });
+    }
+    Ok(Refits::Passes(value.parse().map_err(|_| invalid())?))
+}
+
+fn parse_effort(value: &str) -> Result<(u64, usize, usize), BoxError> {
+    let invalid = || format!("--effort: expected R:C:A, all positive, got {value}");
+    let parts: Vec<&str> = value.split(':').collect();
+    let [rounds, candidates, age] = parts.as_slice() else {
+        return Err(invalid().into());
+    };
+    let effort = (
+        rounds.parse().map_err(|_| invalid())?,
+        candidates.parse().map_err(|_| invalid())?,
+        age.parse().map_err(|_| invalid())?,
+    );
+    if effort.0 == 0 || effort.1 == 0 || effort.2 == 0 {
+        return Err(invalid().into());
+    }
+    Ok(effort)
+}
+
+fn describe_pipeline(pipeline: Pipeline) -> String {
+    let during = match pipeline.during {
+        During::Never => "none".to_owned(),
+        During::Every(every) => format!("every:{every}"),
+        During::Spaced { interval, divisor } => format!("spaced:{interval}:{divisor}"),
+    };
+    let refits = match pipeline.refits {
+        Refits::Passes(passes) => format!("{passes}"),
+        Refits::Until { min_gain, cap } => format!("until:{min_gain}:{cap}"),
+    };
+    let joint = pipeline
+        .joint
+        .map_or_else(|| "none".to_owned(), |scale| format!("x{scale}"));
+    format!("during {during}, final refits {refits}, joint {joint}")
 }
 
 /// When the search runs refit passes; see the doc comment.
@@ -171,7 +297,8 @@ enum Refine {
     End(u32),
     /// One pass after every this many steps.
     Every(u32),
-    /// `approximate`'s final stage on a clone at each checkpoint.
+    /// `approximate`'s passes during the search, and its final stage on a
+    /// clone at each checkpoint.
     Final,
     /// This many refit passes, then the joint optimisation, on a clone at
     /// each checkpoint.
@@ -205,7 +332,11 @@ impl Refine {
             Self::None => "none".to_owned(),
             Self::End(passes) => format!("end:{passes} ({passes} passes at each checkpoint)"),
             Self::Every(steps) => format!("every:{steps} (one pass after every {steps} steps)"),
-            Self::Final => "final (approximate's final stage at each checkpoint)".to_owned(),
+            Self::Final => {
+                "final (approximate's pipeline: its passes during the search, its final \
+                            stage at each checkpoint)"
+                    .to_owned()
+            }
             Self::Joint(refits) => format!(
                 "joint:{refits} ({refits} refit passes, then the joint optimisation of the \
                  triangles, polygons and rectangles, at each checkpoint)"
@@ -240,13 +371,7 @@ fn main() -> Result<(), BoxError> {
         let mut output_reference: Option<RgbImage> = None;
         for &shape in &config.shapes {
             eprintln!("{} {}", input.name, shape.as_str());
-            for checkpoint in search(
-                &input.bytes,
-                shape,
-                &config.checkpoints,
-                config.refine,
-                config.iterations,
-            )? {
+            for checkpoint in search(&input.bytes, shape, &config)? {
                 let small_reference =
                     small_reference.get_or_insert_with(|| resampled(&original, &checkpoint.small));
                 let output_reference = output_reference
@@ -273,7 +398,7 @@ fn main() -> Result<(), BoxError> {
     });
 
     let refined = config.refine != Refine::None;
-    print_header(&config.checkpoints, config.refine, config.iterations);
+    print_header(&config);
     let (refine_head, refine_rule) = if refined {
         (" refine_s |", " ---: |")
     } else {
@@ -329,6 +454,10 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
     let mut checkpoints: Option<Vec<u32>> = None;
     let mut refine = Refine::None;
     let mut iterations = None;
+    let mut during = None;
+    let mut final_refits = None;
+    let mut joint_scale = None;
+    let mut effort = None;
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{arg} needs a value"));
         match arg.as_str() {
@@ -353,6 +482,10 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
             }
             "--refine" => refine = Refine::parse(&value()?)?,
             "--iterations" => iterations = Some(value()?.parse()?),
+            "--during" => during = Some(parse_during(&value()?)?),
+            "--final-refits" => final_refits = Some(parse_refits(&value()?)?),
+            "--joint-scale" => joint_scale = Some(value()?.parse()?),
+            "--effort" => effort = Some(parse_effort(&value()?)?),
             other => return Err(format!("unknown argument {other}; see the doc comment").into()),
         }
     }
@@ -381,6 +514,14 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
     if iterations.is_some() && !matches!(refine, Refine::Final | Refine::Joint(_)) {
         return Err("--iterations needs --refine final or joint:R".into());
     }
+    if (final_refits.is_some() || joint_scale.is_some())
+        && !matches!(refine, Refine::Final | Refine::Joint(_))
+    {
+        return Err("--final-refits and --joint-scale need --refine final or joint:R".into());
+    }
+    if during.is_some() && matches!(refine, Refine::Every(_)) {
+        return Err("--during cannot be combined with --refine every:K".into());
+    }
     Ok(Config {
         photos,
         synthetic,
@@ -388,6 +529,10 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
         checkpoints,
         refine,
         iterations,
+        during,
+        final_refits,
+        joint_scale,
+        effort,
     })
 }
 
@@ -406,17 +551,12 @@ struct Checkpoint {
     violations: usize,
 }
 
-/// Runs one search of `shape` to the last of `checkpoints` (sorted, unique
-/// and positive) exactly as `approximate` would, with the refit passes or
-/// final stage of `refine` (`iterations` overriding the joint
-/// optimisation's), and records each checkpoint.
-fn search(
-    input: &[u8],
-    shape: ShapeKind,
-    checkpoints: &[u32],
-    refine: Refine,
-    iterations: Option<u32>,
-) -> Result<Vec<Checkpoint>, BoxError> {
+/// Runs one search of `shape` to the last of the checkpoints (sorted,
+/// unique and positive) exactly as `approximate` would, with the refit
+/// passes, pipeline and effort of `config`, and records each checkpoint.
+fn search(input: &[u8], shape: ShapeKind, config: &Config) -> Result<Vec<Checkpoint>, BoxError> {
+    let (checkpoints, refine, iterations) = (&config.checkpoints, config.refine, config.iterations);
+    let pipeline = config.pipeline(shape);
     let last = *checkpoints.last().ok_or("--steps: no checkpoints")?;
     let mut render = RenderOptions::default();
     render.count = last;
@@ -429,6 +569,9 @@ fn search(
     let mut options = ModelOptions::default();
     options.seed = render.seed;
     let mut model = Model::new(target, background, options);
+    if let Some((rounds, candidates, age)) = config.effort {
+        model.set_search_effort(rounds, candidates, age);
+    }
 
     let mut search = Duration::ZERO;
     let mut refined = Duration::ZERO;
@@ -443,6 +586,12 @@ fn search(
         {
             let start = Instant::now();
             model.refine(render.alpha);
+            let elapsed = start.elapsed();
+            search += elapsed;
+            refined += elapsed;
+        }
+        let start = Instant::now();
+        if lab::after_step(&mut model, pipeline, step, render.alpha) {
             let elapsed = start.elapsed();
             search += elapsed;
             refined += elapsed;
@@ -463,22 +612,15 @@ fn search(
                     clone.drawing(),
                     clone.score_f64(),
                     search + elapsed,
-                    elapsed,
+                    refined + elapsed,
                 )
             }
-            Refine::Final => {
+            Refine::Final | Refine::Joint(_) => {
                 let mut clone = model.clone();
                 let start = Instant::now();
-                let (drawing, score) = lab::final_stage(&mut clone, &render, iterations);
+                let (drawing, score) = lab::final_stage(&mut clone, &render, pipeline, iterations);
                 let elapsed = start.elapsed();
-                (drawing, score, search + elapsed, elapsed)
-            }
-            Refine::Joint(refits) => {
-                let mut clone = model.clone();
-                let start = Instant::now();
-                let (drawing, score) = lab::joint_stage(&mut clone, &render, iterations, refits);
-                let elapsed = start.elapsed();
-                (drawing, score, search + elapsed, elapsed)
+                (drawing, score, search + elapsed, refined + elapsed)
             }
             Refine::None | Refine::Every(_) => {
                 (model.drawing(), model.score_f64(), search, refined)
@@ -588,7 +730,8 @@ fn png(drawing: &Drawing, output_size: u32) -> Result<RgbImage, BoxError> {
     Ok(image::load_from_memory_with_format(&bytes, ImageFormat::Png)?.to_rgb8())
 }
 
-fn print_header(checkpoints: &[u32], refine: Refine, iterations: Option<u32>) {
+fn print_header(config: &Config) {
+    let (checkpoints, refine, iterations) = (&config.checkpoints, config.refine, config.iterations);
     let defaults = RenderOptions::default();
     println!("# primeval engine run");
     println!();
@@ -607,6 +750,16 @@ fn print_header(checkpoints: &[u32], refine: Refine, iterations: Option<u32>) {
     }
     if let Some(iterations) = iterations {
         println!("- joint optimisation: {iterations} iterations");
+    }
+    for &shape in &config.shapes {
+        println!(
+            "- pipeline of {}: {}",
+            shape.as_str(),
+            describe_pipeline(config.pipeline(shape))
+        );
+    }
+    if let Some((rounds, candidates, age)) = config.effort {
+        println!("- search effort: {rounds} rounds, candidates x{candidates}, climb age x{age}");
     }
     println!();
 }

@@ -17,8 +17,44 @@ pub(crate) struct CommittedShape {
     pub(crate) color: Color,
 }
 
-/// Independent search rounds per [`Model::step`]; the best one is painted.
-const SEARCH_ROUNDS: u64 = 16;
+/// How hard [`Model::step`] searches: its independent search rounds, of
+/// which the best is painted, and the multiples of each round's random
+/// candidates and climb age ([`Model::search_params`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Effort {
+    rounds: u64,
+    candidates: usize,
+    age: usize,
+}
+
+impl Effort {
+    /// The effort for `kind`: 16 rounds, or 32 for [`ShapeKind::Any`],
+    /// polygons, quadratics and rotated ellipses, whose quadratics and
+    /// rotated ellipses also climb twice as long.
+    ///
+    /// Chosen on the engine runner's corpus, with the passes and final
+    /// stage `primeval-render` runs around the search, by the median RMSE
+    /// of the export at 100 and 200 shapes: twice the rounds lowered it by
+    /// 0.7–3.6% for those kinds, and twice the age by 0.5–1.0% more for
+    /// quadratics and rotated ellipses. Neither gained 0.5% for the other
+    /// kinds, nor did four times either.
+    const fn of(kind: ShapeKind) -> Self {
+        let (rounds, age) = match kind {
+            ShapeKind::Any | ShapeKind::Polygon => (32, 1),
+            ShapeKind::Quadratic | ShapeKind::RotatedEllipse => (32, 2),
+            ShapeKind::Triangle
+            | ShapeKind::Rectangle
+            | ShapeKind::Ellipse
+            | ShapeKind::Circle
+            | ShapeKind::RotatedRectangle => (16, 1),
+        };
+        Self {
+            rounds,
+            candidates: 1,
+            age,
+        }
+    }
+}
 
 /// Search settings for a [`Model`].
 ///
@@ -71,6 +107,9 @@ pub struct Model {
     passes: u64,
     /// Scratch for rasterizing the shape that [`Model::add`] paints.
     scratch: WorkerCtx<ChaCha8Rng>,
+    /// The search effort of [`Model::step`] for every kind, set only by
+    /// the lab hook; otherwise each kind's [`Effort::of`].
+    effort: Option<Effort>,
     /// Whether the search may stop evaluations early; see
     /// `WorkerCtx::pruning`.
     #[cfg(test)]
@@ -128,6 +167,7 @@ impl Model {
             seed,
             passes: 0,
             scratch,
+            effort: None,
             #[cfg(test)]
             pruning: true,
             #[cfg(test)]
@@ -137,8 +177,9 @@ impl Model {
 
     /// Searches for the best next shape of `kind` and paints it.
     ///
-    /// Every step runs 16 independent search rounds as rayon tasks in the
-    /// current pool: the global pool, unless the caller runs `step` inside
+    /// Every step runs 16 independent search rounds, 32 for
+    /// [`ShapeKind::Any`], polygons, quadratics and rotated ellipses, as
+    /// rayon tasks in the current pool: the global pool, unless the caller runs `step` inside
     /// [`rayon::ThreadPool::install`]. Each round draws from its own random
     /// stream, derived from the seed, the step index and the round index,
     /// and the best round wins, ties going to the lowest round index, so the
@@ -164,9 +205,16 @@ impl Model {
         // Each step commits exactly one shape, so this is the step index.
         let step = self.history.len() as u64;
         let (candidate_count, hill_climb_age) = Self::search_params(kind);
+        let Effort {
+            rounds,
+            candidates,
+            age,
+        } = self.effort.unwrap_or(Effort::of(kind));
+        let (candidate_count, hill_climb_age) =
+            (candidate_count * candidates, hill_climb_age * age);
         #[cfg(test)]
         let pruning = self.pruning;
-        let results: Vec<(State, u64)> = (0..SEARCH_ROUNDS)
+        let results: Vec<(State, u64)> = (0..rounds)
             .into_par_iter()
             .map_init(
                 || WorkerCtx::new(width, height, crate::rng::round_rng(seed, step, 0)),
@@ -194,6 +242,24 @@ impl Model {
 
         self.add(best.shape, best.alpha);
         evaluations
+    }
+
+    /// Lab only: makes every later [`Model::step`] run `rounds` search
+    /// rounds instead of its kind's 16 or 32, each sampling `candidates` times as many random
+    /// candidates and climbing until `age` times as many moves in a row are
+    /// not kept. All three are at least 1. Not part of the supported API.
+    #[cfg(feature = "lab")]
+    #[doc(hidden)]
+    pub fn set_search_effort(&mut self, rounds: u64, candidates: usize, age: usize) {
+        assert!(
+            rounds > 0 && candidates > 0 && age > 0,
+            "effort must be positive"
+        );
+        self.effort = Some(Effort {
+            rounds,
+            candidates,
+            age,
+        });
     }
 
     /// Runs one refit pass: re-optimises every committed shape at its own
@@ -416,7 +482,7 @@ mod tests {
         let (candidates, age) = Model::search_params(ShapeKind::Triangle);
         // Each round samples every candidate and then hill-climbs for at
         // least `age` evaluations.
-        let minimum = SEARCH_ROUNDS * (candidates + age) as u64;
+        let minimum = Effort::of(ShapeKind::Triangle).rounds * (candidates + age) as u64;
 
         for step in 0..2 {
             let evaluations = model.step(ShapeKind::Triangle, fixed_alpha(128));
@@ -633,7 +699,12 @@ mod tests {
     /// recorded again when polygons became strictly convex with every
     /// angle above 15° and rotated rectangles got their 1:8 aspect-ratio
     /// cap, the legibility rules; `rectangle` and `any` (both coarse and
-    /// not) again when axis-aligned rectangles got the same cap.
+    /// not) again when axis-aligned rectangles got the same cap;
+    /// `quadratic`, `rotated-ellipse` and `polygon` again when their steps
+    /// got 32 search rounds, and quadratics and rotated ellipses twice the
+    /// climb age (`Effort::of`), the quality-first greedy effort. `any`,
+    /// which got 32 rounds too, kept its digests: on these targets no
+    /// round after the 16th found a better shape.
     #[test]
     fn seeded_greedy_output_is_pinned() {
         let pinned = [
@@ -643,9 +714,9 @@ mod tests {
             (ShapeKind::Ellipse, 0xdd99e621c00e71b6),
             (ShapeKind::Circle, 0x1cc7d6677aa8b599),
             (ShapeKind::RotatedRectangle, 0x52186adc7569380b),
-            (ShapeKind::Quadratic, 0xcae94d8b21013775),
-            (ShapeKind::RotatedEllipse, 0xf9f17763932224cc),
-            (ShapeKind::Polygon, 0xb57dc794666b2a2b),
+            (ShapeKind::Quadratic, 0xff87fd257f007dce),
+            (ShapeKind::RotatedEllipse, 0x02ceb857843573e9),
+            (ShapeKind::Polygon, 0xc658d1a5973e7a4d),
         ];
         assert_eq!(pinned.len(), every_kind().len());
         let actual: Vec<_> = pinned

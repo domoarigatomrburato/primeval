@@ -6,9 +6,9 @@
 //! tests), is hidden from the documentation, and is not part of the
 //! supported API: it can change or disappear in any release.
 
-use crate::{ApproximateError, ApproximateResult, OutputFormat, RenderOptions};
+use crate::{ApproximateError, ApproximateResult, OutputFormat, RenderOptions, ShapeKind};
 use image::RgbImage;
-use primeval_core::{Buffer, Color, Drawing, Model, joint};
+use primeval_core::{Alpha, Buffer, Color, Drawing, Model, joint};
 
 /// The working-resolution target and the resolved background for `input`:
 /// option validation, decoding, background resolution, flattening and the
@@ -36,55 +36,131 @@ pub fn working_image(input: &[u8], render: &RenderOptions) -> Result<RgbImage, A
     crate::working_image(input, render, || Ok(())).map(|(image, _)| image)
 }
 
-/// Runs [`crate::approximate`]'s final stage on `model`, a search after
-/// its last greedy step, exactly as [`crate::approximate`] runs it: for
-/// triangles, polygons, rectangles and rotated rectangles the joint
-/// optimisation of every shape, which leaves `model` unchanged, otherwise
-/// one refit pass of `model`. `iterations`, if set,
-/// overrides the joint optimisation's iteration count, which otherwise
-/// follows the number of shapes ([`joint::Settings::iterations`]).
+/// The stages around the greedy steps of a search: what
+/// [`crate::approximate`] runs for a shape kind ([`pipeline`]), or a
+/// variant to measure. The same as the crate's own pipeline type, which is
+/// not public.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Pipeline {
+    /// Refit passes of the model during the search.
+    pub during: During,
+    /// Refit passes of the model after the last step.
+    pub refits: Refits,
+    /// After the refit passes, the joint optimisation with this multiple of
+    /// its default iteration count ([`joint::default_iterations`]), or
+    /// `None` for none.
+    pub joint: Option<u32>,
+}
+
+/// When the search runs a refit pass of the model itself, after a step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum During {
+    /// Never.
+    Never,
+    /// After every step whose number (from 1) is a multiple of this, which
+    /// is positive.
+    Every(u32),
+    /// After step `interval`, then each `max(interval, s / divisor)` steps
+    /// after the previous pass, at step `s`. Both are positive.
+    Spaced {
+        /// The smallest number of steps between two passes.
+        interval: u32,
+        /// The divisor of the step number.
+        divisor: u32,
+    },
+}
+
+/// The refit passes of the final stage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refits {
+    /// This many passes.
+    Passes(u32),
+    /// Passes until one lowers the model's score by less than `min_gain`
+    /// ten-thousandths of its score before the pass, at most `cap`.
+    Until {
+        /// In ten-thousandths: 50 is 0.5%.
+        min_gain: u32,
+        /// The most passes.
+        cap: u32,
+    },
+}
+
+impl From<crate::pipeline::Pipeline> for Pipeline {
+    fn from(pipeline: crate::pipeline::Pipeline) -> Self {
+        use crate::pipeline::{During as D, Refits as R};
+        Self {
+            during: match pipeline.during {
+                D::Never => During::Never,
+                D::Every(every) => During::Every(every),
+                D::Spaced { interval, divisor } => During::Spaced { interval, divisor },
+            },
+            refits: match pipeline.refits {
+                R::Passes(passes) => Refits::Passes(passes),
+                R::Until { min_gain, cap } => Refits::Until { min_gain, cap },
+            },
+            joint: pipeline.joint,
+        }
+    }
+}
+
+impl From<Pipeline> for crate::pipeline::Pipeline {
+    fn from(pipeline: Pipeline) -> Self {
+        use crate::pipeline::{During as D, Refits as R};
+        Self {
+            during: match pipeline.during {
+                During::Never => D::Never,
+                During::Every(every) => D::Every(every),
+                During::Spaced { interval, divisor } => D::Spaced { interval, divisor },
+            },
+            refits: match pipeline.refits {
+                Refits::Passes(passes) => R::Passes(passes),
+                Refits::Until { min_gain, cap } => R::Until { min_gain, cap },
+            },
+            joint: pipeline.joint,
+        }
+    }
+}
+
+/// [`crate::approximate`]'s pipeline for `shape`.
+#[must_use]
+pub fn pipeline(shape: ShapeKind) -> Pipeline {
+    crate::pipeline::pipeline(shape).into()
+}
+
+/// Runs the refit pass `pipeline` schedules after step `step` (from 1) of
+/// `model`, if any, exactly as [`crate::approximate`] runs it. Returns
+/// whether a pass ran.
+pub fn after_step(model: &mut Model, pipeline: Pipeline, step: u32, alpha: Alpha) -> bool {
+    let during = crate::pipeline::Pipeline::from(pipeline).during;
+    crate::pipeline::after_step(model, during, step, alpha, || false)
+        .expect("a pass that is never cancelled finishes");
+    during.due(step)
+}
+
+/// Runs the final stage of `pipeline` on `model`, a search after its last
+/// greedy step, exactly as [`crate::approximate`] runs it for
+/// [`pipeline`]`(render.shape)`: the refit passes, which change `model`,
+/// then the joint optimisation, if any, which does not. `iterations`, if
+/// set, overrides the joint optimisation's iteration count.
 ///
 /// Returns the drawing [`crate::approximate`] would encode and its score:
-/// for the joint optimisation, its model's RMSE of that drawing
+/// after the joint optimisation, its model's RMSE of that drawing
 /// ([`joint::score`]), otherwise the refitted model's
 /// [`Model::score_f64`].
 pub fn final_stage(
     model: &mut Model,
     render: &RenderOptions,
+    pipeline: Pipeline,
     iterations: Option<u32>,
 ) -> (Drawing, f64) {
-    let mut settings = joint::Settings::default();
-    settings.iterations = iterations;
-    let drawing = crate::final_stage(model, render.shape, render.alpha, settings, || false)
-        .expect("a stage that is never cancelled finishes");
-    let score = if crate::runs_joint(render.shape) {
+    let drawing =
+        crate::pipeline::final_stage(model, pipeline.into(), render.alpha, iterations, || false)
+            .expect("a stage that is never cancelled finishes");
+    let score = if pipeline.joint.is_some() {
         joint::score(model, &drawing)
     } else {
         model.score_f64()
     };
-    (drawing, score)
-}
-
-/// An experimental final stage for any shape kind: `refits` refit passes
-/// of `model` ([`Model::refine`]), then the joint optimisation of its
-/// triangles, polygons and rectangles, rotated or not, with every other
-/// shape fixed in geometry
-/// ([`joint::optimise`]), with `iterations` overriding its count. Returns
-/// the drawing and its model's RMSE ([`joint::score`]).
-pub fn joint_stage(
-    model: &mut Model,
-    render: &RenderOptions,
-    iterations: Option<u32>,
-    refits: u32,
-) -> (Drawing, f64) {
-    for _ in 0..refits {
-        model.refine(render.alpha);
-    }
-    let mut settings = joint::Settings::default();
-    settings.iterations = iterations;
-    let drawing = joint::optimise(model, render.alpha, settings, || false)
-        .expect("a stage that is never cancelled finishes");
-    let score = joint::score(model, &drawing);
     (drawing, score)
 }
 
@@ -221,7 +297,7 @@ fn filter_valid(plane: &[f64], width: usize, height: usize, kernel: &[f64; WINDO
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Alpha, ApproximateRequest, BackgroundOption, Execution, ShapeKind, approximate};
+    use crate::{Alpha, ApproximateRequest, BackgroundOption, Execution, approximate};
     use image::{DynamicImage, ImageFormat, Rgb};
     use primeval_core::ModelOptions;
     use std::io::Cursor;
@@ -246,19 +322,21 @@ mod tests {
         let mut options = ModelOptions::default();
         options.seed = render.seed;
         let mut model = Model::new(target, background, options);
-        for _ in 0..render.count {
+        let stages = pipeline(render.shape);
+        for step in 1..=render.count {
             model.step(render.shape, render.alpha);
+            after_step(&mut model, stages, step, render.alpha);
         }
-        let (drawing, _) = final_stage(&mut model, render, None);
+        let (drawing, _) = final_stage(&mut model, render, stages, None);
         encode(&drawing, render.output_size, output)
             .expect("encode")
             .into_bytes()
     }
 
     /// The final stage's score is the joint optimisation's model RMSE of
-    /// its drawing for the kinds it covers, and the refitted model's
-    /// score for the other kinds; an iteration count overrides the joint
-    /// optimisation's.
+    /// its drawing for the kinds that end with it, and the refitted
+    /// model's score for the other kinds; an iteration count overrides the
+    /// joint optimisation's scaled default.
     #[test]
     fn the_final_stage_scores_its_drawing() {
         let input = png_bytes(&fixture());
@@ -284,18 +362,23 @@ mod tests {
                 model.step(render.shape, render.alpha);
             }
             let greedy = model.clone();
-            let (drawing, score) = final_stage(&mut model, &render, None);
-            if shape != ShapeKind::Ellipse {
+            let stages = pipeline(shape);
+            let (drawing, score) = final_stage(&mut model, &render, stages, None);
+            if let Some(scale) = stages.joint {
+                assert_ne!(shape, ShapeKind::Ellipse);
                 assert_eq!(score, primeval_core::joint::score(&model, &drawing));
-                let (fewer, _) = final_stage(&mut greedy.clone(), &render, Some(1));
+                let (fewer, _) = final_stage(&mut greedy.clone(), &render, stages, Some(1));
                 assert_ne!(fewer, drawing);
                 // Without an override, 5 shapes run the rule's 80
-                // iterations.
-                let (rule, _) = final_stage(&mut greedy.clone(), &render, Some(80));
+                // iterations, times the kind's multiple.
+                let iterations = 80 * scale;
+                let (rule, _) = final_stage(&mut greedy.clone(), &render, stages, Some(iterations));
                 assert_eq!(rule, drawing);
-                let (fifty, _) = final_stage(&mut greedy.clone(), &render, Some(50));
-                assert_ne!(fifty, drawing);
+                let (fewer, _) =
+                    final_stage(&mut greedy.clone(), &render, stages, Some(iterations - 30));
+                assert_ne!(fewer, drawing);
             } else {
+                assert_eq!(shape, ShapeKind::Ellipse);
                 assert_eq!(score, model.score_f64());
                 assert_eq!(drawing, model.drawing());
                 assert!(score <= greedy.score_f64());
@@ -303,13 +386,14 @@ mod tests {
         }
     }
 
+    /// With 21 shapes every kind's search runs at least one refit pass.
     #[test]
     fn the_lab_path_reproduces_approximate() {
         let input = png_bytes(&fixture());
         let base = RenderOptions {
-            count: 5,
+            count: 21,
             seed: Some(11),
-            resize_input: 32,
+            resize_input: 24,
             output_size: 64,
             ..RenderOptions::default()
         };
@@ -323,6 +407,18 @@ mod tests {
                 ..base
             },
             RenderOptions {
+                shape: ShapeKind::RotatedRectangle,
+                ..base
+            },
+            RenderOptions {
+                shape: ShapeKind::Any,
+                ..base
+            },
+            RenderOptions {
+                shape: ShapeKind::Circle,
+                ..base
+            },
+            RenderOptions {
                 shape: ShapeKind::Ellipse,
                 alpha: Alpha::Fixed(std::num::NonZeroU8::new(160).expect("non-zero")),
                 background: BackgroundOption::Color(Color::new(10, 20, 30, 255)),
@@ -331,7 +427,13 @@ mod tests {
             },
         ];
         for render in option_sets {
-            for output in [OutputFormat::Svg, OutputFormat::Png] {
+            // The encoding is shared; one set also checks the PNG.
+            let outputs: &[OutputFormat] = if render.shape == ShapeKind::Ellipse {
+                &[OutputFormat::Svg, OutputFormat::Png]
+            } else {
+                &[OutputFormat::Svg]
+            };
+            for &output in outputs {
                 let expected = approximate(
                     ApproximateRequest {
                         input: input.clone(),

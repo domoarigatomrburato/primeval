@@ -75,10 +75,11 @@ export type ProgressInfo = {
   /** The total number of steps, equal to the `count` option. */
   total: number;
   /**
-   * The current fit: the RMSE between the working canvas and the resized
-   * input over the RGB channels, divided by 255, from 0 (exact) to 1; lower
-   * is better. The final stage can lower it further, so the result can fit
-   * better than the last step reports.
+   * The current fit, after this step and the refit passes before it: the
+   * RMSE between the working canvas and the resized input over the RGB
+   * channels, divided by 255, from 0 (exact) to 1; lower is better. The
+   * final stage can lower it further, so the result can fit better than the
+   * last step reports.
    */
   score: number;
   /**
@@ -87,17 +88,21 @@ export type ProgressInfo = {
    * `output` format. Its coordinates are in the final SVG's `viewBox`, the
    * working canvas.
    *
-   * The shapes of every step, in order, draw a live preview. After the last
-   * step the render runs a final stage that can move, resize and recolour
-   * any shape, so the result's shape lines can differ from the preview. For
-   * triangles, polygons, rectangles and rotated rectangles it is a joint
-   * gradient optimisation of every shape at once, whose coordinates are
-   * multiples of a quarter of a `viewBox` unit, half a unit for
-   * rectangles, while a rotated rectangle's corners are computed from such
-   * values, so they can be fractional; for the other shapes it is one
-   * refit pass, which re-optimises one shape at a time. The stage keeps the shapes' number,
-   * their order and each shape's kind, though an ellipse can turn into a
-   * `<circle>` or back when its radii become equal or unequal.
+   * The shapes of every step, in order, draw a live preview. The render
+   * revises shapes it has already reported: after some steps a refit pass,
+   * which re-optimises one shape at a time, can move, resize and recolour
+   * any shape so far, and after the last step a final stage can revise
+   * every shape, so the result's shape lines can differ from the preview.
+   * For triangles, polygons, rectangles and rotated rectangles the final
+   * stage is a joint gradient optimisation of every shape at once, whose
+   * coordinates are multiples of a quarter of a `viewBox` unit, half a unit
+   * for rectangles, while a rotated rectangle's corners are computed from
+   * such values, so they can be fractional. For `any` it is one refit pass,
+   * then the same optimisation of those shapes, the others keeping their
+   * geometry; for the other shapes it is one refit pass. The passes and
+   * the stage keep the shapes' number, their order and each shape's kind,
+   * though an ellipse can turn into a `<circle>` or back when its radii
+   * become equal or unequal.
    *
    * To draw the preview, wrap the shapes received so far in an `<svg>` with
    * the final document's `viewBox` and background, for example taken from a

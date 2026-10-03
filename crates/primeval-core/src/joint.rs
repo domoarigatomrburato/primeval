@@ -82,7 +82,8 @@ use rand_chacha::ChaCha8Rng;
 /// with triangles; quality keeps improving up to 150 iterations, so the
 /// time budget decides. Integer arithmetic keeps native and wasm builds in
 /// agreement.
-fn default_iterations(shapes: usize) -> u32 {
+#[must_use]
+pub fn default_iterations(shapes: usize) -> u32 {
     let shapes = u32::try_from(shapes).unwrap_or(u32::MAX);
     match shapes {
         0..=50 => 80,

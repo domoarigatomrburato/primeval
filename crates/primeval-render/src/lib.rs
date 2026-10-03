@@ -52,13 +52,14 @@ mod input;
 #[doc(hidden)]
 pub mod lab;
 mod output;
+mod pipeline;
 mod raster;
 mod svg;
 
 use image::{DynamicImage, ImageReader, Limits, RgbImage, RgbaImage};
 use input::{average_background, thumbnail};
 use output::output_dimensions;
-use primeval_core::{Buffer, Drawing, Model, ModelOptions, joint};
+use primeval_core::{Buffer, Drawing, Model, ModelOptions};
 use std::io::Cursor;
 use std::num::NonZeroU8;
 use std::ops::RangeInclusive;
@@ -274,28 +275,33 @@ pub struct ProgressInfo {
     /// The number of steps the render runs, [`RenderOptions::count`].
     pub total: u32,
     /// The difference between the canvas and the working-resolution target
-    /// after this step: the RMSE over the RGB channels divided by 255, from
-    /// `0.0` (identical) to `1.0`. The final stage can lower it further,
-    /// so the result can score lower than the last step.
+    /// after this step and the refit passes before it: the RMSE over the
+    /// RGB channels divided by 255, from `0.0` (identical) to `1.0`.
+    /// The final stage can lower it further, so the result can score lower
+    /// than the last step.
     pub score: f64,
     /// The shape this step's greedy search committed, formatted exactly as
     /// a shape line of the SVG output, without the newline, whatever the
     /// output format. Its coordinates are in the SVG's `viewBox`, the
     /// working canvas.
     ///
-    /// The shapes of every step, in order, draw a live preview. After the
-    /// last step the render runs a final stage that can move, resize and
-    /// recolour any shape, so the result's shape lines can differ from the
-    /// preview. For triangles, polygons, rectangles and rotated rectangles
-    /// it is a joint gradient optimisation of every shape at once, whose
-    /// coordinates are multiples of a quarter of a working pixel, and of
-    /// half a pixel for rectangles, while a rotated rectangle's corners are
-    /// computed from such values, so the result's coordinates can be
-    /// fractional. For the other kinds it is one refit pass, which
-    /// re-optimises one shape at a time. The stage keeps the shapes'
-    /// number, their order and each shape's kind; an ellipse whose radii
-    /// the pass makes equal (or unequal) is written as a `<circle>` (or an
-    /// `<ellipse>`), so those two element names can swap.
+    /// The shapes of every step, in order, draw a live preview. The render
+    /// revises shapes it has already reported: after some steps a refit
+    /// pass, which re-optimises one shape at a time, can move, resize and
+    /// recolour any shape so far, and after the last step a final stage
+    /// can revise every shape, so the result's shape lines can differ from
+    /// the preview. For triangles, polygons, rectangles and rotated
+    /// rectangles the final stage is a joint gradient optimisation of
+    /// every shape at once, whose coordinates are multiples of a quarter of
+    /// a working pixel, and of half a pixel for rectangles, while a rotated
+    /// rectangle's corners are computed from such values, so the result's
+    /// coordinates can be fractional. For [`ShapeKind::Any`] it is one
+    /// refit pass, then the same optimisation of those shapes, the others
+    /// keeping their geometry. For the other kinds it is one refit pass. The
+    /// passes and the stage keep the shapes' number, their order and each
+    /// shape's kind; an ellipse whose radii a pass makes equal (or
+    /// unequal) is written as a `<circle>` (or an `<ellipse>`), so those
+    /// two element names can swap.
     pub shape: String,
 }
 
@@ -442,18 +448,23 @@ impl ApproximateResult {
 ///
 /// The search runs [`RenderOptions::count`] greedy steps, each adding the
 /// best shape it finds and reporting it through `execution`'s progress
-/// callback, then a final stage that revises every shape and reports no
-/// progress. For [`ShapeKind::Triangle`], [`ShapeKind::Polygon`],
-/// [`ShapeKind::Rectangle`] and [`ShapeKind::RotatedRectangle`] the final
-/// stage is a joint gradient optimisation of the geometry, opacity (with
-/// [`Alpha::Auto`]) and colour of every shape at once, against a model of
-/// the anti-aliased output, snapped to quarter pixels (half pixels for
-/// axis-aligned rectangles) that keep every angle above 15°, every polygon
-/// strictly convex and every rectangle within the 1:8 aspect cap
-/// ([`primeval_core::joint`]). For the other kinds it is one refit pass that re-optimises
-/// every shape at its own layer, with the others fixed, and keeps the
-/// result only if it lowers the score. The result is encoded from the
-/// revised shapes.
+/// callback. After some of the steps it runs a refit pass that
+/// re-optimises every shape so far at its own layer, with the others
+/// fixed, and keeps the result only if it lowers the score, so later steps
+/// build on the revised shapes; the passes are spaced so that their cost
+/// grows linearly with the count. A final stage then revises every shape
+/// and reports no progress. For [`ShapeKind::Triangle`],
+/// [`ShapeKind::Polygon`], [`ShapeKind::Rectangle`] and
+/// [`ShapeKind::RotatedRectangle`] it is a joint gradient optimisation of
+/// the geometry, opacity (with [`Alpha::Auto`]) and colour of every shape
+/// at once, against a model of the anti-aliased output, snapped to quarter
+/// pixels (half pixels for axis-aligned rectangles) that keep every angle
+/// above 15°, every polygon strictly convex and every rectangle within the
+/// 1:8 aspect cap ([`primeval_core::joint`]). For [`ShapeKind::Any`] it is
+/// one refit pass, then the same joint optimisation of the triangles,
+/// polygons and rectangles, every other shape keeping its geometry. For
+/// the other kinds it is one refit pass. The result keeps the number,
+/// order and kind of the shapes, and is encoded from the revised shapes.
 ///
 /// # Errors
 ///
@@ -477,6 +488,7 @@ pub fn approximate(
     options.seed = render.seed;
     let mut model = Model::new(target, background, options);
 
+    let pipeline = pipeline::pipeline(render.shape);
     for step in 0..render.count {
         execution.check_cancelled()?;
 
@@ -493,67 +505,25 @@ pub fn approximate(
                 shape: svg::shape_element(&shape.geometry, shape.color),
             });
         }
+
+        // A refit pass the pipeline schedules after this step revises the
+        // shapes already reported; it stops once cancelled.
+        pipeline::after_step(&mut model, pipeline.during, step + 1, render.alpha, || {
+            execution.is_cancelled()
+        })
+        .ok_or(ApproximateError::Aborted)?;
     }
 
     // The final stage revises the greedy shapes before encoding; it reports
     // no progress and stops once cancelled.
     execution.check_cancelled()?;
-    let drawing = final_stage(
-        &mut model,
-        render.shape,
-        render.alpha,
-        joint::Settings::default(),
-        || execution.is_cancelled(),
-    )
+    let drawing = pipeline::final_stage(&mut model, pipeline, render.alpha, None, || {
+        execution.is_cancelled()
+    })
     .ok_or(ApproximateError::Aborted)?;
 
     execution.check_cancelled()?;
     encode_output(&drawing, render.output_size, output)
-}
-
-/// Whether [`approximate`]'s final stage for `shape` is the joint
-/// optimisation of every shape ([`primeval_core::joint`]) rather than one
-/// refit pass ([`Model::refine`]).
-///
-/// Every kind whose shapes the joint optimisation moves runs it: on the
-/// engine runner's corpus it gives a lower median RMSE of the export than
-/// the refit pass, for rectangles at 100 and 200 shapes 0.0458 and 0.0353
-/// against 0.0500 and 0.0394, for rotated rectangles 0.0401 and 0.0306
-/// against 0.0437 and 0.0347.
-///
-/// [`ShapeKind::Any`] keeps the refit pass for now: the joint optimisation
-/// would keep its ellipses, circles and curves fixed in geometry.
-fn runs_joint(shape: ShapeKind) -> bool {
-    matches!(
-        shape,
-        ShapeKind::Triangle
-            | ShapeKind::Polygon
-            | ShapeKind::Rectangle
-            | ShapeKind::RotatedRectangle
-    )
-}
-
-/// [`approximate`]'s final stage, after the greedy steps of `model` of
-/// `shape`: when [`runs_joint`], the joint optimisation of `model`'s shapes
-/// with `settings`, which leaves `model` unchanged; otherwise one refit
-/// pass of `model`. Returns the drawing to encode, or `None` once
-/// `cancelled` returns true.
-///
-/// `lab::final_stage` calls this too, so the evaluation runner cannot
-/// drift from [`approximate`].
-fn final_stage(
-    model: &mut Model,
-    shape: ShapeKind,
-    alpha: Alpha,
-    settings: joint::Settings,
-    mut cancelled: impl FnMut() -> bool,
-) -> Option<Drawing> {
-    if runs_joint(shape) {
-        joint::optimise(model, alpha, settings, cancelled)
-    } else {
-        model.refine_unless(alpha, &mut cancelled)?;
-        Some(model.drawing())
-    }
 }
 
 /// Validate `render`, decode `input`, and build the working-resolution
@@ -1031,33 +1001,24 @@ mod tests {
             for _ in 0..render.count {
                 model.step(render.shape, render.alpha);
             }
-            assert!(runs_joint(render.shape), "{shape:?}");
+            let stages = pipeline::pipeline(render.shape);
+            assert!(stages.joint.is_some(), "{shape:?}");
             let mut polls = 0;
-            let finished = final_stage(
-                &mut model.clone(),
-                render.shape,
-                render.alpha,
-                joint::Settings::default(),
-                || {
+            let finished =
+                pipeline::final_stage(&mut model.clone(), stages, render.alpha, None, || {
                     polls += 1;
                     false
-                },
-            );
+                });
             assert!(finished.is_some());
             // 3 shapes run 80 iterations, each polled before it starts.
             assert!(polls > 80, "{shape:?}: {polls} polls");
             for cancel_at in [1, polls / 2, polls] {
                 let mut count = 0;
-                let stopped = final_stage(
-                    &mut model.clone(),
-                    render.shape,
-                    render.alpha,
-                    joint::Settings::default(),
-                    || {
+                let stopped =
+                    pipeline::final_stage(&mut model.clone(), stages, render.alpha, None, || {
                         count += 1;
                         count >= cancel_at
-                    },
-                );
+                    });
                 assert_eq!(stopped, None, "{shape:?}: cancelled at poll {cancel_at}");
             }
         }
@@ -1297,6 +1258,40 @@ mod tests {
 
         assert!(matches!(result, Err(ApproximateError::Aborted)));
         assert_eq!(fired, [1]);
+    }
+
+    /// A token cancelled at a step after which the pipeline runs a refit
+    /// pass stops the render with [`ApproximateError::Aborted`]: the pass
+    /// polls the token before its first layer (see
+    /// `pipeline::tests::cancellation_during_a_refit_in_the_search_stops_it`)
+    /// and no later step runs.
+    #[test]
+    fn cancellation_during_a_refit_in_the_search_returns_abort_error() {
+        let mut request = request(fixture_bytes(), OutputFormat::Svg);
+        request.render.count = 8;
+        let during = pipeline::pipeline(request.render.shape).during;
+        let due = (1..=request.render.count)
+            .find(|&step| during.due(step))
+            .expect("a pass within the count");
+        let token = CancellationToken::new();
+        let canceller = token.clone();
+        let mut fired = Vec::new();
+        let mut on_progress = |info: ProgressInfo| {
+            fired.push(info.step);
+            if info.step == due {
+                canceller.cancel();
+            }
+        };
+
+        let result = approximate(
+            request,
+            Execution::new()
+                .progress(&mut on_progress)
+                .cancellation(&token),
+        );
+
+        assert!(matches!(result, Err(ApproximateError::Aborted)));
+        assert_eq!(fired, (1..=due).collect::<Vec<_>>());
     }
 
     #[test]

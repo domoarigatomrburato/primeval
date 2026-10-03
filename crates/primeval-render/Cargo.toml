@@ -29,7 +29,7 @@ bench = ["dep:divan"]
 # Exposes the hidden `lab` module (`src/lab.rs`) for the engine evaluation
 # runner (`examples/engine.rs`). Never enabled by dependents; see
 # CONTRIBUTING.md.
-lab = []
+lab = ["primeval-core/lab"]
 
 [lib]
 # The library has no libtest benchmarks; `cargo bench` runs only `benches/`.
