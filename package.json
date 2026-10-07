@@ -112,7 +112,7 @@
   "devDependencies": {
     "@biomejs/biome": "2.5.15",
     "@napi-rs/cli": "^3.10.6",
-    "@types/node": "^22.20.4",
+    "@types/node": "^26.6.3",
     "playwright": "1.63.0",
     "typescript": "^7.0.2",
     "vite": "8.3.2"
