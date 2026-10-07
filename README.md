@@ -409,17 +409,17 @@ Wall time per call and final score for 200 steps of each shape mode on the two p
 
 | Shape | American Gothic time | American Gothic score | Mona Lisa time | Mona Lisa score |
 | --- | ---: | ---: | ---: | ---: |
-| Mixed | 1.23 s | 0.0420 | 1.20 s | 0.0344 |
-| Triangle | 0.58 s | 0.0464 | 0.56 s | 0.0368 |
-| Rectangle | 0.33 s | 0.0489 | 0.31 s | 0.0420 |
-| Ellipse | 0.49 s | 0.0490 | 0.48 s | 0.0407 |
-| Circle | 0.51 s | 0.0586 | 0.47 s | 0.0457 |
-| Rotated rectangle | 0.55 s | 0.0455 | 0.56 s | 0.0378 |
-| Quadratic | 2.20 s | 0.1355 | 1.63 s | 0.1044 |
-| Rotated ellipse | 2.50 s | 0.0452 | 2.33 s | 0.0357 |
-| Polygon | 3.27 s | 0.0387 | 3.08 s | 0.0326 |
+| Mixed | 2.04 s | 0.0349 | 1.91 s | 0.0292 |
+| Triangle | 1.21 s | 0.0405 | 0.95 s | 0.0330 |
+| Rectangle | 0.79 s | 0.0460 | 0.65 s | 0.0384 |
+| Ellipse | 1.03 s | 0.0448 | 0.86 s | 0.0372 |
+| Circle | 1.06 s | 0.0545 | 0.85 s | 0.0414 |
+| Rotated rectangle | 1.06 s | 0.0443 | 0.98 s | 0.0356 |
+| Quadratic | 6.79 s | 0.0882 | 4.89 s | 0.0663 |
+| Rotated ellipse | 3.01 s | 0.0359 | 2.73 s | 0.0302 |
+| Polygon | 3.47 s | 0.0315 | 3.26 s | 0.0275 |
 
-Measured at commit `cdcb531` on an Apple M3 (8 cores: 4 performance, 4 efficiency) under macOS, from a single run of:
+Measured at commit `646252c` on an Apple M2 Pro (10 cores: 6 performance, 4 efficiency) under macOS, from a single run of:
 
 ```bash
 cargo run --release -p primeval-render --example quality -- --no-synthetic --steps 200
@@ -433,19 +433,19 @@ The same two paintings, *American Gothic* and *Mona Lisa*, through the original 
 
 | Shape | 200 steps speedup | Go RMSE | primeval RMSE | 1000 steps speedup | Go RMSE | primeval RMSE |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Mixed | 5.0× | 14.93 | 13.63 | 4.9× | 12.65 | 10.44 |
-| Triangle | 5.4× | 15.75 | 14.07 | 4.9× | 13.66 | 10.99 |
-| Rectangle | 7.1× | 15.89 | 14.80 | 6.4× | 13.54 | 11.30 |
-| Ellipse | 10.7× | 14.87 | 14.74 | 11.1× | 11.55 | 11.34 |
-| Circle | 13.1× | 16.23 | 16.17 | 14.3× | 12.48 | 12.28 |
-| Rotated rectangle | 5.4× | 15.54 | 14.02 | 5.0× | 12.87 | 10.73 |
-| Quadratic | 3.8× | 45.46 | 38.90 | 3.9× | 26.43 | 18.81 |
-| Rotated ellipse | 4.9× | 15.30 | 14.06 | 5.3× | 12.95 | 10.48 |
-| Polygon | 2.1× | 14.69 | 13.18 | 2.1× | 12.97 | 10.45 |
+| Mixed | 3.0× | 14.86 | 12.13 | 3.6× | 12.64 | 9.69 |
+| Triangle | 3.4× | 15.78 | 12.32 | 3.6× | 13.65 | 9.45 |
+| Rectangle | 3.6× | 15.89 | 14.09 | 4.2× | 13.54 | 11.02 |
+| Ellipse | 5.8× | 14.82 | 13.83 | 7.1× | 11.52 | 10.89 |
+| Circle | 6.8× | 16.21 | 15.17 | 8.5× | 12.45 | 11.73 |
+| Rotated rectangle | 3.2× | 15.38 | 12.92 | 3.6× | 12.90 | 10.08 |
+| Quadratic | 1.2× | 45.38 | 25.53 | 1.5× | 26.40 | 11.18 |
+| Rotated ellipse | 4.0× | 15.24 | 12.57 | 4.7× | 12.94 | 9.61 |
+| Polygon | 1.8× | 14.69 | 11.64 | 1.8× | 12.92 | 9.40 |
 
-In total, 200 steps took 105 s with Go and 22 s with primeval (4.7×), and 1000 steps 592 s and 124 s (4.8×). primeval's RMSE was lower in all 18 image and shape configurations at both step counts, by 8% (200 steps) and 16% (1000 steps) in geometric mean.
+In total, 200 steps took 104 s with Go and 37 s with primeval (2.8×), and 1000 steps 442 s and 136 s (3.3×). primeval's RMSE was lower in all 18 image and shape configurations at both step counts, by 19% (200 steps) and 26% (1000 steps) in geometric mean. The search now ends with refit passes and, for triangles, rectangles and polygons, a joint optimisation of every shape, which is where the extra time against the previous engine goes. At 1000 steps the SVG is 10–30% smaller than Go's for five of the nine kinds and within 10% of it for the others.
 
-Go is timed as a process (decode, search, render, writing PNG and SVG); primeval is timed in-process (decode, search, PNG encode), and the Node CLI adds about 0.1 s of startup on top. Go seeds itself from the clock, so each Go figure is from 3 runs (median time, mean RMSE); primeval used seed 42, with the median of 3 runs as its time. Measured at commit `12814e2` against `primitive` `v0.0.0-20200504002142-0373c216458b` (Go 1.24.6) on the same Apple M3, from:
+Go is timed as a process (decode, search, render, writing PNG and SVG); primeval is timed in-process (decode, search, PNG encode), and the Node CLI adds about 0.1 s of startup on top. Go seeds itself from the clock, so each Go figure is from 3 runs (median time, mean RMSE); primeval used seed 42, with the median of 3 runs as its time. Measured at commit `646252c` against `primitive` `v0.0.0-20200504002142-0373c216458b` (Go 1.27.1) on the same Apple M2 Pro, from:
 
 ```bash
 cargo run --release -p primeval-render --example versus_go -- --steps 200,1000 --reps 3

@@ -1,203 +1,203 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="788" viewBox="0 0 256 197">
 <rect width="256" height="197" fill="#d9ad68"/>
-<path d="M259.545 185.822 Q170.273 212 88.976 112.671" fill="none" stroke="#140000" stroke-opacity="0.878" stroke-width="1"/>
-<path d="M251.113 151.176 Q162.866 212 87.648 105.641" fill="none" stroke="#0c0003" stroke-opacity="0.835" stroke-width="1"/>
-<path d="M262.398 183.047 Q178.128 212 98.293 105.614" fill="none" stroke="#180008" stroke-opacity="0.863" stroke-width="1"/>
-<path d="M258.916 193.378 Q158.892 48.707 136.029 55.195" fill="none" stroke="#00022b" stroke-opacity="0.882" stroke-width="1"/>
-<path d="M101.861 100.276 Q105.431 203.548 271 168.603" fill="none" stroke="#000000" stroke-opacity="0.553" stroke-width="1"/>
-<path d="M199.878 93.503 Q138.811 42.984 122.664 75.633" fill="none" stroke="#000018" stroke-width="1"/>
-<path d="M88.328 103.189 Q181.474 211.517 260.442 191.99" fill="none" stroke="#0b0000" stroke-opacity="0.737" stroke-width="1"/>
-<path d="M100.589 107.572 Q184.366 212 261.138 136.153" fill="none" stroke="#000011" stroke-opacity="0.706" stroke-width="1"/>
-<path d="M145.774 189.539 Q258.553 212 253.932 144.326" fill="none" stroke="#290f15" stroke-opacity="0.992" stroke-width="1"/>
-<path d="M226.445 148.681 Q186.276 37.194 121.592 77.762" fill="none" stroke="#00062a" stroke-opacity="0.961" stroke-width="1"/>
-<path d="M263.176 183.806 Q122.393 173.934 91.13 91.423" fill="none" stroke="#000007" stroke-opacity="0.631" stroke-width="1"/>
-<path d="M271 200.277 Q197.032 103.235 164.4 69.039" fill="none" stroke="#000015" stroke-opacity="0.616" stroke-width="1"/>
-<path d="M252.421 140.85 Q253.041 206.328 142.911 184.639" fill="none" stroke="#140012" stroke-opacity="0.8" stroke-width="1"/>
-<path d="M271 204.278 Q250.815 195.59 89.161 99.583" fill="none" stroke="#170019" stroke-opacity="0.675" stroke-width="1"/>
-<path d="M229.763 195.965 Q125.687 188.458 96.124 105.463" fill="none" stroke="#140000" stroke-opacity="0.667" stroke-width="1"/>
-<path d="M134.45 54.433 Q210.736 91.102 214.209 129.043" fill="none" stroke="#000031" stroke-opacity="0.741" stroke-width="1"/>
-<path d="M130.629 163.478 Q243.168 197.709 256.241 140.356" fill="none" stroke="#000004" stroke-opacity="0.62" stroke-width="1"/>
-<path d="M271 140.685 Q172.867 212 134.408 171.713" fill="none" stroke="#24091c" stroke-opacity="0.812" stroke-width="1"/>
-<path d="M130.161 84.974 Q159.911 42.156 203.781 95.991" fill="none" stroke="#141937" stroke-width="1"/>
-<path d="M119.477 70.246 Q180.328 69.538 255.831 194.265" fill="none" stroke="#000037" stroke-opacity="0.467" stroke-width="1"/>
-<path d="M130.609 162.193 Q154.53 212 268.541 137.876" fill="none" stroke="#0c0013" stroke-opacity="0.686" stroke-width="1"/>
-<path d="M258.802 200.065 Q186.895 158.467 87.118 113.829" fill="none" stroke="#0b0012" stroke-opacity="0.608" stroke-width="1"/>
-<path d="M271 203.587 Q193.659 158.456 121.214 116.662" fill="none" stroke="#190225" stroke-opacity="0.663" stroke-width="1"/>
-<path d="M155.22 192.218 Q261.002 212 254.88 149.077" fill="none" stroke="#110007" stroke-opacity="0.71" stroke-width="1"/>
-<path d="M119.952 72.293 Q174.948 46.367 226.054 146.141" fill="none" stroke="#000039" stroke-opacity="0.576" stroke-width="1"/>
-<path d="M96.125 111.567 Q172.84 212 256.336 167.518" fill="none" stroke="#3f1618" stroke-opacity="0.761" stroke-width="1"/>
-<path d="M93.878 119.792 Q162.833 212 254.8 139.693" fill="none" stroke="#25081c" stroke-opacity="0.675" stroke-width="1"/>
-<path d="M211.606 119.686 Q156.79 81.493 116.305 70.958" fill="none" stroke="#000019" stroke-opacity="0.631" stroke-width="1"/>
-<path d="M88.907 104.009 Q132.412 115.545 185.629 198.354" fill="none" stroke="#0f000a" stroke-opacity="0.518" stroke-width="1"/>
-<path d="M147.566 71.279 Q134.412 93.727 119.299 71.081" fill="none" stroke="#000000" stroke-width="1"/>
-<path d="M271 166.673 Q256.187 148.136 141.052 200.739" fill="none" stroke="#4a2d2e" stroke-opacity="0.929" stroke-width="1"/>
-<path d="M144.441 121.505 Q180.252 153.193 261.329 194.046" fill="none" stroke="#050021" stroke-opacity="0.596" stroke-width="1"/>
-<path d="M145.356 186.74 Q246.58 212 257.476 139.016" fill="none" stroke="#000003" stroke-opacity="0.573" stroke-width="1"/>
-<path d="M90.431 116.565 Q226.1 180.122 245.821 197.505" fill="none" stroke="#1a0020" stroke-opacity="0.588" stroke-width="1"/>
-<path d="M173.817 204.983 Q149.165 172.735 93.096 111.065" fill="none" stroke="#4e1e0e" stroke-opacity="0.847" stroke-width="1"/>
-<path d="M208.184 100.552 Q146.707 42.241 121.375 70.477" fill="none" stroke="#000a31" stroke-opacity="0.733" stroke-width="1"/>
-<path d="M201.115 100.998 Q121.505 87.879 125.646 63.072" fill="none" stroke="#08041f" stroke-opacity="0.718" stroke-width="1"/>
-<path d="M156.842 212 Q153.828 112.288 127.667 61.927" fill="none" stroke="#0e001a" stroke-opacity="0.545" stroke-width="1"/>
-<path d="M123.039 154.279 Q163.159 212 270.74 168.105" fill="none" stroke="#421e25" stroke-opacity="0.729" stroke-width="1"/>
-<path d="M208.341 198.132 Q224.242 141.389 258.034 166.458" fill="none" stroke="#1b090c" stroke-width="1"/>
-<path d="M144.489 55.289 Q159.5 64.977 209.592 126.502" fill="none" stroke="#00003b" stroke-opacity="0.588" stroke-width="1"/>
-<path d="M271 212 Q166.286 140.125 85.23 110.166" fill="none" stroke="#5b3735" stroke-opacity="0.839" stroke-width="1"/>
-<path d="M206.472 18.788 Q-16 -13.745 2.084 162.533" fill="none" stroke="#ffeea7" stroke-opacity="0.863" stroke-width="1"/>
-<path d="M85.101 101.951 Q150.119 167.829 243.078 200.098" fill="none" stroke="#4c2422" stroke-opacity="0.71" stroke-width="1"/>
-<path d="M198.124 93.583 Q168.396 71.877 165.693 68.121" fill="none" stroke="#000002" stroke-opacity="0.961" stroke-width="1"/>
-<path d="M125.182 76.825 Q146.149 88.264 149.195 57.754" fill="none" stroke="#00000d" stroke-width="1"/>
-<path d="M152.706 68.866 Q162.564 -16 4.617 4.479" fill="none" stroke="#ffe8af" stroke-opacity="0.996" stroke-width="1"/>
-<path d="M90.059 117.166 Q150.943 149.04 227.153 193.694" fill="none" stroke="#2d081a" stroke-opacity="0.549" stroke-width="1"/>
-<path d="M186.956 193.365 Q237.817 134.126 271 165.573" fill="none" stroke="#3a2527" stroke-width="1"/>
-<path d="M258.721 161.518 Q167.646 188.891 154.59 190.942" fill="none" stroke="#5d3d33" stroke-width="1"/>
-<path d="M153.988 195.842 Q116.758 134.833 170.777 126.37" fill="none" stroke="#5e3625" stroke-width="1"/>
-<path d="M0.588 -2.14 Q9.25 66.057 206.7 9.921" fill="none" stroke="#ffe5a7" stroke-opacity="0.988" stroke-width="1"/>
-<path d="M5.075 7.46 Q117.891 -16 140.355 71.355" fill="none" stroke="#fffcc7" stroke-opacity="0.718" stroke-width="1"/>
-<path d="M239.604 160.618 Q256.234 157.936 253.826 195.865" fill="none" stroke="#0e0000" stroke-width="1"/>
-<path d="M206.127 31.097 Q89.844 31.315 -16 30.802" fill="none" stroke="#fffcc2" stroke-opacity="0.835" stroke-width="1"/>
-<path d="M126.282 64.365 Q142.439 75.574 133.015 87.124" fill="none" stroke="#000000" stroke-width="1"/>
-<path d="M169.799 65.227 Q216.374 89.244 239.632 210.065" fill="none" stroke="#10112f" stroke-opacity="0.69" stroke-width="1"/>
-<path d="M100.558 122.644 Q171.215 102.247 193.283 176.261" fill="none" stroke="#0f0024" stroke-opacity="0.502" stroke-width="1"/>
-<path d="M198.794 97.231 Q129.206 104.776 170.027 212" fill="none" stroke="#070023" stroke-opacity="0.471" stroke-width="1"/>
-<path d="M125.029 159.146 Q197.421 211.052 271 191.237" fill="none" stroke="#220015" stroke-opacity="0.494" stroke-width="1"/>
-<path d="M194.8 10.841 Q36.427 50.636 -2.814 -0.769" fill="none" stroke="#fff8bd" stroke-opacity="0.741" stroke-width="1"/>
-<path d="M193.298 18.329 Q128.054 44.364 -16 34.551" fill="none" stroke="#ffe9ab" stroke-opacity="0.933" stroke-width="1"/>
-<path d="M105.551 103.023 Q161.232 212 271 159.894" fill="none" stroke="#5a332c" stroke-opacity="0.784" stroke-width="1"/>
-<path d="M150.122 79.935 Q118.244 79.579 122.31 64.346" fill="none" stroke="#0c0005" stroke-width="1"/>
-<path d="M-16 58.086 Q130.387 12.695 138.396 73.415" fill="none" stroke="#ffffc6" stroke-opacity="0.627" stroke-width="1"/>
-<path d="M124.812 81.743 Q152.987 81.041 138.265 55.927" fill="none" stroke="#0b0815" stroke-width="1"/>
-<path d="M4.018 163.542 Q-12.151 -14.441 208.207 23.115" fill="none" stroke="#ffe69f" stroke-opacity="0.914" stroke-width="1"/>
-<path d="M174.624 117.255 Q104.347 149.433 154.06 191.772" fill="none" stroke="#66402e" stroke-width="1"/>
-<path d="M179.352 95.172 Q175.439 103.552 214.522 118.319" fill="none" stroke="#0f0c14" stroke-opacity="0.957" stroke-width="1"/>
-<path d="M7.831 180.804 Q-16 -16 209.073 26.065" fill="none" stroke="#ffe098" stroke-width="1"/>
-<path d="M-16 29.449 Q130.55 15.477 259.663 -11.847" fill="none" stroke="#ffe29d" stroke-width="1"/>
-<path d="M252.704 66.483 Q54.717 12.097 -16 -3.369" fill="none" stroke="#ffdb97" stroke-width="1"/>
-<path d="M161.528 61.226 Q54.718 8.713 -16 1.303" fill="none" stroke="#ffffd6" stroke-opacity="0.592" stroke-width="1"/>
-<path d="M104.286 102.426 Q118.72 158.461 189.485 193.637" fill="none" stroke="#491b17" stroke-opacity="0.573" stroke-width="1"/>
-<path d="M93.105 106.262 Q97.852 118.355 188.633 160.402" fill="none" stroke="#63342a" stroke-opacity="0.733" stroke-width="1"/>
-<path d="M137.044 52.6 Q188.438 91.947 191.704 87.316" fill="none" stroke="#181c2f" stroke-width="1"/>
-<path d="M147.276 72.425 Q189.538 24.457 112.157 -1.127" fill="none" stroke="#ffdda6" stroke-width="1"/>
-<path d="M224.965 197.701 Q266.387 189.707 242.094 147.354" fill="none" stroke="#321d14" stroke-opacity="0.965" stroke-width="1"/>
-<path d="M109.457 141.021 Q151.195 186.797 271 179.344" fill="none" stroke="#431d20" stroke-opacity="0.522" stroke-width="1"/>
-<path d="M193.583 24.695 Q15.973 64.441 -12.086 23.216" fill="none" stroke="#ffe19f" stroke-opacity="0.996" stroke-width="1"/>
-<path d="M271 74.745 Q241.178 50.722 -15.008 -4.016" fill="none" stroke="#ffdb97" stroke-opacity="0.973" stroke-width="1"/>
-<path d="M192.648 182.009 Q174.125 101.913 95.959 124.677" fill="none" stroke="#3a192c" stroke-opacity="0.592" stroke-width="1"/>
-<path d="M169.543 129.58 Q199.147 144.609 214.898 161.175" fill="none" stroke="#ffffff" stroke-opacity="0.761" stroke-width="1"/>
-<path d="M131.457 61.099 Q187.786 105.405 223.739 147.703" fill="none" stroke="#b0beff" stroke-opacity="0.525" stroke-width="1"/>
-<path d="M206.024 11.074 Q97.762 4.813 -16 29.791" fill="none" stroke="#fffbb6" stroke-opacity="0.624" stroke-width="1"/>
-<path d="M205.823 34.149 Q104.404 40.119 -9.349 57.286" fill="none" stroke="#ffeea7" stroke-opacity="0.706" stroke-width="1"/>
-<path d="M-6.852 124.291 Q13.137 -16 204.277 8.395" fill="none" stroke="#ffe295" stroke-opacity="0.914" stroke-width="1"/>
-<path d="M137.112 86.864 Q119.951 82.005 133.828 65.728" fill="none" stroke="#000000" stroke-width="1"/>
-<path d="M250.802 212 Q216.926 152.95 217.962 152.368" fill="none" stroke="#2a1511" stroke-opacity="0.992" stroke-width="1"/>
-<path d="M4.065 -11.769 Q-16 210.119 130.572 171.623" fill="none" stroke="#ffdc6e" stroke-width="1"/>
-<path d="M253.539 203.799 Q260.568 155.309 239.551 156.84" fill="none" stroke="#261108" stroke-width="1"/>
-<path d="M152.018 75.048 Q135.98 86.966 124.318 63.44" fill="none" stroke="#170e11" stroke-opacity="0.976" stroke-width="1"/>
-<path d="M181.772 95.666 Q182.998 105.622 204.414 97.931" fill="none" stroke="#00000a" stroke-width="1"/>
-<path d="M212.676 188.86 Q150.513 194.54 103.271 105.17" fill="none" stroke="#62372b" stroke-opacity="0.663" stroke-width="1"/>
-<path d="M-2.625 -15.548 Q-4.005 82.611 206.969 36.494" fill="none" stroke="#ffdb92" stroke-width="1"/>
-<path d="M-2.035 13.24 Q100.781 -3.728 213.521 2.461" fill="none" stroke="#ffe295" stroke-opacity="0.914" stroke-width="1"/>
-<path d="M182.263 197.266 Q127.738 138.243 184.672 116.948" fill="none" stroke="#987160" stroke-width="1"/>
-<path d="M10.464 176.055 Q-16 32.839 195.142 4.169" fill="none" stroke="#ffdf92" stroke-opacity="0.929" stroke-width="1"/>
-<path d="M158.723 112.521 Q139.797 83.355 134.236 56.687" fill="none" stroke="#fcffff" stroke-opacity="0.553" stroke-width="1"/>
-<path d="M247.072 209.91 Q228.715 172.205 271 114.528" fill="none" stroke="#060002" stroke-opacity="0.624" stroke-width="1"/>
-<path d="M185.166 200.197 Q146.274 140.109 177.551 88.05" fill="none" stroke="#84625a" stroke-opacity="0.831" stroke-width="1"/>
-<path d="M141.63 53.358 Q152.346 85.404 144.28 87.044" fill="none" stroke="#1d1b26" stroke-opacity="0.996" stroke-width="1"/>
-<path d="M185.648 33.116 Q87.668 32.36 -16 34.035" fill="none" stroke="#ffebad" stroke-opacity="0.824" stroke-width="1"/>
-<path d="M240.072 166.893 Q238.713 159.515 156.734 84.897" fill="none" stroke="#c5caff" stroke-opacity="0.514" stroke-width="1"/>
-<path d="M160.721 69.892 Q169.846 212 252.207 182.526" fill="none" stroke="#715454" stroke-opacity="0.843" stroke-width="1"/>
-<path d="M89.605 112.023 Q139.576 173.114 168.058 120.665" fill="none" stroke="#613921" stroke-width="1"/>
-<path d="M170.983 187.382 Q155.885 97.516 205.875 103.199" fill="none" stroke="#ad938e" stroke-width="1"/>
-<path d="M-5.616 16.058 Q153.837 -16 204.794 99.091" fill="none" stroke="#ffdd91" stroke-opacity="0.82" stroke-width="1"/>
-<path d="M126.838 160.17 Q-11.954 201.006 5.511 4.106" fill="none" stroke="#ffdb6b" stroke-width="1"/>
-<path d="M0.688 198.516 Q84.581 144.834 131.515 -6.952" fill="none" stroke="#ffdb6b" stroke-opacity="0.894" stroke-width="1"/>
-<path d="M170.664 65.917 Q173.998 112.847 204.689 107.127" fill="none" stroke="#000006" stroke-opacity="0.576" stroke-width="1"/>
-<path d="M148.18 51.488 Q157.114 93.734 218.812 135.622" fill="none" stroke="#c3c0dd" stroke-opacity="0.651" stroke-width="1"/>
-<path d="M89.843 101.515 Q127.854 137.672 229.803 212" fill="none" stroke="#774937" stroke-opacity="0.784" stroke-width="1"/>
-<path d="M257.54 140.361 Q205.992 171.117 214.642 184.036" fill="none" stroke="#0c0214" stroke-opacity="0.722" stroke-width="1"/>
-<path d="M-16 19.959 Q35.89 42.108 189.412 10.436" fill="none" stroke="#ffe7aa" stroke-opacity="0.816" stroke-width="1"/>
-<path d="M158.42 202.389 Q142.968 160.383 104.384 131.735" fill="none" stroke="#652f12" stroke-opacity="0.694" stroke-width="1"/>
-<path d="M10.405 170.55 Q-2.629 -12.798 202.879 57.551" fill="none" stroke="#ffe594" stroke-opacity="0.776" stroke-width="1"/>
-<path d="M163.602 212 Q65.666 86.574 -16 -1.749" fill="none" stroke="#ffd76d" stroke-opacity="0.976" stroke-width="1"/>
-<path d="M263.262 76.113 Q136.726 27.035 -2.27 59.851" fill="none" stroke="#ffda87" stroke-opacity="0.91" stroke-width="1"/>
-<path d="M203.931 13.424 Q-16 56.345 15.648 190.91" fill="none" stroke="#ffd784" stroke-opacity="0.996" stroke-width="1"/>
-<path d="M170.806 209.7 Q-16 96.345 12.24 8.945" fill="none" stroke="#ffd766" stroke-width="1"/>
-<path d="M168.049 65.94 Q202.627 78.12 205.392 119.041" fill="none" stroke="#000035" stroke-opacity="0.467" stroke-width="1"/>
-<path d="M134.113 66.234 Q161.275 129.702 210.545 107.599" fill="none" stroke="#c4b4b8" stroke-opacity="0.843" stroke-width="1"/>
-<path d="M195.743 37.177 Q-16 41.405 19.85 212" fill="none" stroke="#ffd67d" stroke-width="1"/>
-<path d="M252.514 212 Q154.973 113.867 87.159 93.979" fill="none" stroke="#9d7b88" stroke-opacity="0.608" stroke-width="1"/>
-<path d="M197.192 95.568 Q159.672 94.124 165.76 75.025" fill="none" stroke="#c9c3d9" stroke-width="1"/>
-<path d="M137.042 2.573 Q0.855 2.958 -0.219 120.365" fill="none" stroke="#fff29f" stroke-opacity="0.643" stroke-width="1"/>
-<path d="M240.703 198.027 Q131.168 105.749 102.23 116.239" fill="none" stroke="#886159" stroke-opacity="0.804" stroke-width="1"/>
-<path d="M4.403 194.058 Q-16 -6.337 206.498 31.991" fill="none" stroke="#ffda90" stroke-opacity="0.957" stroke-width="1"/>
-<path d="M258.72 139.113 Q225.158 163.381 260.165 193.863" fill="none" stroke="#2a1715" stroke-opacity="0.769" stroke-width="1"/>
-<path d="M142.271 57.96 Q138.099 143.838 164.099 212" fill="none" stroke="#684644" stroke-opacity="0.671" stroke-width="1"/>
-<path d="M-14.677 4.818 Q81.56 -16 247.284 59.019" fill="none" stroke="#ffe1a7" stroke-opacity="0.714" stroke-width="1"/>
-<path d="M124.291 64.868 Q126.015 87.182 141.651 78.996" fill="none" stroke="#060000" stroke-width="1"/>
-<path d="M112.573 90.592 Q63.139 126.78 -16 206.538" fill="none" stroke="#ffd66b" stroke-opacity="0.91" stroke-width="1"/>
-<path d="M103.213 104.177 Q196.278 168.457 167.687 197.111" fill="none" stroke="#b38162" stroke-width="1"/>
-<path d="M146.611 196.812 Q-0.017 138.797 6.065 21.841" fill="none" stroke="#ffd55c" stroke-width="1"/>
-<path d="M200.511 10.426 Q100.824 -16 -2.791 53.17" fill="none" stroke="#ffdd96" stroke-opacity="0.878" stroke-width="1"/>
-<path d="M126.115 159.578 Q-16 190.876 15.557 11.139" fill="none" stroke="#ffdb68" stroke-opacity="0.957" stroke-width="1"/>
-<path d="M203.086 196.378 Q179.382 104.802 148.02 65.815" fill="none" stroke="#b19695" stroke-opacity="0.753" stroke-width="1"/>
-<path d="M20.775 6.086 Q-16 86.216 144.107 188.739" fill="none" stroke="#ffd769" stroke-width="1"/>
-<path d="M14.056 171.492 Q-9.083 17.612 199.309 45.486" fill="none" stroke="#ffe28f" stroke-opacity="0.714" stroke-width="1"/>
-<path d="M160.837 111.689 Q90.895 81.041 -13.709 -16" fill="none" stroke="#ffe394" stroke-opacity="0.804" stroke-width="1"/>
-<path d="M118.314 70.724 Q134.729 98.266 155.506 68.259" fill="none" stroke="#503a2e" stroke-opacity="0.988" stroke-width="1"/>
-<path d="M-15.103 32.731 Q63.707 10.897 181.795 11.19" fill="none" stroke="#ffefb1" stroke-opacity="0.596" stroke-width="1"/>
-<path d="M176.278 133.803 Q196.583 139.395 214.658 164.479" fill="none" stroke="#ffffff" stroke-opacity="0.698" stroke-width="1"/>
-<path d="M217.399 212 Q193.59 200.303 108.145 125.64" fill="none" stroke="#613a28" stroke-width="1"/>
-<path d="M255.372 -7.724 Q254.625 128.793 212.464 121.877" fill="none" stroke="#ffc95c" stroke-width="1"/>
-<path d="M103.088 47.565 Q60.498 205.003 2.474 195.776" fill="none" stroke="#ffd355" stroke-opacity="0.98" stroke-width="1"/>
-<path d="M22.406 201.374 Q-14.75 59.638 192.216 37.542" fill="none" stroke="#ffd579" stroke-opacity="0.957" stroke-width="1"/>
-<path d="M128.011 107.369 Q211.918 99.488 212.277 108.728" fill="none" stroke="#d8c6ba" stroke-opacity="0.894" stroke-width="1"/>
-<path d="M234.846 196.197 Q133.944 114.923 117.02 103.305" fill="none" stroke="#876362" stroke-opacity="0.698" stroke-width="1"/>
-<path d="M138.33 55.39 Q146.319 57.451 144.965 90.751" fill="none" stroke="#000018" stroke-opacity="0.573" stroke-width="1"/>
-<path d="M215.017 129.173 Q168.678 93.364 172.209 82.049" fill="none" stroke="#080b27" stroke-opacity="0.549" stroke-width="1"/>
-<path d="M9.789 11.035 Q-16 172.171 124.553 158.217" fill="none" stroke="#ffda66" stroke-opacity="0.945" stroke-width="1"/>
-<path d="M268.853 159.259 Q213.079 211.214 142.11 180.729" fill="none" stroke="#5a352c" stroke-opacity="0.639" stroke-width="1"/>
-<path d="M197.091 93.431 Q163.287 88.481 171.381 70.933" fill="none" stroke="#1e2339" stroke-opacity="0.992" stroke-width="1"/>
-<path d="M-7.229 15.285 Q-6.927 19.718 188.891 4.169" fill="none" stroke="#ffda94" stroke-width="1"/>
-<path d="M69.682 53.752 Q123.619 192.477 0.475 194.63" fill="none" stroke="#ffcf52" stroke-width="1"/>
-<path d="M253.017 87.266 Q53.474 -6.213 9.863 24.6" fill="none" stroke="#ffe091" stroke-opacity="0.737" stroke-width="1"/>
-<path d="M152.079 191.209 Q247.702 144.911 257.426 177.451" fill="none" stroke="#5e4038" stroke-opacity="0.996" stroke-width="1"/>
-<path d="M135.844 52.913 Q3.857 107.912 108.612 196.877" fill="none" stroke="#ffca3b" stroke-opacity="0.753" stroke-width="1"/>
-<path d="M89.863 109.863 Q99.352 134.736 182.509 212" fill="none" stroke="#552b0e" stroke-opacity="0.69" stroke-width="1"/>
-<path d="M163.642 199.844 Q154.897 180.782 148.706 108.085" fill="none" stroke="#603a36" stroke-opacity="0.663" stroke-width="1"/>
-<path d="M-7.078 36.741 Q57.17 12.733 207.929 27.234" fill="none" stroke="#ffeeba" stroke-opacity="0.557" stroke-width="1"/>
-<path d="M117.612 122.84 Q151.873 70.322 207.076 -16" fill="none" stroke="#f8cb9d" stroke-opacity="0.678" stroke-width="1"/>
-<path d="M27.901 194.901 Q-16 93.601 168.546 34.277" fill="none" stroke="#ffd273" stroke-width="1"/>
-<path d="M138.986 48.99 Q165.204 67.252 166.749 64.804" fill="none" stroke="#ebf3ff" stroke-width="1"/>
-<path d="M89.354 51.485 Q88.174 212 -0.971 184.18" fill="none" stroke="#ffd154" stroke-width="1"/>
-<path d="M176.504 196.035 Q138.939 98.013 193.075 92.378" fill="none" stroke="#a27b67" stroke-width="1"/>
-<path d="M171.614 33.514 Q16.086 42.935 1.186 36.5" fill="none" stroke="#ffe7a9" stroke-opacity="0.725" stroke-width="1"/>
-<path d="M167.544 207.15 Q190.603 202.384 150.378 65.925" fill="none" stroke="#ae897a" stroke-width="1"/>
-<path d="M229.087 155.354 Q207.968 174.589 249.062 200.777" fill="none" stroke="#231412" stroke-opacity="0.984" stroke-width="1"/>
-<path d="M131.318 61.771 Q140.011 78.24 124.148 78.958" fill="none" stroke="#020007" stroke-width="1"/>
-<path d="M162.713 212 Q59.683 86.967 -16 22.327" fill="none" stroke="#ffd467" stroke-width="1"/>
-<path d="M106.706 198.749 Q-6.192 115.366 125.387 55.334" fill="none" stroke="#ffcb4f" stroke-width="1"/>
-<path d="M3.548 52.002 Q64.903 170.814 187.056 212" fill="none" stroke="#ffd25c" stroke-width="1"/>
-<path d="M105.614 107.768 Q106.523 136.304 187.732 207.829" fill="none" stroke="#6f3d25" stroke-opacity="0.706" stroke-width="1"/>
-<path d="M144.009 189.016 Q22.161 88.439 5.744 2.518" fill="none" stroke="#ffd66d" stroke-opacity="0.945" stroke-width="1"/>
-<path d="M200.207 98.404 Q179.503 96.444 179.58 101.064" fill="none" stroke="#000009" stroke-width="1"/>
-<path d="M156.938 199.936 Q125.204 171.187 172.24 113.288" fill="none" stroke="#744f38" stroke-opacity="0.957" stroke-width="1"/>
-<path d="M67.205 54.107 Q-12.945 166.283 139.594 197.016" fill="none" stroke="#ffd055" stroke-opacity="0.914" stroke-width="1"/>
-<path d="M237.782 199.03 Q256.269 155.242 249.169 152.882" fill="none" stroke="#351f12" stroke-width="1"/>
-<path d="M159.221 112.346 Q150.442 93.15 146.141 90.465" fill="none" stroke="#fdffff" stroke-opacity="0.882" stroke-width="1"/>
-<path d="M210.863 188.03 Q209.31 186.793 242.838 146.251" fill="none" stroke="#2e1e1f" stroke-opacity="0.996" stroke-width="1"/>
-<path d="M212.784 18.165 Q18.961 -7.24 -0.281 14.127" fill="none" stroke="#ffe5a6" stroke-opacity="0.576" stroke-width="1"/>
-<path d="M252.191 147.086 Q161.04 93.52 228.107 -14.956" fill="none" stroke="#ffcb61" stroke-opacity="0.816" stroke-width="1"/>
-<path d="M34.275 212 Q-10.269 64.773 135.422 48.522" fill="none" stroke="#ffd373" stroke-opacity="0.992" stroke-width="1"/>
-<path d="M229.973 208.419 Q194.645 167.262 117.61 106.527" fill="none" stroke="#5e3f47" stroke-opacity="0.541" stroke-width="1"/>
-<path d="M191.389 88.311 Q172.036 62.097 163.508 71.446" fill="none" stroke="#090a15" stroke-width="1"/>
-<path d="M147.012 89.202 Q153.114 112.712 159.118 111.86" fill="none" stroke="#faffff" stroke-opacity="0.914" stroke-width="1"/>
-<path d="M214.875 134.51 Q234.903 8.293 20.056 5.13" fill="none" stroke="#ffe09a" stroke-opacity="0.584" stroke-width="1"/>
-<path d="M-13.805 -8.449 Q62.926 49.005 211.169 19.517" fill="none" stroke="#ffdca2" stroke-opacity="0.784" stroke-width="1"/>
-<path d="M255.864 184.61 Q208.41 136.244 150.161 114.376" fill="none" stroke="#5f454e" stroke-opacity="0.478" stroke-width="1"/>
-<path d="M26.807 0.301 Q137.911 38.209 249.647 68.222" fill="none" stroke="#ffd791" stroke-opacity="0.835" stroke-width="1"/>
-<path d="M179.102 192.26 Q102.237 96.469 93.837 94.315" fill="none" stroke="#9e6d54" stroke-opacity="0.765" stroke-width="1"/>
-<path d="M123.325 194.222 Q-7.188 187.778 1.2 42.418" fill="none" stroke="#ffdc68" stroke-opacity="0.824" stroke-width="1"/>
-<path d="M-16 15.059 Q9.407 76.572 206.135 39.187" fill="none" stroke="#ffd894" stroke-opacity="0.816" stroke-width="1"/>
-<path d="M153.616 36.641 Q88.5 53.237 30.037 199.61" fill="none" stroke="#ffd25f" stroke-opacity="0.894" stroke-width="1"/>
-<path d="M108.709 107.629 Q155.911 186.486 239.215 197.201" fill="none" stroke="#6c422e" stroke-opacity="0.714" stroke-width="1"/>
-<path d="M91.779 110.069 Q169.954 199.643 154.875 210.836" fill="none" stroke="#6d3f1f" stroke-width="1"/>
+<path d="M91.841 109.5 Q140.538 212 251.296 153.983" fill="none" stroke="#220907" stroke-opacity="0.749" stroke-width="2"/>
+<path d="M94.857 106.522 Q178.488 205.659 254.929 192.194" fill="none" stroke="#5b3723" stroke-width="2"/>
+<path d="M137.24 52.689 Q182.392 78.508 262.47 200.891" fill="none" stroke="#2d2833" stroke-opacity="0.937" stroke-width="2"/>
+<path d="M162.332 68.052 Q200.791 66.327 244.604 198.712" fill="none" stroke="#000018" stroke-opacity="0.733" stroke-width="2"/>
+<path d="M255.96 148.608 Q145.493 212 89.879 101.916" fill="none" stroke="#56362b" stroke-opacity="0.949" stroke-width="2"/>
+<path d="M98.684 106.099 Q176.986 209.832 271 162.041" fill="none" stroke="#4c2b1e" stroke-opacity="0.925" stroke-width="2"/>
+<path d="M259.115 193.588 Q181.79 212 93.637 108.265" fill="none" stroke="#472318" stroke-opacity="0.827" stroke-width="2"/>
+<path d="M200.692 95.462 Q140.333 42.129 122.332 76.449" fill="none" stroke="#141218" stroke-opacity="0.992" stroke-width="2"/>
+<path d="M144.268 185.695 Q261.295 212 254.752 138.563" fill="none" stroke="#57392a" stroke-width="2"/>
+<path d="M256.044 160.306 Q143.162 208.228 131.188 161.508" fill="none" stroke="#56362b" stroke-opacity="0.957" stroke-width="2"/>
+<path d="M96.742 107.015 Q197.866 208.403 257.351 185.257" fill="none" stroke="#6d432b" stroke-width="2"/>
+<path d="M121.989 80.053 Q142.628 47.785 188.685 88.736" fill="none" stroke="#00000e" stroke-opacity="0.863" stroke-width="2"/>
+<path d="M271 206.558 Q158.573 139.353 94.792 104.054" fill="none" stroke="#2f171a" stroke-opacity="0.675" stroke-width="2"/>
+<path d="M213.054 128.867 Q179.088 40.24 122.418 78.93" fill="none" stroke="#00021b" stroke-opacity="0.776" stroke-width="2"/>
+<path d="M256.395 156.829 Q244.864 211.952 147.331 189.324" fill="none" stroke="#341512" stroke-opacity="0.702" stroke-width="2"/>
+<path d="M123.579 81.765 Q184.419 36.033 215.767 128.366" fill="none" stroke="#37313c" stroke-opacity="0.988" stroke-width="2"/>
+<path d="M134.737 167.053 Q204.718 211.571 250.81 153.982" fill="none" stroke="#5f3f36" stroke-opacity="0.937" stroke-width="2"/>
+<path d="M91.072 117.19 Q204.63 160.512 256.321 206.299" fill="none" stroke="#472b2b" stroke-opacity="0.592" stroke-width="2"/>
+<path d="M126.997 81.524 Q153.15 64.289 209.454 127.114" fill="none" stroke="#00000a" stroke-opacity="0.675" stroke-width="2"/>
+<path d="M265.267 196.587 Q138.263 130.808 144.848 118.116" fill="none" stroke="#4e353c" stroke-opacity="0.686" stroke-width="2"/>
+<path d="M89.019 112.396 Q138.726 149.487 163.581 196.19" fill="none" stroke="#592f17" stroke-opacity="0.851" stroke-width="2"/>
+<path d="M255.915 146.35 Q180.029 179.652 129.67 211.843" fill="none" stroke="#573d38" stroke-opacity="0.996" stroke-width="2"/>
+<path d="M171.446 116.905 Q120.539 175.465 195.627 190.782" fill="none" stroke="#6a4836" stroke-width="2"/>
+<path d="M98.719 105.834 Q177.403 187.76 259.268 183.51" fill="none" stroke="#411d1d" stroke-opacity="0.557" stroke-width="2"/>
+<path d="M134.6 85.626 Q158.406 65.876 138.265 54.911" fill="none" stroke="#211a1d" stroke-width="2"/>
+<path d="M137.603 80.427 Q142.009 0.017 -2.966 0.674" fill="none" stroke="#ffdba2" stroke-opacity="0.98" stroke-width="2"/>
+<path d="M126.564 159.255 Q171.109 197.033 256.631 155.15" fill="none" stroke="#613f30" stroke-opacity="0.961" stroke-width="2"/>
+<path d="M157.416 63.815 Q206.2 111.829 267.602 197.579" fill="none" stroke="#232033" stroke-opacity="0.678" stroke-width="2"/>
+<path d="M202.41 99.447 Q179.937 105.383 120.439 66.411" fill="none" stroke="#06030e" stroke-opacity="0.608" stroke-width="2"/>
+<path d="M214.752 196.034 Q176.453 140.664 126.912 120.943" fill="none" stroke="#7f5845" stroke-width="2"/>
+<path d="M210.546 17.882 Q-16 -12.991 3.787 174.414" fill="none" stroke="#ffd690" stroke-width="2"/>
+<path d="M-1.05 1.04 Q16.658 60.046 202.704 12.252" fill="none" stroke="#ffd89b" stroke-width="2"/>
+<path d="M253.405 151.418 Q241.995 208.201 140.788 182.153" fill="none" stroke="#57382d" stroke-opacity="0.835" stroke-width="2"/>
+<path d="M151.786 72.526 Q169.422 -4.521 24.543 1.033" fill="none" stroke="#fedcaa" stroke-width="2"/>
+<path d="M137.343 84.796 Q117.436 72.81 131.891 62.163" fill="none" stroke="#0f0807" stroke-opacity="0.996" stroke-width="2"/>
+<path d="M153.537 196.417 Q153.082 181.719 86.633 111.943" fill="none" stroke="#633b1f" stroke-opacity="0.973" stroke-width="2"/>
+<path d="M208.392 20.597 Q77.165 43.319 0.35 33.404" fill="none" stroke="#ffd59c" stroke-opacity="0.984" stroke-width="2"/>
+<path d="M204.428 8.922 Q14.359 61.336 -5.583 -11.867" fill="none" stroke="#ffd89a" stroke-opacity="0.996" stroke-width="2"/>
+<path d="M1.117 143.519 Q-8.097 -3.567 200.972 10.434" fill="none" stroke="#ffd792" stroke-opacity="0.988" stroke-width="2"/>
+<path d="M254.486 197.601 Q256.977 147.03 218.713 160.965" fill="none" stroke="#2a1812" stroke-opacity="0.886" stroke-width="2"/>
+<path d="M117.59 119.306 Q180.804 117.136 191.643 174.627" fill="none" stroke="#4c3139" stroke-opacity="0.698" stroke-width="2"/>
+<path d="M203.646 9.125 Q-14.748 -16 2.526 115.186" fill="none" stroke="#ffd389" stroke-opacity="0.996" stroke-width="2"/>
+<path d="M164.45 66.925 Q138.648 33.227 -14.665 42.533" fill="none" stroke="#ffe6c2" stroke-opacity="0.776" stroke-width="2"/>
+<path d="M6.674 3.852 Q65.57 4.674 265.272 79.532" fill="none" stroke="#ffd28b" stroke-opacity="0.996" stroke-width="2"/>
+<path d="M176.461 191.36 Q250.666 208.101 255.915 163.613" fill="none" stroke="#5c3c2a" stroke-opacity="0.988" stroke-width="2"/>
+<path d="M212.177 180.683 Q245.879 135.274 261.597 147.121" fill="none" stroke="#09021d" stroke-opacity="0.678" stroke-width="2"/>
+<path d="M206.431 24.177 Q12.863 53.291 -16 41.168" fill="none" stroke="#ffd497" stroke-width="2"/>
+<path d="M127.734 63.097 Q113.755 74.274 134.637 86.062" fill="none" stroke="#241714" stroke-opacity="0.98" stroke-width="2"/>
+<path d="M208.254 109.685 Q135.731 132.002 152.49 57.937" fill="none" stroke="#d8c6ba" stroke-opacity="0.976" stroke-width="2"/>
+<path d="M224.026 191.885 Q123.463 166.931 86.688 103.709" fill="none" stroke="#563220" stroke-opacity="0.769" stroke-width="2"/>
+<path d="M0.229 -0.525 Q37.122 51.314 190.304 10.155" fill="none" stroke="#ffd79a" stroke-width="2"/>
+<path d="M202.575 106.874 Q179.348 113.843 171.224 77.595" fill="none" stroke="#000012" stroke-opacity="0.678" stroke-width="2"/>
+<path d="M182.523 209.177 Q115.971 143.73 170.403 115.009" fill="none" stroke="#7c543a" stroke-width="2"/>
+<path d="M198.176 42.114 Q-15.607 16.169 6.72 167.556" fill="none" stroke="#ffd48d" stroke-width="2"/>
+<path d="M186.746 208.995 Q175.976 166.712 92.61 93.877" fill="none" stroke="#6b493c" stroke-opacity="0.82" stroke-width="2"/>
+<path d="M129.767 58.817 Q225.041 138.3 237.007 169.515" fill="none" stroke="#c4bfdf" stroke-opacity="0.604" stroke-width="2"/>
+<path d="M9.664 171.952 Q-16 14.657 206.964 45.771" fill="none" stroke="#ffd28a" stroke-opacity="0.992" stroke-width="2"/>
+<path d="M212.033 163.289 Q203.192 143.948 171.625 131.114" fill="none" stroke="#fbffff" stroke-opacity="0.776" stroke-width="2"/>
+<path d="M128.651 82.019 Q150.425 81.325 138.72 56.014" fill="none" stroke="#0d0a12" stroke-width="2"/>
+<path d="M126.981 62.172 Q178.629 79.45 171.437 199.547" fill="none" stroke="#987368" stroke-opacity="0.714" stroke-width="2"/>
+<path d="M257.083 79.253 Q64.101 7.862 4.919 5.672" fill="none" stroke="#ffd28a" stroke-opacity="0.965" stroke-width="2"/>
+<path d="M3.785 9.481 Q-14.318 132.802 147.393 190.996" fill="none" stroke="#ffcf62" stroke-opacity="0.996" stroke-width="2"/>
+<path d="M-11.798 35.114 Q139.538 1.867 201.349 2.185" fill="none" stroke="#ffd590" stroke-width="2"/>
+<path d="M-15.621 46.279 Q47.603 49.15 266.87 48.415" fill="none" stroke="#ffcf87" stroke-opacity="0.988" stroke-width="2"/>
+<path d="M90.023 101.278 Q156.809 112.063 243.84 204.827" fill="none" stroke="#ae867a" stroke-opacity="0.812" stroke-width="2"/>
+<path d="M141.968 100.351 Q138.069 97.185 157.752 63.493" fill="none" stroke="#0c0e36" stroke-opacity="0.655" stroke-width="2"/>
+<path d="M161.641 84.454 Q177.424 96.133 199.302 95.384" fill="none" stroke="#f1f3ff" stroke-opacity="0.655" stroke-width="2"/>
+<path d="M-5.997 42.313 Q63.796 80.658 204.806 23.417" fill="none" stroke="#ffcf89" stroke-opacity="0.996" stroke-width="2"/>
+<path d="M147.824 194.335 Q-16 212 28.692 9.725" fill="none" stroke="#ffd06c" stroke-opacity="0.922" stroke-width="2"/>
+<path d="M144.959 188.075 Q-14.074 119.628 6.625 12.43" fill="none" stroke="#ffd166" stroke-opacity="0.953" stroke-width="2"/>
+<path d="M186.746 165.369 Q246.125 202.778 253.793 139.432" fill="none" stroke="#50392e" stroke-opacity="0.996" stroke-width="2"/>
+<path d="M4.177 2.715 Q49.474 45.011 181.375 10.003" fill="none" stroke="#ffd899" stroke-opacity="0.984" stroke-width="2"/>
+<path d="M217.403 122.399 Q145.823 122.519 134.417 58.213" fill="none" stroke="#ddc9c7" stroke-opacity="0.643" stroke-width="2"/>
+<path d="M231.222 39.733 Q256.619 106.877 191.822 103.623" fill="none" stroke="#facc7c" stroke-width="2"/>
+<path d="M157.386 68.594 Q154.544 95.335 218.022 134.72" fill="none" stroke="#c1adaa" stroke-opacity="0.906" stroke-width="2"/>
+<path d="M150.635 195.097 Q-16 137.058 1.318 11.553" fill="none" stroke="#ffce60" stroke-opacity="0.973" stroke-width="2"/>
+<path d="M233.108 196.197 Q122.292 134.173 102.3 104.524" fill="none" stroke="#603736" stroke-opacity="0.529" stroke-width="2"/>
+<path d="M142.307 184.013 Q-16 113.644 10.506 7.728" fill="none" stroke="#ffd069" stroke-width="2"/>
+<path d="M-14.977 37.617 Q114.811 -14.821 203.92 7.639" fill="none" stroke="#ffd188" stroke-width="2"/>
+<path d="M-15.145 196.058 Q130.818 197.445 62.909 58.98" fill="none" stroke="#ffc953" stroke-opacity="0.996" stroke-width="2"/>
+<path d="M252.994 140 Q212.506 208.476 127.167 155.233" fill="none" stroke="#654539" stroke-opacity="0.863" stroke-width="2"/>
+<path d="M218.426 -4.673 Q97.964 91.824 -0.314 48.338" fill="none" stroke="#ffce81" stroke-width="2"/>
+<path d="M138.049 179.215 Q21.601 128.785 9.1 14.021" fill="none" stroke="#ffd26b" stroke-opacity="0.957" stroke-width="2"/>
+<path d="M204.412 41.776 Q27.873 -3.155 -1.901 2.937" fill="none" stroke="#fed395" stroke-width="2"/>
+<path d="M147.201 89.709 Q153.154 111.527 159.665 111.577" fill="none" stroke="#f7f6f6" stroke-opacity="0.984" stroke-width="2"/>
+<path d="M-0.646 193.884 Q131.668 176.212 51.89 63.528" fill="none" stroke="#ffca55" stroke-opacity="0.996" stroke-width="2"/>
+<path d="M163.563 15.361 Q-16 11.211 16.795 190.436" fill="none" stroke="#ffd488" stroke-opacity="0.996" stroke-width="2"/>
+<path d="M205.367 19.128 Q58.424 36.852 15.218 72.491" fill="none" stroke="#ffd290" stroke-width="2"/>
+<path d="M150.054 210.847 Q185.045 75.209 142.385 53.942" fill="none" stroke="#785a52" stroke-opacity="0.69" stroke-width="2"/>
+<path d="M114.335 50.19 Q-15.897 44.551 23.446 203.167" fill="none" stroke="#ffd27c" stroke-width="2"/>
+<path d="M27.566 194.761 Q-15.772 62.339 119.947 59.41" fill="none" stroke="#ffcf74" stroke-width="2"/>
+<path d="M0.433 191.207 Q129.337 171.4 47.073 65.374" fill="none" stroke="#ffca58" stroke-width="2"/>
+<path d="M242.655 196.331 Q235.294 190.35 218.135 152.003" fill="none" stroke="#200f0b" stroke-opacity="0.682" stroke-width="2"/>
+<path d="M182.855 96.321 Q196.597 115.377 215.276 118.908" fill="none" stroke="#000000" stroke-opacity="0.576" stroke-width="2"/>
+<path d="M201.66 196.672 Q200.384 168.647 146.155 63.393" fill="none" stroke="#ad8e8a" stroke-opacity="0.627" stroke-width="2"/>
+<path d="M180.036 184.749 Q124.487 104.284 117.725 101.035" fill="none" stroke="#a77a5c" stroke-width="2"/>
+<path d="M136.864 82.713 Q136.109 63.276 119.66 72.926" fill="none" stroke="#1a1310" stroke-width="2"/>
+<path d="M161.245 4.012 Q-12.115 -14.757 1.668 86.754" fill="none" stroke="#ffd48a" stroke-width="2"/>
+<path d="M32.34 199.155 Q-15.866 66.605 118.683 61.894" fill="none" stroke="#ffcd70" stroke-width="2"/>
+<path d="M241.132 155.41 Q271 178.998 238.354 193.368" fill="none" stroke="#382110" stroke-opacity="0.816" stroke-width="2"/>
+<path d="M35.395 190.973 Q-15.976 94.278 152.506 43.096" fill="none" stroke="#ffcc6f" stroke-width="2"/>
+<path d="M193.357 91.622 Q160.002 82.139 143.655 184.561" fill="none" stroke="#795a4f" stroke-opacity="0.624" stroke-width="2"/>
+<path d="M234.235 154.432 Q271 43.832 91.62 45.614" fill="none" stroke="#ffca73" stroke-opacity="0.945" stroke-width="2"/>
+<path d="M173.253 119.701 Q105.516 158.889 159.914 196.812" fill="none" stroke="#724a2f" stroke-width="2"/>
+<path d="M72.671 197.731 Q-14.442 105.965 118.343 63.051" fill="none" stroke="#ffc95d" stroke-width="2"/>
+<path d="M144.994 119.758 Q193.947 127.786 240.939 167.336" fill="none" stroke="#95745f" stroke-opacity="0.686" stroke-width="2"/>
+<path d="M158.758 197.478 Q212.512 166.454 142.825 107.165" fill="none" stroke="#8c614e" stroke-opacity="0.933" stroke-width="2"/>
+<path d="M266.559 61.554 Q55.866 31.495 -11.733 31.103" fill="none" stroke="#ffd18b" stroke-opacity="0.949" stroke-width="2"/>
+<path d="M138.562 193.973 Q10.668 170.214 95.506 66.554" fill="none" stroke="#fec754" stroke-width="2"/>
+<path d="M-3.17 40.121 Q62.7 130.224 134.099 174.299" fill="none" stroke="#ffcd64" stroke-width="2"/>
+<path d="M0.099 62.638 Q19.848 158.357 142.721 193.994" fill="none" stroke="#ffcd5c" stroke-opacity="0.902" stroke-width="2"/>
+<path d="M242.088 178.225 Q165.016 109.02 134.293 67.462" fill="none" stroke="#a88166" stroke-opacity="0.573" stroke-width="2"/>
+<path d="M131.13 170.67 Q74.594 90.684 31.499 180.574" fill="none" stroke="#ffd360" stroke-opacity="0.996" stroke-width="2"/>
+<path d="M149.072 110.299 Q140.763 160.824 244.867 179.879" fill="none" stroke="#3e242a" stroke-opacity="0.471" stroke-width="2"/>
+<path d="M227.247 153.999 Q259.815 155.042 253.828 -16" fill="none" stroke="#ffc14b" stroke-opacity="0.816" stroke-width="2"/>
+<path d="M254.665 154.801 Q216.927 150.709 211.738 191.498" fill="none" stroke="#090101" stroke-opacity="0.576" stroke-width="2"/>
+<path d="M168.176 11.984 Q84.255 -9.287 11.56 62.777" fill="none" stroke="#ffd591" stroke-width="2"/>
+<path d="M187.611 212 Q179.245 182.799 96.503 94.512" fill="none" stroke="#9a6d4f" stroke-width="2"/>
+<path d="M136.335 176.491 Q19.625 119.587 11.686 10.021" fill="none" stroke="#ffd26c" stroke-opacity="0.902" stroke-width="2"/>
+<path d="M177.448 206.186 Q156.93 124.414 177.284 81.192" fill="none" stroke="#9d7a66" stroke-width="2"/>
+<path d="M182.106 104.18 Q193.171 93.094 197.786 101.437" fill="none" stroke="#050209" stroke-opacity="0.871" stroke-width="2"/>
+<path d="M88.093 72.369 Q8.93 172.663 127.156 194.082" fill="none" stroke="#fdc551" stroke-width="2"/>
+<path d="M232.928 149.974 Q262.05 67.434 112.418 42.735" fill="none" stroke="#ffc96a" stroke-opacity="0.898" stroke-width="2"/>
+<path d="M262.704 86.995 Q224.88 12.18 -2.846 11.211" fill="none" stroke="#ffd18d" stroke-opacity="0.914" stroke-width="2"/>
+<path d="M95.004 204.963 Q-8.846 118.834 118.12 71.418" fill="none" stroke="#fec551" stroke-width="2"/>
+<path d="M133.377 63.677 Q124.061 79.188 141.644 79.772" fill="none" stroke="#120c08" stroke-width="2"/>
+<path d="M129.655 108.306 Q170.202 103.187 207.089 103.285" fill="none" stroke="#d6dbff" stroke-opacity="0.384" stroke-width="2"/>
+<path d="M149.678 83.555 Q145.618 67.469 140.898 55.741" fill="none" stroke="#201a1d" stroke-opacity="0.737" stroke-width="2"/>
+<path d="M132.628 51.772 Q14.558 144.503 95.53 197.812" fill="none" stroke="#ffc14c" stroke-opacity="0.984" stroke-width="2"/>
+<path d="M88.106 96.193 Q163.514 125.627 218.67 136.128" fill="none" stroke="#b69e96" stroke-opacity="0.773" stroke-width="2"/>
+<path d="M97.812 64.881 Q54.452 211.669 -4.752 178.712" fill="none" stroke="#ffca58" stroke-opacity="0.992" stroke-width="2"/>
+<path d="M200.241 -9.399 Q226.337 100.991 235.359 176.48" fill="none" stroke="#ffc972" stroke-opacity="0.537" stroke-width="2"/>
+<path d="M211.825 48.778 Q128.031 11.557 8.542 65.705" fill="none" stroke="#fed08d" stroke-width="2"/>
+<path d="M233.291 153.869 Q224.42 188.972 237.871 192.76" fill="none" stroke="#362729" stroke-opacity="0.824" stroke-width="2"/>
+<path d="M172.398 200.182 Q132.969 172.394 90.262 98.608" fill="none" stroke="#76482a" stroke-opacity="0.804" stroke-width="2"/>
+<path d="M167.744 131.097 Q219.039 152.564 213.081 163.293" fill="none" stroke="#f3e4c8" stroke-opacity="0.937" stroke-width="2"/>
+<path d="M8.219 123.032 Q74.104 3.696 143.702 105.573" fill="none" stroke="#ffca6e" stroke-opacity="0.984" stroke-width="2"/>
+<path d="M114.73 114.557 Q181.761 154.805 180.6 183.757" fill="none" stroke="#b17f58" stroke-opacity="0.925" stroke-width="2"/>
+<path d="M168.259 65.113 Q192.918 75.599 176.842 90.498" fill="none" stroke="#101026" stroke-opacity="0.725" stroke-width="2"/>
+<path d="M230.762 156.1 Q166.742 95.149 157.315 68.26" fill="none" stroke="#c3b7c1" stroke-opacity="0.639" stroke-width="2"/>
+<path d="M-6.016 185.04 Q63.279 126.792 124.143 82.798" fill="none" stroke="#ffd170" stroke-opacity="0.757" stroke-width="2"/>
+<path d="M238.714 146.645 Q265.53 42.829 236.856 -16" fill="none" stroke="#ffc251" stroke-opacity="0.871" stroke-width="2"/>
+<path d="M120.098 71.339 Q119.773 58.374 135.882 52.242" fill="none" stroke="#df1c00" stroke-opacity="0.541" stroke-width="2"/>
+<path d="M145.936 208.085 Q96.767 93.21 -14.077 54.9" fill="none" stroke="#feca64" stroke-width="2"/>
+<path d="M223.799 132.668 Q264.005 -15.521 68.804 6.374" fill="none" stroke="#ffcd81" stroke-opacity="0.871" stroke-width="2"/>
+<path d="M241.053 161.035 Q261.557 175.92 236.048 189.498" fill="none" stroke="#372213" stroke-opacity="0.867" stroke-width="2"/>
+<path d="M142.259 50.119 Q230.716 82.902 234.31 151.33" fill="none" stroke="#ffc357" stroke-opacity="0.886" stroke-width="2"/>
+<path d="M81.724 48.758 Q-4.326 147.269 62.457 197.841" fill="none" stroke="#ffca66" stroke-opacity="0.984" stroke-width="2"/>
+<path d="M240.941 -2.274 Q262.567 97.756 224.409 141.488" fill="none" stroke="#ffc452" stroke-opacity="0.769" stroke-width="2"/>
+<path d="M-4.184 193.44 Q77.453 96.45 120.321 163.575" fill="none" stroke="#ffcf61" stroke-opacity="0.996" stroke-width="2"/>
+<path d="M18.703 139.705 Q64.628 20.736 141.558 105.509" fill="none" stroke="#ffc867" stroke-width="2"/>
+<path d="M173.108 10.263 Q-10.034 48.478 -14.474 14.603" fill="none" stroke="#ffd798" stroke-width="2"/>
+<path d="M204.997 192.929 Q175.171 110.724 167.303 74.974" fill="none" stroke="#b6968a" stroke-opacity="0.553" stroke-width="2"/>
+<path d="M-14.431 27.223 Q51.514 16.274 190.565 9.695" fill="none" stroke="#ffd391" stroke-opacity="0.996" stroke-width="2"/>
+<path d="M-16 29.702 Q88.239 57.106 139.401 106.687" fill="none" stroke="#ffd17c" stroke-opacity="0.89" stroke-width="2"/>
+<path d="M63.814 77.272 Q129.057 175.769 22.693 196.362" fill="none" stroke="#fec852" stroke-opacity="0.973" stroke-width="2"/>
+<path d="M235.836 -14.434 Q260.513 99.315 223.624 136.373" fill="none" stroke="#ffc356" stroke-opacity="0.816" stroke-width="2"/>
+<path d="M60.943 181.744 Q11.626 83.423 121.969 89.604" fill="none" stroke="#ffc556" stroke-width="2"/>
+<path d="M158.237 198.156 Q176.584 122.365 132.984 119.82" fill="none" stroke="#986b4c" stroke-width="2"/>
+<path d="M231.94 146.855 Q220.151 138.709 198.902 -12.497" fill="none" stroke="#f8c26a" stroke-width="2"/>
+<path d="M222.446 157.594 Q246.662 151.439 249.263 201.309" fill="none" stroke="#5c4235" stroke-opacity="0.965" stroke-width="2"/>
+<path d="M168.178 45.776 Q271 39.585 228.152 129.972" fill="none" stroke="#fbc775" stroke-opacity="0.996" stroke-width="2"/>
+<path d="M198.526 17.305 Q86.209 38.552 6.417 4.017" fill="none" stroke="#ffd394" stroke-width="2"/>
+<path d="M155.331 65.555 Q177.492 83.77 191.151 87.03" fill="none" stroke="#1c1a21" stroke-width="2"/>
+<path d="M149.642 56.538 Q145.017 67.808 140.202 95.803" fill="none" stroke="#0e133e" stroke-opacity="0.412" stroke-width="2"/>
+<path d="M27.112 54.905 Q121.838 18.023 208.478 35.645" fill="none" stroke="#ffd292" stroke-opacity="0.945" stroke-width="2"/>
+<path d="M225.77 152.557 Q149.606 94.255 153.589 61.924" fill="none" stroke="#b59c92" stroke-opacity="0.722" stroke-width="2"/>
+<path d="M-13.721 43.141 Q45.417 184.635 45.814 211.15" fill="none" stroke="#ffcf6c" stroke-width="2"/>
+<path d="M113.2 207.106 Q72.836 157.635 12.572 67.185" fill="none" stroke="#fdc752" stroke-opacity="0.973" stroke-width="2"/>
+<path d="M166.402 76.006 Q163.361 90.319 192.557 89.043" fill="none" stroke="#abc2ff" stroke-opacity="0.408" stroke-width="2"/>
+<path d="M157.397 51.324 Q250.044 72.688 228.986 122.196" fill="none" stroke="#fdc770" stroke-opacity="0.996" stroke-width="2"/>
+<path d="M40.179 76.208 Q6.055 -5.494 92.052 1.326" fill="none" stroke="#ffd792" stroke-opacity="0.984" stroke-width="2"/>
+<path d="M154.149 77.696 Q142.538 87.501 199.751 143.474" fill="none" stroke="#b8916d" stroke-width="2"/>
+<path d="M166.479 200.955 Q150.088 135.965 117.278 103.534" fill="none" stroke="#624031" stroke-opacity="0.529" stroke-width="2"/>
+<path d="M201.698 113.721 Q206.156 112.37 215.834 117.131" fill="none" stroke="#0e080d" stroke-opacity="0.749" stroke-width="2"/>
+<path d="M145.666 50.267 Q231.705 78.769 255.264 135.992" fill="none" stroke="#fdc360" stroke-opacity="0.965" stroke-width="2"/>
+<path d="M142.319 108.591 Q195.613 169.133 164.146 186.239" fill="none" stroke="#a7785d" stroke-width="2"/>
+<path d="M3.344 12.83 Q34.613 128.262 50.122 203.037" fill="none" stroke="#ffce69" stroke-opacity="0.914" stroke-width="2"/>
+<path d="M163.284 166.694 Q209.871 151.954 210.49 179.315" fill="none" stroke="#bc9a96" stroke-opacity="0.69" stroke-width="2"/>
+<path d="M181.537 206.046 Q198.624 181.899 178.227 143.197" fill="none" stroke="#37222a" stroke-opacity="0.608" stroke-width="2"/>
+<path d="M-1.083 17.126 Q62.785 82.484 162.217 31.16" fill="none" stroke="#ffd38a" stroke-opacity="0.898" stroke-width="2"/>
+<path d="M79.421 93.136 Q122.611 201.586 9.413 196.389" fill="none" stroke="#ffca52" stroke-opacity="0.859" stroke-width="2"/>
+<path d="M-1.68 114.527 Q60.378 19.562 131.771 111.361" fill="none" stroke="#ffca6e" stroke-opacity="0.941" stroke-width="2"/>
+<path d="M265.195 27.454 Q161.31 47.619 234.456 146.781" fill="none" stroke="#f9bf5e" stroke-width="2"/>
+<path d="M193.932 93.226 Q190.943 89.613 184.837 92.917" fill="none" stroke="#131731" stroke-opacity="0.886" stroke-width="2"/>
+<path d="M239.804 170.189 Q232.595 107.85 200.827 -16" fill="none" stroke="#ffc764" stroke-opacity="0.443" stroke-width="2"/>
+<path d="M205.21 29.328 Q98.634 44.437 -16 35.501" fill="none" stroke="#ffd393" stroke-opacity="0.922" stroke-width="2"/>
+<path d="M97.014 210.129 Q-7.469 138.013 84.78 72.328" fill="none" stroke="#fdc659" stroke-opacity="0.996" stroke-width="2"/>
+<path d="M31.524 78.959 Q92.957 111.361 62.648 198.839" fill="none" stroke="#fec650" stroke-opacity="0.949" stroke-width="2"/>
+<path d="M198.909 109.991 Q189.095 133.497 216.806 131.265" fill="none" stroke="#cfc1bb" stroke-opacity="0.776" stroke-width="2"/>
+<path d="M5.846 188.83 Q75.292 107.492 114.732 159.891" fill="none" stroke="#ffd15e" stroke-opacity="0.922" stroke-width="2"/>
+<path d="M158.157 118.704 Q115.668 115.878 116.04 110.958" fill="none" stroke="#cdab9b" stroke-width="2"/>
+<path d="M244.727 191.51 Q208.447 185.407 230.374 154.292" fill="none" stroke="#37231b" stroke-opacity="0.882" stroke-width="2"/>
+<path d="M248.567 -15.241 Q262.52 120.518 245.938 143.751" fill="none" stroke="#fdc152" stroke-opacity="0.878" stroke-width="2"/>
+<path d="M11.833 210.331 Q12.125 154.117 0.112 6.968" fill="none" stroke="#ffd27c" stroke-opacity="0.902" stroke-width="2"/>
+<path d="M113.097 198.669 Q-1.045 151.32 95.932 73.585" fill="none" stroke="#fbc350" stroke-width="2"/>
+<path d="M166.618 64.647 Q164.081 67.836 140.382 49.701" fill="none" stroke="#d8e9ff" stroke-opacity="0.639" stroke-width="2"/>
+<path d="M135.62 58.687 Q143.164 69.116 137.438 75.773" fill="none" stroke="#e7dbdc" stroke-opacity="0.922" stroke-width="2"/>
+<path d="M175.649 119.458 Q156.803 145.211 142.037 122.923" fill="none" stroke="#7a5c50" stroke-opacity="0.812" stroke-width="2"/>
+<path d="M88.154 103.564 Q146.531 172.458 171.316 203.003" fill="none" stroke="#754424" stroke-opacity="0.682" stroke-width="2"/>
 </svg>
