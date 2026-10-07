@@ -6,7 +6,7 @@ use rand::Rng;
 
 /// Reusable storage for [`stroke_quadratic_direct`], kept in each worker so
 /// stroking a curve does not allocate.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct StrokeScratch {
     /// The flattened curve.
     points: Vec<(f64, f64)>,
@@ -21,14 +21,16 @@ pub(crate) struct StrokeScratch {
 /// anti-aliased scanlines.
 ///
 /// The curve from `(x1,y1)` through control point `(cx,cy)` to `(x2,y2)` is
-/// adaptively subdivided via de Casteljau (flatness tolerance 0.5 px) into
-/// flat segments. Each segment covers the pixels whose centres lie within
-/// its span along its major axis, half-open so that consecutive segments
-/// share none, and within `half_width + 0.5` of its line across it. A pixel
-/// at perpendicular distance `d` from the line gets coverage
-/// `clamp(half_width + 0.5 - d, 0, 1)`; where segments meet at an angle, a
-/// pixel two segments reach keeps the larger coverage. Each row then emits
-/// runs of equal coverage, so no pixel appears twice.
+/// adaptively subdivided via de Casteljau (flatness tolerance 0.25 px) into
+/// flat segments. A pixel's coverage is the share of its area within
+/// `half_width` of a segment ([`Trapezoid::band`]), so the engine fits the
+/// coverage of the anti-aliased stroke the exporter draws. The curve's two
+/// ends are butt caps across their segments, cutting through pixels as the
+/// exporter's do. Consecutive segments along the same major axis share it
+/// half-open; where the major axis changes, both run on past the join with
+/// a round end, so that no pixel on the outside of the turn is missed. A
+/// pixel two segments reach keeps the larger coverage, and each row then
+/// emits runs of equal coverage, so no pixel appears twice.
 pub(crate) fn stroke_quadratic_direct<R: Rng>(
     worker: &mut WorkerCtx<R>,
     x1: f64,
@@ -56,8 +58,11 @@ pub(crate) fn stroke_quadratic_direct<R: Rng>(
 
 /// Appends the end points of the flat pieces of a quadratic Bézier to
 /// `points`, which already ends at its start `(x1, y1)`. A piece is flat when
-/// its control point lies within 0.5 px of its chord. Points that coincide
-/// with the previous one are dropped, so every segment has a direction.
+/// its control point lies within 0.25 px of its chord, so the curve within
+/// 0.125 px. Against tiny-skia's stroke, this matched more closely than
+/// 0.5 px, and than 0.125 px, which follows the curve more closely than
+/// tiny-skia's own flattening. Points that coincide with the previous one
+/// are dropped, so every segment has a direction.
 fn flatten_quadratic(
     points: &mut Vec<(f64, f64)>,
     x1: f64,
@@ -76,7 +81,7 @@ fn flatten_quadratic(
         let t = ((cx - x1) * chord_dx + (cy - y1) * chord_dy) / chord_len_sq;
         let proj_x = x1 + t * chord_dx;
         let proj_y = y1 + t * chord_dy;
-        (cx - proj_x) * (cx - proj_x) + (cy - proj_y) * (cy - proj_y) < 0.25
+        (cx - proj_x) * (cx - proj_x) + (cy - proj_y) * (cy - proj_y) < 0.0625
     };
 
     if flat {
@@ -139,10 +144,12 @@ fn stroke_polyline(
     if points.len() < 2 {
         return;
     }
-    // Coverage is positive strictly within this distance of a line.
-    let reach = half_width + 0.5;
-    // A covered centre lies within `reach` of its segment's line, at most
-    // `reach · √2` from the segment along the minor axis.
+    // Coverage is positive strictly within `half_width` plus half a
+    // pixel's extent across a line, at most `√2 / 2`, of a segment. A
+    // covered centre lies at most `reach · √2` from its segment along the
+    // minor axis, and at most `reach + √2 / 2` past its end along the major
+    // one.
+    let reach = half_width + std::f64::consts::FRAC_1_SQRT_2;
     let margin = reach * std::f64::consts::SQRT_2 + 1.0;
     let (x_min, y_min, x_max, y_max) = points.iter().fold(
         (
@@ -177,8 +184,28 @@ fn stroke_polyline(
         rows,
     };
 
-    for pair in points.windows(2) {
-        stroke_segment(&mut coverage, pair[0], pair[1], reach);
+    let steep = |a: (f64, f64), b: (f64, f64)| (b.1 - a.1).abs() > (b.0 - a.0).abs();
+    let join = |before: (f64, f64), at: (f64, f64), after: (f64, f64)| {
+        if steep(before, at) == steep(at, after) {
+            End::Shared
+        } else {
+            End::Round
+        }
+    };
+    let last = points.len() - 1;
+    for index in 0..last {
+        let (a, b) = (points[index], points[index + 1]);
+        let end_a = if index == 0 {
+            End::Cap
+        } else {
+            join(points[index - 1], a, b)
+        };
+        let end_b = if index + 1 == last {
+            End::Cap
+        } else {
+            join(a, b, points[index + 2])
+        };
+        stroke_segment(&mut coverage, a, b, half_width, [end_a, end_b]);
     }
 
     let CoverageGrid { cells, rows, .. } = coverage;
@@ -216,10 +243,100 @@ fn stroke_polyline(
     }
 }
 
-/// Covers the pixels of one flat segment from `a` to `b`: those whose
-/// centres lie in `[min, max)` of the segment's span along its major axis
-/// and within `reach` of its line. Pixels off the grid are off the canvas.
-fn stroke_segment(grid: &mut CoverageGrid<'_>, a: (f64, f64), b: (f64, f64), reach: f64) {
+/// How a unit pixel spreads its area across a line: along the line's unit
+/// normal, its sides project to lengths `long` and `short` (the larger and
+/// smaller of the normal's two components), so its area spreads as a
+/// trapezoid of height `1 / long` on `[-end, end]`, `end = (long + short) / 2`,
+/// with ramps `short` wide. The share of a pixel on one side of a line, or
+/// within a band around it, is an area under this trapezoid. The functions
+/// run for every pixel of a stroke, so they compute both pieces of the
+/// primitive and select one rather than branch on the distance.
+#[derive(Clone, Copy)]
+struct Trapezoid {
+    /// `(long - short) / 2`, where the flat top ends.
+    top: f64,
+    /// `(long + short) / 2`, where the trapezoid ends.
+    end: f64,
+    inv_long: f64,
+    /// `1 / (2 · long · short)`, or 0 when `short` is 0 and the ramps have
+    /// no width.
+    inv_ramp: f64,
+}
+
+impl Trapezoid {
+    /// The trapezoid across a line with unit normal (or, equally, unit
+    /// direction) `(x, y)`.
+    fn across((x, y): (f64, f64)) -> Self {
+        let (long, short) = (x.abs().max(y.abs()), x.abs().min(y.abs()));
+        Self {
+            top: (long - short) * 0.5,
+            end: (long + short) * 0.5,
+            inv_long: 1.0 / long,
+            inv_ramp: if short > 0.0 {
+                0.5 / (long * short)
+            } else {
+                0.0
+            },
+        }
+    }
+
+    /// The area on `[0, x]` for `x ≥ 0`: linear on the flat top, then
+    /// `1/2` less the ramp's remaining triangle, which is empty past `end`.
+    #[inline]
+    fn primitive(self, x: f64) -> f64 {
+        let rest = (self.end - x).max(0.0);
+        let ramp = (rest * rest).mul_add(-self.inv_ramp, 0.5);
+        if x <= self.top {
+            x * self.inv_long
+        } else {
+            ramp
+        }
+    }
+
+    /// The share of a pixel on the positive side of a line its centre is at
+    /// signed offset `offset` from.
+    #[inline]
+    fn inside(self, offset: f64) -> f64 {
+        0.5 + self.primitive(offset.abs()).copysign(offset)
+    }
+
+    /// The share of a pixel within `half_width` of a line its centre is
+    /// `distance ≥ 0` from: the area on `[distance - half_width,
+    /// distance + half_width]`, exact for an infinite straight band.
+    #[inline]
+    fn band(self, half_width: f64, distance: f64) -> f64 {
+        let near = half_width - distance;
+        (self.primitive(near.abs()).copysign(near) + self.primitive(half_width + distance))
+            .clamp(0.0, 1.0)
+    }
+}
+
+/// How one end of a flat segment meets the rest of the stroke.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum End {
+    /// The curve's own end: the band runs on past it, cut by a butt cap
+    /// across the segment, as the exporter draws it.
+    Cap,
+    /// A join with a segment along the other major axis: the band runs on
+    /// past it, and the end point is the nearest point there, which rounds
+    /// the outside of the join. Without it, the two segments' spans along
+    /// different axes leave pixels on the outside of the turn to neither.
+    Round,
+    /// A join with a segment along the same major axis: the two segments
+    /// share the major coordinates half-open, as their spans tile them.
+    Shared,
+}
+
+/// Covers the pixels near one flat segment from `a` to `b` with the share of
+/// their area within `half_width` of it ([`Trapezoid::band`]), each end as
+/// its [`End`] describes. Pixels off the grid are off the canvas.
+fn stroke_segment(
+    grid: &mut CoverageGrid<'_>,
+    a: (f64, f64),
+    b: (f64, f64),
+    half_width: f64,
+    [end_a, end_b]: [End; 2],
+) {
     let steep = (b.1 - a.1).abs() > (b.0 - a.0).abs();
     // Major and minor coordinates, and the grid's bounds along each.
     let (a_major, a_minor, b_major, b_minor) = if steep {
@@ -235,10 +352,37 @@ fn stroke_segment(grid: &mut CoverageGrid<'_>, a: (f64, f64), b: (f64, f64), rea
     let gradient = (b_minor - a_minor) / (b_major - a_major);
     // cos(θ) converts a distance along the minor axis to a perpendicular one.
     let cos_theta = 1.0 / gradient.mul_add(gradient, 1.0).sqrt();
+    let trapezoid = Trapezoid::across((cos_theta, gradient * cos_theta));
+    // Coverage is positive strictly within `reach` of the segment, and a
+    // centre within `reach` of its line is within `half_band` of it along
+    // the minor axis.
+    let reach = half_width + trapezoid.end;
     let half_band = reach / cos_theta;
-    // Major indices `i` whose centre `i + 0.5` is in `[min, max)`.
-    let first = ((a_major.min(b_major) - 0.5).ceil() as i32).max(major_lo);
-    let end = ((a_major.max(b_major) - 0.5).ceil() as i32).min(major_hi + 1);
+    let length = (b_major - a_major).abs() / cos_theta;
+    // The unit direction from `a` to `b`, in major and minor coordinates.
+    let along_major = if b_major > a_major {
+        cos_theta
+    } else {
+        -cos_theta
+    };
+    let along_minor = gradient * along_major;
+    // How far the span runs on past an end, along the major axis: a
+    // covered centre past a cap is within `trapezoid.end` of it along the
+    // segment and `reach` across it.
+    let past = |end: End| match end {
+        End::Cap => reach + trapezoid.end,
+        End::Round => reach,
+        End::Shared => 0.0,
+    };
+    let (past_lo, past_hi) = if b_major > a_major {
+        (past(end_a), past(end_b))
+    } else {
+        (past(end_b), past(end_a))
+    };
+    // Major indices `i` whose centre `i + 0.5` is in `[min, max)` of the
+    // span.
+    let first = ((a_major.min(b_major) - past_lo - 0.5).ceil() as i32).max(major_lo);
+    let end = ((a_major.max(b_major) + past_hi - 0.5).ceil() as i32).min(major_hi + 1);
     for i in first..end {
         let centre = f64::from(i) + 0.5;
         let minor = gradient.mul_add(centre - a_major, a_minor);
@@ -248,9 +392,49 @@ fn stroke_segment(grid: &mut CoverageGrid<'_>, a: (f64, f64), b: (f64, f64), rea
         if lo > hi {
             continue;
         }
+        // The offset along the segment from `a` of the line's point at this
+        // centre. The pixels of the column are within `reach` of it, and
+        // where every pixel is at least `trapezoid.end` within both ends,
+        // the ends do not matter.
+        let column = (centre - a_major) * along_major / (cos_theta * cos_theta);
+        let inner = reach + trapezoid.end;
+        if column >= inner && column <= length - inner {
+            for j in lo..=hi {
+                let across = (f64::from(j) + 0.5 - minor) * cos_theta;
+                let alpha = (trapezoid.band(half_width, across.abs()) * 65535.0) as u32;
+                if steep {
+                    grid.raise(j, i, alpha);
+                } else {
+                    grid.raise(i, j, alpha);
+                    grid.extend_row(j, i, i);
+                }
+            }
+            if steep {
+                grid.extend_row(i, lo, hi);
+            }
+            continue;
+        }
         for j in lo..=hi {
-            let distance = (f64::from(j) + 0.5 - minor).abs() * cos_theta;
-            let alpha = ((reach - distance).clamp(0.0, 1.0) * 65535.0) as u32;
+            let minor_centre = f64::from(j) + 0.5;
+            // The pixel centre's offsets across the segment's line and
+            // along it from `a`.
+            let across = (minor_centre - minor) * cos_theta;
+            let along =
+                (centre - a_major).mul_add(along_major, (minor_centre - a_minor) * along_minor);
+            let mut share = if along < 0.0 && end_a == End::Round {
+                trapezoid.band(half_width, along.hypot(across))
+            } else if along > length && end_b == End::Round {
+                trapezoid.band(half_width, (along - length).hypot(across))
+            } else {
+                trapezoid.band(half_width, across.abs())
+            };
+            if end_a == End::Cap {
+                share *= trapezoid.inside(along);
+            }
+            if end_b == End::Cap {
+                share *= trapezoid.inside(length - along);
+            }
+            let alpha = (share * 65535.0) as u32;
             if steep {
                 grid.raise(j, i, alpha);
             } else {
@@ -343,7 +527,7 @@ fn coverage_to_alpha(covered: u32, sub_rows: usize) -> u32 {
 
 /// Reusable per-row storage for the anti-aliased fills, kept in each worker
 /// so that rasterizing a row neither allocates nor zeroes a fixed array.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct RowScratch {
     /// A polygon row's edge crossings: their x and their sub-row.
     hits: Vec<(f64, usize)>,
@@ -672,21 +856,98 @@ mod tests {
     }
 
     #[test]
-    fn stroke_quadratic_direct_samples_pixel_centres() {
+    fn stroke_quadratic_direct_covers_the_area_of_a_thin_stroke() {
         let mut worker = WorkerCtx::new(16, 16, ChaCha8Rng::seed_from_u64(6));
         // A vertical stroke along x = 4.5 from y = 2 to y = 12, 0.5 px wide:
-        // column 4's centres lie on it, columns 3 and 5 are a pixel away,
-        // beyond the 0.75 px reach.
+        // it covers half of each pixel of column 4 between its caps, and
+        // none of columns 3 and 5 or of rows 1 and 12.
         let lines = stroke_quadratic_direct(&mut worker, 4.5, 2.0, 4.5, 7.0, 4.5, 12.0, 0.25);
         let expected: Vec<_> = (2..12)
             .map(|y| Scanline {
                 y,
                 x1: 4,
                 x2: 4,
-                alpha: 0xBFFF,
+                alpha: 0x7FFF,
             })
             .collect();
         assert_eq!(lines, expected);
+    }
+
+    #[test]
+    fn stroke_quadratic_direct_cuts_butt_caps_through_pixels() {
+        let mut worker = WorkerCtx::new(32, 32, ChaCha8Rng::seed_from_u64(7));
+        // A horizontal stroke 1 px wide on row 10 from x = 5.25 to 20.75:
+        // its caps cover three quarters of pixels 5 and 20.
+        let lines = stroke_quadratic_direct(&mut worker, 5.25, 10.5, 13.0, 10.5, 20.75, 10.5, 0.5);
+        let run = |x1, x2, alpha| Scanline {
+            y: 10,
+            x1,
+            x2,
+            alpha,
+        };
+        let three_quarters = (0.75 * 65535.0) as u32;
+        assert_eq!(
+            lines,
+            &[
+                run(5, 5, three_quarters),
+                run(6, 19, 0xFFFF),
+                run(20, 20, three_quarters)
+            ]
+        );
+    }
+
+    /// The share of the unit pixel centred on the origin whose points `p`
+    /// have `lo ≤ normal · p ≤ hi`: across 1000 strips along the normal's
+    /// smaller component, each clipped exactly along the larger one.
+    fn pixel_share(normal: (f64, f64), lo: f64, hi: f64) -> f64 {
+        const STRIPS: usize = 1000;
+        let (major, minor) = if normal.0.abs() >= normal.1.abs() {
+            normal
+        } else {
+            (normal.1, normal.0)
+        };
+        (0..STRIPS)
+            .map(|strip| {
+                let t = (strip as f64 + 0.5) / STRIPS as f64 - 0.5;
+                let (a, b) = ((lo - minor * t) / major, (hi - minor * t) / major);
+                (a.max(b).min(0.5) - a.min(b).max(-0.5)).max(0.0)
+            })
+            .sum::<f64>()
+            / STRIPS as f64
+    }
+
+    /// The trapezoid's closed forms against the areas they stand for, over
+    /// directions from axis-aligned to diagonal and beyond, both signs of
+    /// the offset and bands narrower and wider than a pixel.
+    #[test]
+    fn trapezoid_matches_integrated_pixel_areas() {
+        for degrees in [0.0, 7.0, 22.5, 30.0, 45.0, 60.0, 90.0, 123.0, 200.0] {
+            let angle = f64::to_radians(degrees);
+            let normal = (angle.cos(), angle.sin());
+            let trapezoid = Trapezoid::across(normal);
+            for step in -12..=12 {
+                let signed = f64::from(step) * 0.0625;
+                let expected = pixel_share(normal, -signed, f64::INFINITY);
+                let actual = trapezoid.inside(signed);
+                assert!(
+                    (actual - expected).abs() < 1e-4,
+                    "{degrees}° at offset {signed}: {actual} against {expected}"
+                );
+            }
+            for half_width in [0.25, 0.5, 0.75, 1.0, 1.5] {
+                for step in 0..=40 {
+                    let distance = f64::from(step) * 0.0625;
+                    let expected =
+                        pixel_share(normal, -distance - half_width, half_width - distance);
+                    let actual = trapezoid.band(half_width, distance);
+                    assert!(
+                        (actual - expected).abs() < 1e-4,
+                        "{degrees}°, half-width {half_width} at {distance}: \
+                         {actual} against {expected}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

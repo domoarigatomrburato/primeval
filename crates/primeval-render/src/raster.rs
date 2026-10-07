@@ -1,7 +1,7 @@
 //! Raster writer for a [`Drawing`]: tiny-skia rendering and PNG encoding.
 
 use image::ImageEncoder;
-use primeval_core::{Color, Drawing, Geometry};
+use primeval_core::{Buffer, Color, Drawing, Geometry};
 use tiny_skia::{FillRule, LineCap, Paint, Path, PathBuilder, Pixmap, Rect, Stroke, Transform};
 
 /// Render `drawing` onto `width` × `height` output pixels as opaque RGB8.
@@ -11,6 +11,52 @@ use tiny_skia::{FillRule, LineCap, Paint, Path, PathBuilder, Pixmap, Rect, Strok
 /// rounding of the output size. Returns `None` when the pixmap or the RGB
 /// buffer cannot be allocated, including when its size overflows `usize`.
 pub(crate) fn render_rgb(drawing: &Drawing, width: u32, height: u32) -> Option<Vec<u8>> {
+    let pixmap = render(drawing, width, height)?;
+    // The background is opaque and source-over keeps it opaque, so the
+    // premultiplied colour channels are the straight ones.
+    let len = usize::try_from(width)
+        .ok()?
+        .checked_mul(usize::try_from(height).ok()?)?
+        .checked_mul(3)?;
+    let mut rgb = Vec::new();
+    rgb.try_reserve_exact(len).ok()?;
+    rgb.extend(
+        pixmap
+            .pixels()
+            .iter()
+            .flat_map(|pixel| [pixel.red(), pixel.green(), pixel.blue()]),
+    );
+    Some(rgb)
+}
+
+/// The sum over every pixel and RGB channel of the squared difference
+/// between `drawing`, rendered as [`render_rgb`] renders it at `target`'s
+/// size, and `target`: the export's error at the working size, before the
+/// square root and the normalisation of an RMSE. Returns `None` when the
+/// pixmap cannot be allocated.
+///
+/// It is exact integer arithmetic over the 8-bit pixels, in one thread, so
+/// it does not depend on the number of threads.
+pub(crate) fn squared_error(drawing: &Drawing, target: &Buffer) -> Option<u64> {
+    let pixmap = render(drawing, target.width(), target.height())?;
+    Some(
+        pixmap
+            .pixels()
+            .iter()
+            .zip(target.pixels().as_chunks::<3>().0)
+            .map(|(pixel, expected)| {
+                [pixel.red(), pixel.green(), pixel.blue()]
+                    .iter()
+                    .zip(expected)
+                    .map(|(&a, &b)| u64::from(a.abs_diff(b)).pow(2))
+                    .sum::<u64>()
+            })
+            .sum(),
+    )
+}
+
+/// [`render_rgb`]'s pixmap, before its conversion to RGB.
+fn render(drawing: &Drawing, width: u32, height: u32) -> Option<Pixmap> {
     let mut pixmap = Pixmap::new(width, height)?;
     pixmap.fill(skia_color(drawing.background));
     let transform = Transform::from_scale(
@@ -23,6 +69,11 @@ pub(crate) fn render_rgb(drawing: &Drawing, width: u32, height: u32) -> Option<V
         let color = shape.color;
         paint.set_color_rgba8(color.r, color.g, color.b, color.a);
         paint.anti_alias = true;
+        // The low-precision pipeline divides by 255 with `(v + 255) >> 8`,
+        // which rounds every blend up: deep stacks drift by about half a
+        // level. The high-precision one blends in `f32` and rounds once
+        // per layer, the composite the engine optimises.
+        paint.force_hq_pipeline = true;
 
         match &shape.geometry {
             Geometry::Quadratic {
@@ -66,22 +117,7 @@ pub(crate) fn render_rgb(drawing: &Drawing, width: u32, height: u32) -> Option<V
             }
         }
     }
-
-    // The background is opaque and source-over keeps it opaque, so the
-    // premultiplied colour channels are the straight ones.
-    let len = usize::try_from(width)
-        .ok()?
-        .checked_mul(usize::try_from(height).ok()?)?
-        .checked_mul(3)?;
-    let mut rgb = Vec::new();
-    rgb.try_reserve_exact(len).ok()?;
-    rgb.extend(
-        pixmap
-            .pixels()
-            .iter()
-            .flat_map(|pixel| [pixel.red(), pixel.green(), pixel.blue()]),
-    );
-    Some(rgb)
+    Some(pixmap)
 }
 
 /// The unrotated outline of a filled geometry, in canvas coordinates.
@@ -253,6 +289,77 @@ mod tests {
         // Rotated by 90 degrees, the long axis is vertical.
         assert_eq!(pixel(&rgb, 40, 20, 6), [255, 0, 0]);
         assert_eq!(pixel(&rgb, 40, 6, 20), [255, 255, 255]);
+    }
+
+    /// The exact composite of opaque `background` and the `layers` drawn over
+    /// the whole canvas, each blend rounded to the 8-bit grid once:
+    /// `round((1 − a) · d + a · s)` with `a = alpha / 255`.
+    fn rounded_once(background: Color, layers: &[Color]) -> [f64; 3] {
+        let mut canvas = [background.r, background.g, background.b].map(f64::from);
+        for layer in layers {
+            let a = f64::from(layer.a) / 255.0;
+            let source = [layer.r, layer.g, layer.b].map(f64::from);
+            for (d, s) in canvas.iter_mut().zip(source) {
+                *d = ((1.0 - a) * *d + a * s).round();
+            }
+        }
+        canvas
+    }
+
+    /// Deep stacks of translucent full-canvas layers render as the exact
+    /// composite rounded once per layer: no edges, so only the blend
+    /// arithmetic differs. Measured: an exact match (mean and RMSE 0).
+    /// tiny-skia's low-precision pipeline is off by +0.5 levels on average
+    /// here, because its `div255` rounds up.
+    #[test]
+    fn stacked_layers_match_the_composite_rounded_once() {
+        // SplitMix64, so the stacks are fixed without a dependency.
+        let mut state = 0x5eed_u64;
+        let mut next = move || {
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        };
+        let mut byte = move || (next() >> 56) as u8;
+
+        let (mut sum, mut squares, mut values) = (0.0, 0.0, 0.0);
+        for _ in 0..300 {
+            let background = Color::new(byte(), byte(), byte(), 255);
+            let layers: Vec<Color> = (0..20)
+                .map(|_| Color::new(byte(), byte(), byte(), byte().max(1)))
+                .collect();
+            let shapes = layers
+                .iter()
+                .map(|&color| DrawnShape {
+                    geometry: Geometry::Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 2.0,
+                        height: 2.0,
+                    },
+                    color,
+                })
+                .collect();
+            let drawing = Drawing {
+                width: 2,
+                height: 2,
+                background,
+                shapes,
+            };
+            let rgb = render_rgb(&drawing, 2, 2).expect("render");
+            let expected = rounded_once(background, &layers);
+            for (&got, want) in rgb[..3].iter().zip(expected) {
+                let error = f64::from(got) - want;
+                sum += error;
+                squares += error * error;
+                values += 1.0;
+            }
+        }
+        let (mean, rmse) = (sum / values, (squares / values).sqrt());
+        assert!(mean.abs() < 0.1, "mean signed error {mean}");
+        assert!(rmse < 0.5, "rmse {rmse}");
     }
 
     #[test]

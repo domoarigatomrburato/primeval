@@ -18,7 +18,7 @@ pub(crate) const MAX_CHANNEL_SPAN: usize = (u32::MAX / 255) as usize;
 ///
 /// Row `y` holds `width + 1` entries; entry `x` sums the pixels `0..x` of
 /// that row, so a span `x1..=x2` is entry `x2 + 1` minus entry `x1`.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct PrefixSums {
     width: u32,
     height: u32,

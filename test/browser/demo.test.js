@@ -112,19 +112,34 @@ describe("demo, cross-origin isolated by headers", () => {
     await server?.close();
   });
 
-  test("a sample draws live, ends on the identical final SVG, and downloads", async () => {
+  test("a sample draws a live preview, refines, ends on the final SVG, and downloads", async () => {
     const { context, page, errors } = await openDemo(server.origin);
     try {
       await setControls(page, { count: 12, resolution: 128 });
+      // A fixed seed whose final refit pass revises the preview.
+      await page.getByRole("textbox", { name: "Seed" }).fill("42");
+      await page.evaluate(() => {
+        window.runStates = [];
+        new MutationObserver((records) => {
+          for (const record of records) {
+            for (const node of record.addedNodes) {
+              window.runStates.push(node.textContent);
+            }
+          }
+        }).observe(document.querySelector("#run-state"), { childList: true });
+      });
       await page.getByRole("button", { name: SAMPLE }).click();
       const run = await waitForRun(page, 0);
 
       assert.equal(run.outcome, "done");
       assert.equal(run.total, 12);
-      // Every step's shape reached the live SVG, which the stage keeps: it is
-      // the DOM the final SVG parses to.
+      // Every step's shape reached the live preview; the refit pass after
+      // the last step revised it, and the final SVG replaced it.
       assert.equal(run.liveShapeCount, 12);
-      assert.equal(run.liveMarkup, run.finalMarkup);
+      assert.notEqual(run.liveMarkup, run.finalMarkup, "the refit pass revised the preview");
+      assert.equal(run.stageMarkup, run.finalMarkup);
+      const states = await page.evaluate(() => window.runStates);
+      assert.deepEqual(states.slice(-2), ["Refining", "Done"]);
       assert.equal(
         await page.locator("#result > svg").evaluate((svg) => svg.outerHTML),
         run.finalMarkup,
@@ -159,7 +174,7 @@ describe("demo, cross-origin isolated by headers", () => {
       }));
       assert.equal(kept.runCount, 2);
       assert.equal(kept.lastRun.finalText, again.finalText);
-      assert.equal(kept.lastRun.liveMarkup, kept.lastRun.finalMarkup);
+      assert.equal(kept.lastRun.stageMarkup, kept.lastRun.finalMarkup);
       assert.deepEqual(kept.keys.sort(), ["lastRun", "onRun", "ready", "runCount", "step"]);
 
       // A new seed gives another result.
@@ -220,7 +235,7 @@ describe("demo, cross-origin isolated by headers", () => {
       const second = await waitForRun(page, 1);
       assert.equal(second.outcome, "done");
       assert.equal(second.liveShapeCount, 10);
-      assert.equal(second.liveMarkup, second.finalMarkup);
+      assert.equal(second.stageMarkup, second.finalMarkup);
     } finally {
       await context.close();
     }
@@ -567,7 +582,8 @@ describe("demo, served without isolation headers", () => {
       await page.getByRole("button", { name: SAMPLE }).click();
       const run = await waitForRun(page, 0);
       assert.equal(run.outcome, "done");
-      assert.equal(run.liveMarkup, run.finalMarkup);
+      assert.equal(run.liveShapeCount, 4);
+      assert.equal(run.stageMarkup, run.finalMarkup);
       const wasm = requests.filter((pathname) => pathname.endsWith(".wasm"));
       assert.deepEqual(wasm, ["/wasm/single/primeval_bg.wasm"]);
     } finally {

@@ -6,7 +6,9 @@
 //!
 //! The public surface is the [`Model`] that runs the search, its options
 //! ([`ModelOptions`], [`ShapeKind`], [`Alpha`]), the pixel and colour types it
-//! takes ([`Buffer`], [`Color`]), and the [`Drawing`] it produces.
+//! takes ([`Buffer`], [`Color`]), the [`Drawing`] it produces, and the joint
+//! optimisation of its triangles, polygons and rectangles that can follow
+//! it ([`joint`]).
 
 #![warn(missing_docs)]
 
@@ -19,10 +21,12 @@ mod color;
 mod drawing;
 mod error;
 mod error_grid;
+pub mod joint;
 mod model;
 mod optimize;
 mod prefix;
 mod raster;
+mod refine;
 mod rng;
 mod scanline;
 mod score;

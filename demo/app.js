@@ -1,5 +1,6 @@
 // The demo app. It uses the package through the import map in index.html, as
-// the README's no-bundler path does, and draws each step's shape live.
+// the README's no-bundler path does, draws each step's shape as a live
+// preview, and shows the final SVG when it arrives.
 import { approximate, InternalError, ValidationError } from "@aleburato/primeval";
 
 const $ = (selector) => document.querySelector(selector);
@@ -343,8 +344,9 @@ function liveDrawing() {
 
 /**
  * What `debug` reports of a finished run. A done run's markup is serialized
- * only when read: the live SVG the stage kept, and the DOM the final SVG
- * parses to, which the stage would show had it parsed it instead.
+ * only when read: the live preview, the DOM the final SVG parses to, and
+ * the SVG the stage shows when read, which a done run replaces with the
+ * final one.
  */
 function runRecord({ outcome, progress, total, live, result }) {
   const record = { outcome, step: progress.step, total };
@@ -361,6 +363,9 @@ function runRecord({ outcome, progress, total, live, result }) {
     },
     get liveMarkup() {
       return live.svg.outerHTML;
+    },
+    get stageMarkup() {
+      return ui.result.querySelector("svg")?.outerHTML;
     },
     get finalMarkup() {
       const parsed = document.createElement("template");
@@ -396,6 +401,9 @@ async function run() {
   };
   state.run = current;
   const isCurrent = () => state.run === current;
+  // Every step's progress arrived: the final stage runs until the result.
+  const searched = () =>
+    current.progress.total > 0 && current.progress.step === current.progress.total;
   const { signal } = current.controller;
   const image = state.image;
   const live = liveDrawing();
@@ -437,7 +445,9 @@ async function run() {
         setAspect(first.width, first.height);
         live.start(svgFrame(first.data));
         setView("result");
-        setRunState("busy", "Drawing");
+        if (!searched()) {
+          setRunState("busy", "Drawing");
+        }
       }
     });
     const rendering = approximate({
@@ -450,6 +460,9 @@ async function run() {
           if (isCurrent()) {
             live.push(info.shape);
             current.progress = info;
+            if (searched()) {
+              setRunState("busy", "Refining");
+            }
           }
         },
       },
@@ -458,9 +471,12 @@ async function run() {
     if (!isCurrent()) {
       return;
     }
-    // The live SVG stays: it is the final document's DOM by construction
-    // (see the demo tests).
+    // The refit passes during the search and the final stage after the last
+    // step can move, resize and recolour any shape, so the final SVG replaces
+    // the live preview. A run stopped before the result arrives keeps the
+    // preview instead.
     live.flush();
+    ui.result.innerHTML = result.data;
     outcome = "done";
     state.result = {
       svg: result.data,

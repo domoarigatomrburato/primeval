@@ -8,7 +8,7 @@ import { chromium } from "playwright";
 
 import * as native from "../../dist/index.js";
 import { startServer } from "../../scripts/static-server.mjs";
-import { svgShapeLines } from "../helpers/svg.js";
+import { assertPreviewsSvg } from "../helpers/svg.js";
 
 const FIXTURE = "monalisa.jpg";
 const SMALL = { count: 4, resizeInput: 16, outputSize: 32, seed: 7 };
@@ -177,7 +177,7 @@ for (const isolated of [true, false]) {
       assert.ok(progress.every((info) => typeof info.score === "number"));
     });
 
-    test("onProgress shapes are the final SVG's shape lines in order", async () => {
+    test("onProgress shapes preview the final SVG's shape lines", async () => {
       const { shapes, svg } = await shared.page.evaluate(
         async ({ name, render }) => {
           const shapes = [];
@@ -192,9 +192,7 @@ for (const isolated of [true, false]) {
         { name: FIXTURE, render: { ...SMALL, count: 6, shape: "quadratic" } },
       );
 
-      assert.equal(shapes.length, 6);
-      assert.ok(shapes.every((shape) => typeof shape === "string"));
-      assert.deepEqual(shapes, svgShapeLines(svg));
+      assertPreviewsSvg(shapes, svg, 6);
     });
 
     test("a throwing onProgress rejects with the thrown value and stops the render", async () => {
@@ -697,10 +695,23 @@ for (const isolated of [true, false]) {
     // identical for fixed seeds, but libm differences between platforms are
     // only absorbed by rounding today (see the WebAssembly plan, W0 results).
     test(`SVG output equals the native addon's for fixed seeds (${variant} build)`, async () => {
+      // Every shape kind, with enough steps that each kind's search runs at
+      // least one refit pass (the first comes at step 5, 10 or 20) before
+      // its final stage.
       const renders = [];
       for (const seed of [1, 2, 3]) {
-        for (const shape of ["triangle", "rotated-ellipse", "quadratic", "any"]) {
-          renders.push({ count: 12, resizeInput: 64, outputSize: 128, seed, shape });
+        for (const shape of [
+          "triangle",
+          "rectangle",
+          "ellipse",
+          "circle",
+          "rotated-rectangle",
+          "rotated-ellipse",
+          "quadratic",
+          "polygon",
+          "any",
+        ]) {
+          renders.push({ count: 20, resizeInput: 64, outputSize: 128, seed, shape });
         }
       }
 

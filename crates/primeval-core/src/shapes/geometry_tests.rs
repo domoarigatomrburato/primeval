@@ -358,3 +358,127 @@ fn circle_of_radius_four_covers_nine_rows_and_nine_columns() {
         .collect();
     assert_eq!(tips, vec![(20, 20), (20, 20)]);
 }
+
+/// The engine's coverage of every pixel, in `[0, 1]`.
+fn engine_coverage(shape: &Shape, worker: &mut WorkerCtx<rand_chacha::ChaCha8Rng>) -> Vec<f64> {
+    let mut coverage = vec![0.0; (W * H) as usize];
+    for line in shape.rasterize(worker) {
+        for x in line.x1..=line.x2 {
+            coverage[line.y as usize * W as usize + x as usize] = f64::from(line.alpha) / 65535.0;
+        }
+    }
+    coverage
+}
+
+/// The coverage of every pixel by the stroke the PNG writer draws for
+/// `geometry` at scale 1, the working size: tiny-skia's anti-aliased stroke
+/// with butt caps, on its high-precision pipeline.
+fn exported_coverage(geometry: &Geometry) -> Vec<f64> {
+    let Geometry::Quadratic {
+        start,
+        control,
+        end,
+        width,
+    } = *geometry
+    else {
+        panic!("expected a quadratic, got {geometry:?}");
+    };
+    let mut pixmap = Pixmap::new(W, H).expect("pixmap");
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(0, 0, 0, 255);
+    paint.anti_alias = true;
+    paint.force_hq_pipeline = true;
+    let mut pb = PathBuilder::new();
+    pb.move_to(start.x as f32, start.y as f32);
+    pb.quad_to(
+        control.x as f32,
+        control.y as f32,
+        end.x as f32,
+        end.y as f32,
+    );
+    let stroke = Stroke {
+        width: width as f32,
+        line_cap: LineCap::Butt,
+        ..Stroke::default()
+    };
+    let path = pb.finish().expect("path");
+    pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+    pixmap
+        .pixels()
+        .iter()
+        .map(|p| f64::from(p.alpha()) / 255.0)
+        .collect()
+}
+
+/// `Σ |engine − export|` and `Σ export` over the pixels of `shape`.
+fn coverage_difference(
+    shape: &Shape,
+    worker: &mut WorkerCtx<rand_chacha::ChaCha8Rng>,
+) -> (f64, f64) {
+    let engine = engine_coverage(shape, worker);
+    let exported = exported_coverage(&shape.geometry());
+    engine
+        .iter()
+        .zip(&exported)
+        .fold((0.0, 0.0), |(difference, total), (a, b)| {
+            (difference + (a - b).abs(), total + b)
+        })
+}
+
+/// Bound on the coverage the engine and the export disagree on, as a share
+/// of the export's.
+///
+/// tiny-skia samples 4 sub-rows per pixel, so its coverage of a pixel the
+/// stroke's edge crosses can be off by up to 1/8 against the exact area:
+/// a horizontal stroke, where the engine's area is exact, already differs
+/// by 4.9%. The engine stays near that on every curve (5.1% over random
+/// curves). The earlier rasterizer, whose coverage `half_width + 0.5 − d`
+/// is exact only across axis-aligned strokes, which ended at pixel centres
+/// and left gaps on the outside of turns, differed by 9.2% at the same
+/// width (9.1% on the arc), and by 23% from the 1 px stroke tiny-skia draws
+/// as a hairline.
+const COVERAGE_BOUND: f64 = 0.06;
+
+#[test]
+fn quadratic_coverage_matches_the_exported_stroke() {
+    let (mut worker, round) = make_test_round(W, H, 31);
+    let width = Quadratic::STROKE_WIDTH;
+    let curve = |x1, y1, x2, y2, x3, y3| {
+        Shape::Quadratic(Quadratic {
+            x1,
+            y1,
+            x2,
+            y2,
+            x3,
+            y3,
+            width,
+        })
+    };
+    let curves = [
+        ("horizontal", curve(6.0, 20.3, 30.0, 20.3, 54.0, 20.3)),
+        ("diagonal", curve(6.0, 4.0, 26.0, 24.0, 46.0, 44.0)),
+        ("shallow", curve(4.0, 10.2, 30.0, 19.7, 58.0, 30.1)),
+        ("steep", curve(20.4, 2.0, 27.0, 22.0, 33.3, 45.0)),
+        ("arc", curve(6.0, 40.0, 30.0, -10.0, 58.0, 40.0)),
+    ];
+    for (name, shape) in &curves {
+        let (difference, total) = coverage_difference(shape, &mut worker);
+        assert!(
+            difference <= COVERAGE_BOUND * total,
+            "{name}: differs by {:.3} of the exported coverage",
+            difference / total
+        );
+    }
+    let (mut difference, mut total) = (0.0, 0.0);
+    for _ in 0..SHAPES_PER_KIND {
+        let shape = Shape::random(ShapeKind::Quadratic, &mut worker, &round);
+        let (d, t) = coverage_difference(&shape, &mut worker);
+        difference += d;
+        total += t;
+    }
+    assert!(
+        difference <= COVERAGE_BOUND * total,
+        "random quadratics: differ by {:.3} of the exported coverage",
+        difference / total
+    );
+}

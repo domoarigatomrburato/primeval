@@ -75,22 +75,44 @@ export type ProgressInfo = {
   /** The total number of steps, equal to the `count` option. */
   total: number;
   /**
-   * The current fit: the RMSE between the working canvas and the resized
-   * input over the RGB channels, divided by 255, from 0 (exact) to 1; lower
-   * is better.
+   * The current fit, after this step and the refit passes before it: the
+   * RMSE between the working canvas and the resized input over the RGB
+   * channels, divided by 255, from 0 (exact) to 1; lower is better. The
+   * final stage can lower it further, so the result can fit better than the
+   * last step reports.
    */
   score: number;
   /**
-   * The SVG element of the shape this step added, exactly as its line in the
-   * SVG output, without the newline, whatever the `output` format. Its
-   * coordinates are in the final SVG's `viewBox`, the working canvas, so the
-   * shapes of every step, in order, are the shape lines of the SVG the same
-   * render (same seed and options) returns.
+   * The SVG element of the shape this step's search added, formatted exactly
+   * as a shape line of the SVG output, without the newline, whatever the
+   * `output` format. Its coordinates are in the final SVG's `viewBox`, the
+   * working canvas.
    *
-   * To draw progress live, wrap the shapes received so far in an `<svg>` with
+   * The shapes of every step, in order, draw a live preview. The render
+   * revises shapes it has already reported: after some steps a refit pass,
+   * which re-optimises one shape at a time, can move, resize and recolour
+   * any shape so far, and after the last step a final stage can revise
+   * every shape, so the result's shape lines can differ from the preview.
+   * For triangles, polygons, rectangles and rotated rectangles the final
+   * stage is a joint gradient optimisation of every shape at once, whose
+   * coordinates are multiples of a quarter of a `viewBox` unit, half a unit
+   * for rectangles, while a rotated rectangle's corners are computed from
+   * such values, so they can be fractional. For `any` it is one refit pass,
+   * then the same optimisation of those shapes, the others keeping their
+   * geometry. The optimisation's result is kept only if the PNG output at
+   * the working size is closer to the resized input than with the shapes
+   * before it; otherwise the stage keeps those, with coordinates not
+   * rounded to that grid. For quadratics it is refit passes until one
+   * improves the fit by less than 1%, at most four; for the other shapes
+   * it is one refit pass. The passes and
+   * the stage keep the shapes' number, their order and each shape's kind,
+   * though an ellipse can turn into a `<circle>` or back when its radii
+   * become equal or unequal.
+   *
+   * To draw the preview, wrap the shapes received so far in an `<svg>` with
    * the final document's `viewBox` and background, for example taken from a
    * `count: 1` render with the same options: the background and canvas size
-   * do not depend on `count`.
+   * do not depend on `count`. When the result arrives, show the result.
    */
   shape: string;
 };

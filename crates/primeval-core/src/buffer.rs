@@ -75,10 +75,11 @@ impl Buffer {
         self.height
     }
 
-    /// Returns a shared reference to the raw pixel bytes.
+    /// Returns the raw pixel bytes: row-major `[R, G, B]` triples, with
+    /// no row padding.
     #[must_use]
     #[inline]
-    pub(crate) fn pixels(&self) -> &[u8] {
+    pub fn pixels(&self) -> &[u8] {
         &self.pixels
     }
 

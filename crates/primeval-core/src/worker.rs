@@ -30,6 +30,7 @@ const COARSE_RESCORED_SEEDS: usize = 128;
 ///
 /// Each worker thread gets its own `WorkerCtx` so that shape rasterization
 /// and scoring can proceed without any synchronization.
+#[derive(Clone)]
 pub(crate) struct WorkerCtx<R> {
     /// Image width in pixels.
     pub(crate) width: i32,

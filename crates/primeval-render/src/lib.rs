@@ -2,8 +2,8 @@
 //!
 //! This crate handles the full decode -> optimize -> encode path on top of
 //! `primeval-core`. It takes encoded image bytes (JPEG, PNG, or WebP), runs the
-//! approximation search, and returns SVG or PNG output. Reading files is up to
-//! the caller.
+//! approximation search (greedy steps, then a final stage that revises every
+//! shape), and returns SVG or PNG output. Reading files is up to the caller.
 //!
 //! The Node package and napi binding in this repository build on the same API.
 //! If you want the canonical Rust-side defaults and validation behavior, this is
@@ -22,7 +22,8 @@
 //! render.resize_input = 128;
 //! render.output_size = 512;
 //!
-//! // Each step's shape is the SVG element it adds, in the output's `viewBox`.
+//! // Each step's shape is the SVG element it adds, in the output's `viewBox`:
+//! // a live preview that the final stage can revise.
 //! let mut shapes = Vec::new();
 //! let mut on_progress = |info: ProgressInfo| shapes.push(info.shape);
 //! let result = approximate(
@@ -47,7 +48,11 @@
 mod benches;
 mod error;
 mod input;
+#[cfg(any(test, feature = "lab"))]
+#[doc(hidden)]
+pub mod lab;
 mod output;
+mod pipeline;
 mod raster;
 mod svg;
 
@@ -270,21 +275,47 @@ pub struct ProgressInfo {
     /// The number of steps the render runs, [`RenderOptions::count`].
     pub total: u32,
     /// The difference between the canvas and the working-resolution target
-    /// after this step: the RMSE over the RGB channels divided by 255, from
-    /// `0.0` (identical) to `1.0`.
+    /// after this step and the refit passes before it: the RMSE over the
+    /// RGB channels divided by 255, from `0.0` (identical) to `1.0`.
+    /// The final stage can lower it further, so the result can score lower
+    /// than the last step.
     pub score: f64,
-    /// The SVG element of the shape this step added, exactly as its line in
-    /// the SVG output, without the newline, whatever the output format. Its
-    /// coordinates are in the SVG's `viewBox`, the working canvas, so the
-    /// shapes of every step, in order, are the shape lines of the SVG that
-    /// the same render returns.
+    /// The shape this step's greedy search committed, formatted exactly as
+    /// a shape line of the SVG output, without the newline, whatever the
+    /// output format. Its coordinates are in the SVG's `viewBox`, the
+    /// working canvas.
+    ///
+    /// The shapes of every step, in order, draw a live preview. The render
+    /// revises shapes it has already reported: after some steps a refit
+    /// pass, which re-optimises one shape at a time, can move, resize and
+    /// recolour any shape so far, and after the last step a final stage
+    /// can revise every shape, so the result's shape lines can differ from
+    /// the preview. For triangles, polygons, rectangles and rotated
+    /// rectangles the final stage is a joint gradient optimisation of
+    /// every shape at once, whose coordinates are multiples of a quarter of
+    /// a working pixel, and of half a pixel for rectangles, while a rotated
+    /// rectangle's corners are computed from such values, so the result's
+    /// coordinates can be fractional. For [`ShapeKind::Any`] it is one
+    /// refit pass, then the same optimisation of those shapes, the others
+    /// keeping their geometry. The optimisation's result is kept only if
+    /// the PNG output at the working size is closer to the target than with
+    /// the shapes before it; otherwise the stage keeps those, with
+    /// coordinates not rounded to that lattice. For
+    /// [`ShapeKind::Quadratic`] it is refit passes until one lowers the
+    /// score by less than 1%, at most four. For the other kinds it is one
+    /// refit pass. The passes and the stage keep the shapes' number, their
+    /// order and each shape's kind; an ellipse whose radii a pass makes
+    /// equal (or unequal) is written as a `<circle>` (or an `<ellipse>`),
+    /// so those two element names can swap.
     pub shape: String,
 }
 
 /// A cheap-to-clone handle that cancels a running [`approximate`] call.
 ///
 /// Clones share the same flag. The render checks it before and after
-/// decoding, before every step, and before encoding.
+/// decoding, before every step, during the final stage (between the layers
+/// of a refit pass, or before every iteration of the joint optimisation and
+/// before its snap), and before encoding.
 #[derive(Clone, Debug, Default)]
 pub struct CancellationToken(Arc<AtomicBool>);
 
@@ -420,6 +451,31 @@ impl ApproximateResult {
 
 /// Decode, optimize, and encode a single output in one call.
 ///
+/// The search runs [`RenderOptions::count`] greedy steps, each adding the
+/// best shape it finds and reporting it through `execution`'s progress
+/// callback. After some of the steps it runs a refit pass that
+/// re-optimises every shape so far at its own layer, with the others
+/// fixed, and keeps the result only if it lowers the score, so later steps
+/// build on the revised shapes; the passes are spaced so that their cost
+/// grows linearly with the count. A final stage then revises every shape
+/// and reports no progress. For [`ShapeKind::Triangle`],
+/// [`ShapeKind::Polygon`], [`ShapeKind::Rectangle`] and
+/// [`ShapeKind::RotatedRectangle`] it is a joint gradient optimisation of
+/// the geometry, opacity (with [`Alpha::Auto`]) and colour of every shape
+/// at once, against a model of the anti-aliased output, snapped to quarter
+/// pixels (half pixels for axis-aligned rectangles) that keep every angle
+/// above 15°, every polygon strictly convex and every rectangle within the
+/// 1:8 aspect cap ([`primeval_core::joint`]). For [`ShapeKind::Any`] it is
+/// one refit pass, then the same joint optimisation of the triangles,
+/// polygons and rectangles, every other shape keeping its geometry. The
+/// joint optimisation's result is kept only if the PNG output at the
+/// working size is closer to the target than with the shapes before it;
+/// otherwise the stage keeps those, with coordinates not rounded to its
+/// lattice. For [`ShapeKind::Quadratic`] it is refit passes until one
+/// lowers the score by less than 1%, at most four.
+/// For the other kinds it is one refit pass. The result keeps the number,
+/// order and kind of the shapes, and is encoded from the revised shapes.
+///
 /// # Errors
 ///
 /// Returns [`ApproximateError::InvalidOption`] for an option outside its
@@ -437,20 +493,12 @@ pub fn approximate(
         output,
         render,
     } = request;
-    validate_options(&render)?;
-
-    execution.check_cancelled()?;
-    let image = decode_input(&input)?;
-    drop(input);
-    execution.check_cancelled()?;
-    let (working, background) = prepare_target(image, render.background, render.resize_input);
-    let (width, height) = working.dimensions();
-    let target = Buffer::from_rgb(width, height, working.into_raw())
-        .ok_or_else(|| ApproximateError::internal("working image has an invalid pixel length"))?;
+    let (target, background) = working_target(input, &render, || execution.check_cancelled())?;
     let mut options = ModelOptions::default();
     options.seed = render.seed;
     let mut model = Model::new(target, background, options);
 
+    let pipeline = pipeline::pipeline(render.shape);
     for step in 0..render.count {
         execution.check_cancelled()?;
 
@@ -467,10 +515,65 @@ pub fn approximate(
                 shape: svg::shape_element(&shape.geometry, shape.color),
             });
         }
+
+        // A refit pass the pipeline schedules after this step revises the
+        // shapes already reported; it stops once cancelled.
+        pipeline::after_step(&mut model, pipeline.during, step + 1, render.alpha, || {
+            execution.is_cancelled()
+        })
+        .ok_or(ApproximateError::Aborted)?;
     }
 
+    // The final stage revises the greedy shapes before encoding; it reports
+    // no progress and stops once cancelled.
     execution.check_cancelled()?;
-    encode_output(&model.drawing(), render.output_size, output)
+    let drawing = pipeline::final_stage(&mut model, pipeline, render.alpha, None, || {
+        execution.is_cancelled()
+    })
+    .ok_or(ApproximateError::Aborted)?;
+
+    execution.check_cancelled()?;
+    encode_output(&drawing, render.output_size, output)
+}
+
+/// Validate `render`, decode `input`, and build the working-resolution
+/// target and its resolved background: everything [`approximate`] does
+/// before it creates the model. `check_cancelled` runs before and after
+/// decoding; `input` is dropped as soon as it is decoded.
+///
+/// `lab::working_target` calls this too, so the evaluation runner cannot
+/// drift from [`approximate`].
+fn working_target(
+    input: impl AsRef<[u8]>,
+    render: &RenderOptions,
+    check_cancelled: impl Fn() -> Result<(), ApproximateError>,
+) -> Result<(Buffer, Color), ApproximateError> {
+    let (working, background) = working_image(input, render, check_cancelled)?;
+    let (width, height) = working.dimensions();
+    let target = Buffer::from_rgb(width, height, working.into_raw())
+        .ok_or_else(|| ApproximateError::internal("working image has an invalid pixel length"))?;
+    Ok((target, background))
+}
+
+/// [`working_target`]'s steps up to the thumbnail: the working image and
+/// its resolved background, before they become the engine's [`Buffer`].
+/// `lab::working_image` calls this too.
+fn working_image(
+    input: impl AsRef<[u8]>,
+    render: &RenderOptions,
+    check_cancelled: impl Fn() -> Result<(), ApproximateError>,
+) -> Result<(RgbImage, Color), ApproximateError> {
+    validate_options(render)?;
+
+    check_cancelled()?;
+    let image = decode_input(input.as_ref())?;
+    drop(input);
+    check_cancelled()?;
+    Ok(prepare_target(
+        image,
+        render.background,
+        render.resize_input,
+    ))
 }
 
 fn encode_output(
@@ -759,6 +862,178 @@ mod tests {
         }
     }
 
+    /// Renders a 100 × 80 gradient as SVG with `shape` inside a dedicated
+    /// pool of `threads` threads: several bands of the joint optimisation's
+    /// passes.
+    fn joint_svg_on_threads(shape: ShapeKind, threads: usize) -> String {
+        let image = RgbaImage::from_fn(100, 80, |x, y| {
+            let ring = (x as i32 - 40).pow(2) + (y as i32 - 35).pow(2) < 600;
+            Rgba([
+                (x * 2) as u8,
+                if ring { 240 } else { (y * 3) as u8 },
+                ((x + y) % 50 * 5) as u8,
+                255,
+            ])
+        });
+        let mut input = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(image)
+            .write_to(&mut input, ImageFormat::Png)
+            .expect("fixture png");
+        let mut request = request(input.into_inner(), OutputFormat::Svg);
+        request.render.shape = shape;
+        request.render.alpha = Alpha::Auto;
+        request.render.count = 8;
+        request.render.resize_input = 100;
+        request.render.output_size = 100;
+        request.render.seed = Some(42);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("test thread pool");
+        match pool.install(|| approximate(request, Execution::new())) {
+            Ok(ApproximateResult::Svg { data, .. }) => data,
+            other => panic!("expected an SVG, got {other:?}"),
+        }
+    }
+
+    /// The joint optimisation of `shape`, whose shapes are polygons of
+    /// `vertices` points, gives the same SVG whatever the number of
+    /// threads, and writes quarter-pixel coordinates.
+    fn assert_joint_svg_is_identical_across_thread_counts(shape: ShapeKind, vertices: usize) {
+        let reference = joint_svg_on_threads(shape, 1);
+        for threads in [2, 4, 8] {
+            assert!(
+                joint_svg_on_threads(shape, threads) == reference,
+                "{threads} threads changed the SVG"
+            );
+        }
+        let coordinates: Vec<f64> = svg_shape_lines(&reference)
+            .iter()
+            .map(|line| {
+                let points = line
+                    .split("points=\"")
+                    .nth(1)
+                    .and_then(|rest| rest.split('"').next())
+                    .unwrap_or_else(|| panic!("not a polygon: {line}"));
+                points
+                    .split([' ', ','])
+                    .map(|value| value.parse::<f64>().expect("a number"))
+                    .collect::<Vec<_>>()
+            })
+            .inspect(|points| assert_eq!(points.len(), 2 * vertices))
+            .flatten()
+            .collect();
+        assert!(coordinates.iter().all(|value| (value * 4.0).fract() == 0.0));
+        assert!(
+            coordinates.iter().any(|value| (value * 2.0).fract() != 0.0),
+            "no quarter-pixel coordinate"
+        );
+    }
+
+    #[test]
+    fn same_seed_triangle_svg_is_identical_across_thread_counts() {
+        assert_joint_svg_is_identical_across_thread_counts(ShapeKind::Triangle, 3);
+    }
+
+    #[test]
+    fn same_seed_polygon_svg_is_identical_across_thread_counts() {
+        assert_joint_svg_is_identical_across_thread_counts(ShapeKind::Polygon, 4);
+    }
+
+    /// The joint optimisation of rectangles, rotated or not, gives the
+    /// same SVG whatever the number of threads. Axis-aligned rectangles
+    /// stay `<rect>` elements on the half-pixel lattice, some of them off
+    /// whole pixels; rotated rectangles stay polygons of four points.
+    #[test]
+    fn same_seed_rectangle_svgs_are_identical_across_thread_counts() {
+        for shape in [ShapeKind::Rectangle, ShapeKind::RotatedRectangle] {
+            let reference = joint_svg_on_threads(shape, 1);
+            for threads in [2, 4, 8] {
+                assert!(
+                    joint_svg_on_threads(shape, threads) == reference,
+                    "{shape:?}: {threads} threads changed the SVG"
+                );
+            }
+            for line in svg_shape_lines(&reference) {
+                match shape {
+                    ShapeKind::Rectangle => assert!(line.starts_with("<rect x="), "{line}"),
+                    _ => {
+                        let points = line
+                            .split("points=\"")
+                            .nth(1)
+                            .and_then(|rest| rest.split('"').next())
+                            .unwrap_or_else(|| panic!("not a polygon: {line}"));
+                        assert_eq!(points.split([' ', ',']).count(), 8, "{line}");
+                    }
+                }
+            }
+        }
+        let reference = joint_svg_on_threads(ShapeKind::Rectangle, 1);
+        let values: Vec<f64> = svg_shape_lines(&reference)
+            .iter()
+            .flat_map(|line| {
+                ["x", "y", "width", "height"].map(|name| {
+                    line.split(&format!(" {name}=\""))
+                        .nth(1)
+                        .and_then(|rest| rest.split('"').next())
+                        .and_then(|value| value.parse::<f64>().ok())
+                        .unwrap_or_else(|| panic!("no {name}: {line}"))
+                })
+            })
+            .collect();
+        assert!(values.iter().all(|value| (value * 2.0).fract() == 0.0));
+        assert!(
+            values.iter().any(|value| value.fract() != 0.0),
+            "no half-pixel coordinate"
+        );
+    }
+
+    /// The final stage polls `cancelled` during the joint optimisation of
+    /// triangles, rectangles and rotated rectangles; once it returns true
+    /// the stage returns `None`, which `approximate` turns into
+    /// [`ApproximateError::Aborted`].
+    #[test]
+    fn cancellation_during_the_final_stage_stops_it() {
+        for shape in [
+            render_options().shape,
+            ShapeKind::Rectangle,
+            ShapeKind::RotatedRectangle,
+        ] {
+            let render = RenderOptions {
+                shape,
+                ..render_options()
+            };
+            let (target, background) =
+                working_target(fixture_bytes(), &render, || Ok(())).expect("target");
+            let mut options = ModelOptions::default();
+            options.seed = render.seed;
+            let mut model = Model::new(target, background, options);
+            for _ in 0..render.count {
+                model.step(render.shape, render.alpha);
+            }
+            let stages = pipeline::pipeline(render.shape);
+            assert!(stages.joint.is_some(), "{shape:?}");
+            let mut polls = 0;
+            let finished =
+                pipeline::final_stage(&mut model.clone(), stages, render.alpha, None, || {
+                    polls += 1;
+                    false
+                });
+            assert!(finished.is_some());
+            // 3 shapes run 80 iterations, each polled before it starts.
+            assert!(polls > 80, "{shape:?}: {polls} polls");
+            for cancel_at in [1, polls / 2, polls] {
+                let mut count = 0;
+                let stopped =
+                    pipeline::final_stage(&mut model.clone(), stages, render.alpha, None, || {
+                        count += 1;
+                        count >= cancel_at
+                    });
+                assert_eq!(stopped, None, "{shape:?}: cancelled at poll {cancel_at}");
+            }
+        }
+    }
+
     #[test]
     fn different_seeds_render_different_svgs() {
         assert_ne!(svg_on_threads(1, 2), svg_on_threads(2, 2));
@@ -902,8 +1177,18 @@ mod tests {
         lines[2..lines.len() - 1].to_vec()
     }
 
+    /// The SVG element name of a shape line. A circle is written as an
+    /// ellipse whose radii are equal, so the two are one element kind here.
+    fn element_name(line: &str) -> &str {
+        let name = line
+            .strip_prefix('<')
+            .and_then(|rest| rest.split([' ', '/', '>']).next())
+            .unwrap_or_else(|| panic!("not an element: {line}"));
+        if name == "circle" { "ellipse" } else { name }
+    }
+
     #[test]
-    fn progress_shapes_are_the_final_svg_shape_lines_in_order() {
+    fn progress_shapes_preview_the_final_svg_shape_lines() {
         let kinds = [
             ShapeKind::Any,
             ShapeKind::Triangle,
@@ -916,6 +1201,7 @@ mod tests {
             ShapeKind::Polygon,
         ];
         let mut elements = std::collections::BTreeSet::new();
+        let mut revised = 0;
         for shape in kinds {
             let mut options = render_options();
             options.count = 6;
@@ -936,9 +1222,15 @@ mod tests {
             let Ok(ApproximateResult::Svg { data, .. }) = result else {
                 panic!("{shape:?}: expected an SVG result, got {result:?}");
             };
-            assert_eq!(shapes, svg_shape_lines(&data), "{shape:?}");
+            let lines = svg_shape_lines(&data);
+            assert_eq!(shapes.len(), 6, "{shape:?}: one shape per step");
             assert!(shapes.iter().all(|line| !line.contains('\n')), "{shape:?}");
-            for line in &shapes {
+            assert_eq!(lines.len(), shapes.len(), "{shape:?}");
+            let preview: Vec<&str> = shapes.iter().map(|line| element_name(line)).collect();
+            let result: Vec<&str> = lines.iter().map(|line| element_name(line)).collect();
+            assert_eq!(preview, result, "{shape:?}: element kinds in order");
+            revised += usize::from(shapes != lines);
+            for line in shapes.iter().map(String::as_str).chain(lines) {
                 if line.starts_with("<path ") {
                     elements.insert("path");
                 } else if line.starts_with("<ellipse ") && line.contains(" transform=\"rotate(") {
@@ -951,6 +1243,8 @@ mod tests {
             elements.into_iter().collect::<Vec<_>>(),
             ["path", "rotated ellipse"]
         );
+        // The final refit pass ran: it revised the preview for most kinds.
+        assert!(revised >= 5, "the refit pass revised only {revised} of 9");
     }
 
     #[test]
@@ -974,6 +1268,40 @@ mod tests {
 
         assert!(matches!(result, Err(ApproximateError::Aborted)));
         assert_eq!(fired, [1]);
+    }
+
+    /// A token cancelled at a step after which the pipeline runs a refit
+    /// pass stops the render with [`ApproximateError::Aborted`]: the pass
+    /// polls the token before its first layer (see
+    /// `pipeline::tests::cancellation_during_a_refit_in_the_search_stops_it`)
+    /// and no later step runs.
+    #[test]
+    fn cancellation_during_a_refit_in_the_search_returns_abort_error() {
+        let mut request = request(fixture_bytes(), OutputFormat::Svg);
+        request.render.count = 8;
+        let during = pipeline::pipeline(request.render.shape).during;
+        let due = (1..=request.render.count)
+            .find(|&step| during.due(step))
+            .expect("a pass within the count");
+        let token = CancellationToken::new();
+        let canceller = token.clone();
+        let mut fired = Vec::new();
+        let mut on_progress = |info: ProgressInfo| {
+            fired.push(info.step);
+            if info.step == due {
+                canceller.cancel();
+            }
+        };
+
+        let result = approximate(
+            request,
+            Execution::new()
+                .progress(&mut on_progress)
+                .cancellation(&token),
+        );
+
+        assert!(matches!(result, Err(ApproximateError::Aborted)));
+        assert_eq!(fired, (1..=due).collect::<Vec<_>>());
     }
 
     #[test]

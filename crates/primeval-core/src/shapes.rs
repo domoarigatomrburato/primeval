@@ -1,7 +1,7 @@
 use crate::drawing::{Geometry, Point};
 use crate::error::ParseError;
 use crate::scanline::Scanline;
-use crate::util::{degrees, radians, rotate_sc};
+use crate::util::{radians, rotate_sc};
 use crate::worker::{SearchRound, WorkerCtx};
 use rand::{Rng, RngExt};
 use rand_distr::{Distribution, StandardNormal};
@@ -20,19 +20,22 @@ pub enum ShapeKind {
     Any,
     /// Triangles.
     Triangle,
-    /// Axis-aligned rectangles.
+    /// Axis-aligned rectangles, the long side at most 8 times the short
+    /// one.
     Rectangle,
     /// Axis-aligned ellipses.
     Ellipse,
     /// Circles.
     Circle,
-    /// Rectangles rotated about their centre.
+    /// Rectangles rotated about their centre, the long side at most 8 times
+    /// the short one.
     RotatedRectangle,
     /// Stroked quadratic Bézier curves.
     Quadratic,
     /// Ellipses rotated about their centre.
     RotatedEllipse,
-    /// Quadrilaterals, whose edges may cross.
+    /// Simple, strictly convex quadrilaterals, every angle strictly above
+    /// 15°.
     Polygon,
 }
 
@@ -126,6 +129,19 @@ pub(crate) struct Triangle {
     pub(crate) y3: i32,
 }
 
+/// The pixels `x1..=x2` × `y1..=y2`, the corners in either order, its long
+/// side at most [`MAX_ASPECT`] (8) times the short one
+/// ([`Self::is_valid`]), as a rotated rectangle's, so that it reads as a
+/// rectangle and not a line.
+///
+/// Measured with the engine runner (seed 42, `--refine final` with the
+/// refit pass, the RMSE of the PNG at the working size), the cap made the
+/// median over the corpus 2.2% worse at 50 steps, 2.0% at 100 and 1.0% at
+/// 200 for rectangles, the synthetic shapes 5–9%; for `any` the median
+/// changed by −2.3%, −0.5% and −1.4%, but its synthetic shapes got 7%,
+/// 35% and 72% worse. The SVG size did not change, nor did the greedy
+/// search's time (0.95–0.98×); with the refit pass the time was
+/// 1.07–1.14× on one run each.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Rectangle {
     pub(crate) x1: i32,
@@ -149,12 +165,17 @@ pub(crate) struct Circle {
     pub(crate) r: i32,
 }
 
-/// A rectangle of `sx` × `sy` rotated by `angle` degrees about `(x, y)`.
+/// A rectangle of `sx` × `sy` rotated by `angle` degrees about `(x, y)`,
+/// its long side at most [`MAX_ASPECT`] (8) times the short one
+/// ([`Self::is_valid`]), so that it reads as a rectangle and not a line.
 ///
-/// Unlike Go's `primitive`, it intentionally has no aspect-ratio limit:
-/// enforcing Go's limit (long side at most 5 × the short side) measurably
-/// hurt quality, for example the synthetic-texture rotated-rectangle score
-/// got 44% worse at 100 steps and 20% worse at 200.
+/// The cap costs quality mostly on fine detail. Measured with the engine
+/// runner (seed 42, `--refine final`, the RMSE of the PNG at the working
+/// size), it made the synthetic-texture rotated-rectangle result 39% worse
+/// at 50 steps, 23% at 100 and 6.5% at 200, while the median over the
+/// corpus got 0.3%, 1.2% and 0.7% worse. Go's `primitive` caps the ratio
+/// at 1:5; an earlier measurement of that cap, without the refit pass,
+/// found the synthetic-texture score 44% worse at 100 steps and 20% at 200.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RotatedRectangle {
     pub(crate) x: i32,
@@ -184,6 +205,9 @@ pub(crate) struct RotatedEllipse {
     pub(crate) angle: f64,
 }
 
+/// A polygon through `(x[i], y[i])` for `i < order`; the search makes
+/// quadrilaterals. It is simple and strictly convex with every angle
+/// strictly above 15° ([`Self::is_valid`]), so that it reads as a polygon.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Polygon {
     pub(crate) order: usize,
@@ -349,16 +373,17 @@ impl Shape {
         }
     }
 
-    pub(crate) fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>) {
+    /// Moves the shape by a move of size `step`.
+    pub(crate) fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>, step: Step) {
         match self {
-            Self::Triangle(shape) => shape.mutate(worker),
-            Self::Rectangle(shape) => shape.mutate(worker),
-            Self::Ellipse(shape) => shape.mutate(worker),
-            Self::Circle(shape) => shape.mutate(worker),
-            Self::RotatedRectangle(shape) => shape.mutate(worker),
-            Self::Quadratic(shape) => shape.mutate(worker),
-            Self::RotatedEllipse(shape) => shape.mutate(worker),
-            Self::Polygon(shape) => shape.mutate(worker),
+            Self::Triangle(shape) => shape.mutate(worker, step),
+            Self::Rectangle(shape) => shape.mutate(worker, step),
+            Self::Ellipse(shape) => shape.mutate(worker, step),
+            Self::Circle(shape) => shape.mutate(worker, step),
+            Self::RotatedRectangle(shape) => shape.mutate(worker, step),
+            Self::Quadratic(shape) => shape.mutate(worker, step),
+            Self::RotatedEllipse(shape) => shape.mutate(worker, step),
+            Self::Polygon(shape) => shape.mutate(worker, step),
         }
     }
 
@@ -457,46 +482,20 @@ impl Triangle {
             x3,
             y3,
         };
-        triangle.mutate(worker);
+        triangle.mutate(worker, Step::Coarse);
         triangle
     }
 
+    /// Whether every angle is strictly above 15° ([`is_legible_convex`]).
+    /// The products of integer coordinates are exact, and no lattice
+    /// triangle has an angle of exactly 15°.
     #[must_use]
     pub(crate) fn is_valid(&self) -> bool {
-        const MIN_DEGREES: f64 = 15.0;
-
-        fn angle(ax: i32, ay: i32, bx: i32, by: i32) -> Option<f64> {
-            let ax = ax as f64;
-            let ay = ay as f64;
-            let bx = bx as f64;
-            let by = by as f64;
-            let da = (ax * ax + ay * ay).sqrt();
-            let db = (bx * bx + by * by).sqrt();
-            if da == 0.0 || db == 0.0 {
-                return None;
-            }
-            let dot = ((ax / da) * (bx / db) + (ay / da) * (by / db)).clamp(-1.0, 1.0);
-            Some(degrees(dot.acos()))
-        }
-
-        let Some(a1) = angle(
-            self.x2 - self.x1,
-            self.y2 - self.y1,
-            self.x3 - self.x1,
-            self.y3 - self.y1,
-        ) else {
-            return false;
-        };
-        let Some(a2) = angle(
-            self.x1 - self.x2,
-            self.y1 - self.y2,
-            self.x3 - self.x2,
-            self.y3 - self.y2,
-        ) else {
-            return false;
-        };
-        let a3 = 180.0 - a1 - a2;
-        a1 > MIN_DEGREES && a2 > MIN_DEGREES && a3 > MIN_DEGREES
+        is_legible_convex(&[
+            (f64::from(self.x1), f64::from(self.y1)),
+            (f64::from(self.x2), f64::from(self.y2)),
+            (f64::from(self.x3), f64::from(self.y3)),
+        ])
     }
 
     fn rasterize<'a, R>(&self, worker: &'a mut WorkerCtx<R>) -> &'a [Scanline] {
@@ -510,27 +509,24 @@ impl Triangle {
         &worker.lines
     }
 
-    fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>) {
+    fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>, step: Step) {
         const MARGIN: i32 = 16;
         loop {
             match worker.rng.random_range(0..3) {
                 0 => {
-                    self.x1 = (self.x1 + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                        .clamp(-MARGIN, worker.width - 1 + MARGIN);
-                    self.y1 = (self.y1 + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                        .clamp(-MARGIN, worker.height - 1 + MARGIN);
+                    let (dx1, dy1) = step.offsets(&mut worker.rng, POSITION_SIGMA);
+                    self.x1 = (self.x1 + dx1).clamp(-MARGIN, worker.width - 1 + MARGIN);
+                    self.y1 = (self.y1 + dy1).clamp(-MARGIN, worker.height - 1 + MARGIN);
                 }
                 1 => {
-                    self.x2 = (self.x2 + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                        .clamp(-MARGIN, worker.width - 1 + MARGIN);
-                    self.y2 = (self.y2 + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                        .clamp(-MARGIN, worker.height - 1 + MARGIN);
+                    let (dx2, dy2) = step.offsets(&mut worker.rng, POSITION_SIGMA);
+                    self.x2 = (self.x2 + dx2).clamp(-MARGIN, worker.width - 1 + MARGIN);
+                    self.y2 = (self.y2 + dy2).clamp(-MARGIN, worker.height - 1 + MARGIN);
                 }
                 _ => {
-                    self.x3 = (self.x3 + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                        .clamp(-MARGIN, worker.width - 1 + MARGIN);
-                    self.y3 = (self.y3 + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                        .clamp(-MARGIN, worker.height - 1 + MARGIN);
+                    let (dx3, dy3) = step.offsets(&mut worker.rng, POSITION_SIGMA);
+                    self.x3 = (self.x3 + dx3).clamp(-MARGIN, worker.width - 1 + MARGIN);
+                    self.y3 = (self.y3 + dy3).clamp(-MARGIN, worker.height - 1 + MARGIN);
                 }
             }
             if self.is_valid() {
@@ -552,15 +548,33 @@ impl Rectangle {
         }
     }
 
+    /// A random rectangle from a sampled point, its opposite corner drawn
+    /// again until the rectangle keeps the aspect-ratio cap. Offsets of 1
+    /// on both axes always keep it, so the loop ends.
     fn random<R: Rng>(worker: &mut WorkerCtx<R>, round: &SearchRound<'_>) -> Self {
         let (x1, y1) = worker.sample_xy(round);
-        let x2 = (x1 + worker.rng.random_range(1..33)).clamp(0, worker.width - 1);
-        let y2 = (y1 + worker.rng.random_range(1..33)).clamp(0, worker.height - 1);
-        Self { x1, y1, x2, y2 }
+        loop {
+            let x2 = (x1 + worker.rng.random_range(1..33)).clamp(0, worker.width - 1);
+            let y2 = (y1 + worker.rng.random_range(1..33)).clamp(0, worker.height - 1);
+            let rect = Self { x1, y1, x2, y2 };
+            if rect.is_valid() {
+                return rect;
+            }
+        }
     }
 
+    /// Whether the long side is at most [`MAX_ASPECT`] times the short one,
+    /// in pixels.
     #[must_use]
-    fn bounds(&self) -> (i32, i32, i32, i32) {
+    pub(crate) fn is_valid(&self) -> bool {
+        let (x1, y1, x2, y2) = self.bounds();
+        let (width, height) = (x2 - x1 + 1, y2 - y1 + 1);
+        width.max(height) <= MAX_ASPECT * width.min(height)
+    }
+
+    /// The corners in order: `x1 <= x2` and `y1 <= y2`.
+    #[must_use]
+    pub(crate) fn bounds(&self) -> (i32, i32, i32, i32) {
         let (mut x1, mut y1, mut x2, mut y2) = (self.x1, self.y1, self.x2, self.y2);
         if x1 > x2 {
             std::mem::swap(&mut x1, &mut x2);
@@ -585,20 +599,32 @@ impl Rectangle {
         &worker.lines
     }
 
-    fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>) {
-        match worker.rng.random_range(0..2) {
-            0 => {
-                self.x1 = (self.x1 + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                    .clamp(0, worker.width - 1);
-                self.y1 = (self.y1 + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                    .clamp(0, worker.height - 1);
+    /// Moves one corner. A move that breaks the aspect-ratio cap
+    /// ([`Self::is_valid`]) is undone and a new one drawn, as for a rotated
+    /// rectangle. From a valid rectangle, shortening its long side by one
+    /// pixel, or moving a corner of a square by one pixel, keeps the cap,
+    /// and such a move has a positive probability at every step size, so
+    /// the loop ends.
+    fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>, step: Step) {
+        debug_assert!(self.is_valid(), "{self:?}");
+        let start = *self;
+        loop {
+            match worker.rng.random_range(0..2) {
+                0 => {
+                    let (dx1, dy1) = step.offsets(&mut worker.rng, POSITION_SIGMA);
+                    self.x1 = (self.x1 + dx1).clamp(0, worker.width - 1);
+                    self.y1 = (self.y1 + dy1).clamp(0, worker.height - 1);
+                }
+                _ => {
+                    let (dx2, dy2) = step.offsets(&mut worker.rng, POSITION_SIGMA);
+                    self.x2 = (self.x2 + dx2).clamp(0, worker.width - 1);
+                    self.y2 = (self.y2 + dy2).clamp(0, worker.height - 1);
+                }
             }
-            _ => {
-                self.x2 = (self.x2 + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                    .clamp(0, worker.width - 1);
-                self.y2 = (self.y2 + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                    .clamp(0, worker.height - 1);
+            if self.is_valid() {
+                return;
             }
+            *self = start;
         }
     }
 }
@@ -618,20 +644,19 @@ impl Ellipse {
         rasterize_ellipse(worker, self.x, self.y, self.rx, self.ry)
     }
 
-    fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>) {
+    fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>, step: Step) {
         match worker.rng.random_range(0..3) {
             0 => {
-                self.x = (self.x + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                    .clamp(0, worker.width - 1);
-                self.y = (self.y + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                    .clamp(0, worker.height - 1);
+                let (dx, dy) = step.offsets(&mut worker.rng, POSITION_SIGMA);
+                self.x = (self.x + dx).clamp(0, worker.width - 1);
+                self.y = (self.y + dy).clamp(0, worker.height - 1);
             }
             1 => {
-                self.rx = (self.rx + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
+                self.rx = (self.rx + step.offset(&mut worker.rng, POSITION_SIGMA))
                     .clamp(1, worker.width - 1)
             }
             _ => {
-                self.ry = (self.ry + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
+                self.ry = (self.ry + step.offset(&mut worker.rng, POSITION_SIGMA))
                     .clamp(1, worker.height - 1)
             }
         }
@@ -652,16 +677,15 @@ impl Circle {
         rasterize_ellipse(worker, self.x, self.y, self.r, self.r)
     }
 
-    fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>) {
+    fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>, step: Step) {
         match worker.rng.random_range(0..3) {
             0 => {
-                self.x = (self.x + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                    .clamp(0, worker.width - 1);
-                self.y = (self.y + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                    .clamp(0, worker.height - 1);
+                let (dx, dy) = step.offsets(&mut worker.rng, POSITION_SIGMA);
+                self.x = (self.x + dx).clamp(0, worker.width - 1);
+                self.y = (self.y + dy).clamp(0, worker.height - 1);
             }
             _ => {
-                self.r = (self.r + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
+                self.r = (self.r + step.offset(&mut worker.rng, POSITION_SIGMA))
                     .clamp(1, worker.width.min(worker.height) - 1)
             }
         }
@@ -697,17 +721,32 @@ impl RotatedRectangle {
         })
     }
 
+    /// A random rectangle near a sampled point, its sides drawn from
+    /// `1..=32` again until they keep the aspect-ratio cap, then moved once.
     fn random<R: Rng>(worker: &mut WorkerCtx<R>, round: &SearchRound<'_>) -> Self {
         let (x, y) = worker.sample_xy(round);
+        let (sx, sy) = loop {
+            let sx = worker.rng.random_range(1..33);
+            let sy = worker.rng.random_range(1..33);
+            if sx.max(sy) <= MAX_ASPECT * sx.min(sy) {
+                break (sx, sy);
+            }
+        };
         let mut rect = Self {
             x,
             y,
-            sx: worker.rng.random_range(1..33),
-            sy: worker.rng.random_range(1..33),
+            sx,
+            sy,
             angle: worker.rng.random_range(0..360),
         };
-        rect.mutate(worker);
+        rect.mutate(worker, Step::Coarse);
         rect
+    }
+
+    /// Whether the long side is at most [`MAX_ASPECT`] times the short one.
+    #[must_use]
+    pub(crate) fn is_valid(&self) -> bool {
+        self.sx.max(self.sy) <= MAX_ASPECT * self.sx.min(self.sy)
     }
 
     fn rasterize<'a, R>(&self, worker: &'a mut WorkerCtx<R>) -> &'a [Scanline] {
@@ -721,21 +760,32 @@ impl RotatedRectangle {
         &worker.lines
     }
 
-    fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>) {
-        match worker.rng.random_range(0..3) {
-            0 => {
-                self.x = (self.x + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                    .clamp(0, worker.width - 1);
-                self.y = (self.y + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                    .clamp(0, worker.height - 1);
+    /// Moves the centre, the sides or the angle. A move that breaks the
+    /// aspect-ratio cap ([`Self::is_valid`]) is undone and a new one drawn,
+    /// so the moves are the unconstrained ones restricted to valid
+    /// rectangles. Only a move of the sides can break it, and from a valid
+    /// rectangle every other move keeps it, so the loop ends.
+    fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>, step: Step) {
+        debug_assert!(self.is_valid(), "{self:?}");
+        let start = *self;
+        loop {
+            match worker.rng.random_range(0..3) {
+                0 => {
+                    let (dx, dy) = step.offsets(&mut worker.rng, POSITION_SIGMA);
+                    self.x = (self.x + dx).clamp(0, worker.width - 1);
+                    self.y = (self.y + dy).clamp(0, worker.height - 1);
+                }
+                1 => {
+                    let (dsx, dsy) = step.offsets(&mut worker.rng, POSITION_SIGMA);
+                    self.sx = (self.sx + dsx).clamp(1, worker.width - 1);
+                    self.sy = (self.sy + dsy).clamp(1, worker.height - 1);
+                }
+                _ => self.angle += step.offset(&mut worker.rng, ANGLE_SIGMA),
             }
-            1 => {
-                self.sx = (self.sx + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                    .clamp(1, worker.width - 1);
-                self.sy = (self.sy + gaussian_sample(&mut worker.rng, POSITION_SIGMA) as i32)
-                    .clamp(1, worker.height - 1);
+            if self.is_valid() {
+                return;
             }
-            _ => self.angle += gaussian_sample(&mut worker.rng, ANGLE_SIGMA) as i32,
+            *self = start;
         }
     }
 }
@@ -743,16 +793,18 @@ impl RotatedRectangle {
 impl Quadratic {
     const MUTATE_MARGIN: f64 = 16.0;
     const MAX_MUTATE_ATTEMPTS: u32 = 6;
-    /// Stroke width in working pixels. The colour fit weights pixels by
-    /// coverage, while the output draws the stroke at its scaled width,
-    /// where it is mostly fully covered. A stroke narrower than one pixel
-    /// never fully covers one, so its fitted colour over-saturates to make
-    /// up for the partial coverage and the output is worse. One pixel is
-    /// the narrowest width that fully covers the centre line. Wider strokes
-    /// score better still (1.5 measured about 6% better than 1.0), but they
-    /// change the look of the curves and cost more time, so the width stays
-    /// at the minimum that fixes the mismatch.
-    const STROKE_WIDTH: f64 = 1.0;
+    /// Stroke width in working pixels. The rasterizer covers each pixel by
+    /// the share of its area under the stroke, as the exporter draws it,
+    /// so the colour fit sees the coverage the output has. tiny-skia draws
+    /// a stroke at most 1 px wide as a hairline, thinner than its width on
+    /// a diagonal, so the PNG at the working size would disagree with the
+    /// SVG and every larger PNG. Among the widths measured with the engine
+    /// runner (1, 1.5, 2 and 3 px, refit pass included), wider strokes fit
+    /// better: 2 px cut the median RMSE of the working-size PNG by 15% at
+    /// 100 shapes and 24% at 200 against the earlier 1 px stroke, 3 px by
+    /// 26% and 54%. Wider strokes change the look of the curves more and
+    /// cost more time, so the width stays at 2 px.
+    const STROKE_WIDTH: f64 = 2.0;
 
     /// The stroke rasterizer measures distances in continuous coordinates,
     /// so the control points map unchanged.
@@ -780,7 +832,7 @@ impl Quadratic {
             y3,
             width: Self::STROKE_WIDTH,
         };
-        quadratic.mutate(worker);
+        quadratic.mutate(worker, Step::Coarse);
         quadratic
     }
 
@@ -965,7 +1017,7 @@ impl Quadratic {
         )
     }
 
-    fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>) {
+    fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>, step: Step) {
         let min_coord = -Self::MUTATE_MARGIN;
         let max_x = f64::from(worker.width - 1) + Self::MUTATE_MARGIN;
         let max_y = f64::from(worker.height - 1) + Self::MUTATE_MARGIN;
@@ -975,21 +1027,21 @@ impl Quadratic {
         for _ in 0..Self::MAX_MUTATE_ATTEMPTS {
             match choice {
                 0 => {
-                    self.x1 = (self.x1 + gaussian_sample(&mut worker.rng, POSITION_SIGMA))
+                    self.x1 = (self.x1 + step.offset_f64(&mut worker.rng, POSITION_SIGMA))
                         .clamp(min_coord, max_x);
-                    self.y1 = (self.y1 + gaussian_sample(&mut worker.rng, POSITION_SIGMA))
+                    self.y1 = (self.y1 + step.offset_f64(&mut worker.rng, POSITION_SIGMA))
                         .clamp(min_coord, max_y);
                 }
                 1 => {
-                    self.x2 = (self.x2 + gaussian_sample(&mut worker.rng, POSITION_SIGMA))
+                    self.x2 = (self.x2 + step.offset_f64(&mut worker.rng, POSITION_SIGMA))
                         .clamp(min_coord, max_x);
-                    self.y2 = (self.y2 + gaussian_sample(&mut worker.rng, POSITION_SIGMA))
+                    self.y2 = (self.y2 + step.offset_f64(&mut worker.rng, POSITION_SIGMA))
                         .clamp(min_coord, max_y);
                 }
                 _ => {
-                    self.x3 = (self.x3 + gaussian_sample(&mut worker.rng, POSITION_SIGMA))
+                    self.x3 = (self.x3 + step.offset_f64(&mut worker.rng, POSITION_SIGMA))
                         .clamp(min_coord, max_x);
-                    self.y3 = (self.y3 + gaussian_sample(&mut worker.rng, POSITION_SIGMA))
+                    self.y3 = (self.y3 + step.offset_f64(&mut worker.rng, POSITION_SIGMA))
                         .clamp(min_coord, max_y);
                 }
             }
@@ -1046,21 +1098,21 @@ impl RotatedEllipse {
         &worker.lines
     }
 
-    fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>) {
+    fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>, step: Step) {
         match worker.rng.random_range(0..3) {
             0 => {
-                self.x = (self.x + gaussian_sample(&mut worker.rng, POSITION_SIGMA))
+                self.x = (self.x + step.offset_f64(&mut worker.rng, POSITION_SIGMA))
                     .clamp(0.0, f64::from(worker.width - 1));
-                self.y = (self.y + gaussian_sample(&mut worker.rng, POSITION_SIGMA))
+                self.y = (self.y + step.offset_f64(&mut worker.rng, POSITION_SIGMA))
                     .clamp(0.0, f64::from(worker.height - 1));
             }
             1 => {
-                self.rx = (self.rx + gaussian_sample(&mut worker.rng, POSITION_SIGMA))
+                self.rx = (self.rx + step.offset_f64(&mut worker.rng, POSITION_SIGMA))
                     .clamp(1.0, f64::from(worker.width - 1));
-                self.ry = (self.ry + gaussian_sample(&mut worker.rng, POSITION_SIGMA))
+                self.ry = (self.ry + step.offset_f64(&mut worker.rng, POSITION_SIGMA))
                     .clamp(1.0, f64::from(worker.height - 1));
             }
-            _ => self.angle += gaussian_sample(&mut worker.rng, ANGLE_SIGMA),
+            _ => self.angle += step.offset_f64(&mut worker.rng, ANGLE_SIGMA),
         }
     }
 }
@@ -1076,19 +1128,35 @@ impl Polygon {
         )
     }
 
+    /// A random polygon around a sampled vertex, its other vertices drawn
+    /// within 20 px of it again until the polygon is valid, then moved
+    /// once.
     fn random<R: Rng>(worker: &mut WorkerCtx<R>, round: &SearchRound<'_>, order: usize) -> Self {
         let mut x = [0.0; 4];
         let mut y = [0.0; 4];
         let (x0, y0) = worker.sample_xy_float(round);
         x[0] = x0;
         y[0] = y0;
-        for i in 1..order {
-            x[i] = x0 + worker.rng.random::<f64>() * 40.0 - 20.0;
-            y[i] = y0 + worker.rng.random::<f64>() * 40.0 - 20.0;
-        }
-        let mut polygon = Self { order, x, y };
-        polygon.mutate(worker);
+        let mut polygon = loop {
+            for i in 1..order {
+                x[i] = x0 + worker.rng.random::<f64>() * 40.0 - 20.0;
+                y[i] = y0 + worker.rng.random::<f64>() * 40.0 - 20.0;
+            }
+            let polygon = Self { order, x, y };
+            if polygon.is_valid() {
+                break polygon;
+            }
+        };
+        polygon.mutate(worker, Step::Coarse);
         polygon
+    }
+
+    /// Whether the polygon is simple and strictly convex with every angle
+    /// strictly above 15° ([`is_legible_convex`]).
+    #[must_use]
+    pub(crate) fn is_valid(&self) -> bool {
+        let vertices: [(f64, f64); 4] = std::array::from_fn(|i| (self.x[i], self.y[i]));
+        is_legible_convex(&vertices[..self.order])
     }
 
     fn rasterize<'a, R>(&self, worker: &'a mut WorkerCtx<R>) -> &'a [Scanline] {
@@ -1108,26 +1176,136 @@ impl Polygon {
         &worker.lines
     }
 
-    fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>) {
+    /// Moves one vertex. A move that breaks the rule ([`Self::is_valid`])
+    /// is undone and a new one drawn, so the moves are the unconstrained
+    /// ones restricted to valid polygons; small enough moves keep a valid
+    /// polygon valid, so the loop ends. There is no vertex-swap move: on a
+    /// strictly convex quad, swapping two neighbours always crosses it and
+    /// swapping opposite vertices leaves its outline unchanged.
+    fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>, step: Step) {
         const MARGIN: f64 = 16.0;
-        if worker.rng.random::<f64>() < 0.25 {
+        debug_assert!(self.is_valid(), "{self:?}");
+        let start = *self;
+        loop {
             let i = worker.rng.random_range(0..self.order);
-            let j = worker.rng.random_range(0..self.order);
-            self.x.swap(i, j);
-            self.y.swap(i, j);
-        } else {
-            let i = worker.rng.random_range(0..self.order);
-            self.x[i] = (self.x[i] + gaussian_sample(&mut worker.rng, POSITION_SIGMA))
+            self.x[i] = (self.x[i] + step.offset_f64(&mut worker.rng, POSITION_SIGMA))
                 .clamp(-MARGIN, f64::from(worker.width - 1) + MARGIN);
-            self.y[i] = (self.y[i] + gaussian_sample(&mut worker.rng, POSITION_SIGMA))
+            self.y[i] = (self.y[i] + step.offset_f64(&mut worker.rng, POSITION_SIGMA))
                 .clamp(-MARGIN, f64::from(worker.height - 1) + MARGIN);
+            if self.is_valid() {
+                return;
+            }
+            *self = start;
         }
     }
+}
+
+/// `tan 15°`, the bound of the minimum-angle rule. The validity checks
+/// compare tangents instead of computing angles, so they call no libm
+/// function, whose results can differ between platforms: native and wasm
+/// output stay identical.
+const TAN_MIN_ANGLE: f64 = 0.267_949_192_431_122_7;
+
+/// The longest side of a rectangle, rotated or not, in multiples of its
+/// shortest.
+const MAX_ASPECT: i32 = 8;
+
+/// Whether the polygon through `vertices`, three or four of them in either
+/// orientation, is simple and strictly convex with every interior angle
+/// strictly above 15°: the rule that keeps triangles and polygons reading
+/// as their kind.
+///
+/// At each vertex, with `u` and `w` the edges to the next and the previous
+/// vertex, the interior angle `θ` has `sin θ ∝ s · (u × w)` and
+/// `cos θ ∝ u · w`, where `s = ±1` is the orientation, taken from the first
+/// vertex. A vertex passes if `s · (u × w) > 0`, a strict turn the same way
+/// as at the first vertex (no straight or reflex angle, no coincident
+/// vertices), and `s · (u × w) > tan 15° · (u · w)`, so `θ > 15°`; an angle
+/// of 90° or more passes on the first condition alone. With a strict turn
+/// the same way at every vertex, every exterior angle is below 180° and
+/// they sum to a multiple of 360°, which for at most four vertices can
+/// only be 360°: the polygon is simple and convex.
+fn is_legible_convex(vertices: &[(f64, f64)]) -> bool {
+    debug_assert!((3..=4).contains(&vertices.len()));
+    let n = vertices.len();
+    let mut orientation = 1.0;
+    for i in 0..n {
+        let (px, py) = vertices[i];
+        let (nx, ny) = vertices[(i + 1) % n];
+        let (qx, qy) = vertices[(i + n - 1) % n];
+        let (ux, uy) = (nx - px, ny - py);
+        let (wx, wy) = (qx - px, qy - py);
+        let cross = ux * wy - uy * wx;
+        if i == 0 && cross < 0.0 {
+            orientation = -1.0;
+        }
+        let turn = orientation * cross;
+        if !(turn > 0.0 && turn > TAN_MIN_ANGLE * (ux * wx + uy * wy)) {
+            return false;
+        }
+    }
+    true
 }
 
 fn gaussian_sample<R: Rng>(rng: &mut R, sigma: f64) -> f64 {
     let sample: f64 = StandardNormal.sample(rng);
     sample * sigma
+}
+
+/// The size of a move ([`Shape::mutate`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Step {
+    /// The greedy search's moves: normal offsets with `σ` of
+    /// [`POSITION_SIGMA`] px and [`ANGLE_SIGMA`] degrees, truncated toward
+    /// zero on integer coordinates.
+    Coarse,
+    /// Normal offsets with `σ` scaled by the factor, rounded on integer
+    /// coordinates and drawn again while all of a move's integer offsets
+    /// round to zero.
+    Scaled(f64),
+}
+
+impl Step {
+    /// The offset of one integer coordinate, with `sigma` at the coarse
+    /// scale.
+    fn offset<R: Rng>(self, rng: &mut R, sigma: f64) -> i32 {
+        match self {
+            Self::Coarse => gaussian_sample(rng, sigma) as i32,
+            Self::Scaled(scale) => loop {
+                let offset = gaussian_sample(rng, sigma * scale).round() as i32;
+                if offset != 0 {
+                    return offset;
+                }
+            },
+        }
+    }
+
+    /// The offsets of two integer coordinates that move together, with
+    /// `sigma` at the coarse scale.
+    fn offsets<R: Rng>(self, rng: &mut R, sigma: f64) -> (i32, i32) {
+        match self {
+            Self::Coarse => (
+                gaussian_sample(rng, sigma) as i32,
+                gaussian_sample(rng, sigma) as i32,
+            ),
+            Self::Scaled(scale) => loop {
+                let x = gaussian_sample(rng, sigma * scale).round() as i32;
+                let y = gaussian_sample(rng, sigma * scale).round() as i32;
+                if (x, y) != (0, 0) {
+                    return (x, y);
+                }
+            },
+        }
+    }
+
+    /// The offset of one float coordinate, with `sigma` at the coarse
+    /// scale.
+    fn offset_f64<R: Rng>(self, rng: &mut R, sigma: f64) -> f64 {
+        match self {
+            Self::Coarse => gaussian_sample(rng, sigma),
+            Self::Scaled(scale) => gaussian_sample(rng, sigma * scale),
+        }
+    }
 }
 
 /// The integer-centred ellipse rasterizer treats `(x, y)` as a pixel centre
@@ -1397,6 +1575,257 @@ mod tests {
     }
 
     #[test]
+    fn the_minimum_angle_literal_is_the_tangent_of_15_degrees() {
+        let tan = 15.0_f64.to_radians().tan();
+        assert!((TAN_MIN_ANGLE - tan).abs() <= 1e-16 * tan, "{tan}");
+    }
+
+    /// `Triangle::is_valid` before it compared tangents: every angle by
+    /// `acos`, the third as `180° − a1 − a2`, strictly above 15°.
+    fn acos_valid(triangle: &Triangle) -> bool {
+        fn angle(ax: i32, ay: i32, bx: i32, by: i32) -> Option<f64> {
+            let (ax, ay, bx, by) = (f64::from(ax), f64::from(ay), f64::from(bx), f64::from(by));
+            let da = (ax * ax + ay * ay).sqrt();
+            let db = (bx * bx + by * by).sqrt();
+            if da == 0.0 || db == 0.0 {
+                return None;
+            }
+            let dot = ((ax / da) * (bx / db) + (ay / da) * (by / db)).clamp(-1.0, 1.0);
+            Some(dot.acos().to_degrees())
+        }
+        let t = triangle;
+        let Some(a1) = angle(t.x2 - t.x1, t.y2 - t.y1, t.x3 - t.x1, t.y3 - t.y1) else {
+            return false;
+        };
+        let Some(a2) = angle(t.x1 - t.x2, t.y1 - t.y2, t.x3 - t.x2, t.y3 - t.y2) else {
+            return false;
+        };
+        let a3 = 180.0 - a1 - a2;
+        a1 > 15.0 && a2 > 15.0 && a3 > 15.0
+    }
+
+    /// The tangent comparison agrees with the `acos` rule it replaced on
+    /// lattice triangles of every size the search makes: random ones, and
+    /// ones built around an angle within half a degree of 15°, where the
+    /// two could disagree.
+    #[test]
+    fn triangle_validity_agrees_with_the_acos_rule() {
+        let mut rng = crate::rng::create_rng(0x7a11);
+        let (mut valid, mut invalid, mut near) = (0, 0, 0);
+        for sample in 0..400_000 {
+            let triangle = if sample % 2 == 0 {
+                let mut coordinate = || rng.random_range(-16..300);
+                Triangle {
+                    x1: coordinate(),
+                    y1: coordinate(),
+                    x2: coordinate(),
+                    y2: coordinate(),
+                    x3: coordinate(),
+                    y3: coordinate(),
+                }
+            } else {
+                let degrees = 15.0 + rng.random_range(-0.5..0.5);
+                let turn: f64 = rng.random_range(0.0..360.0);
+                let (l1, l2) = (rng.random_range(5.0..300.0), rng.random_range(5.0..300.0));
+                let (x1, y1) = (rng.random_range(-16..300), rng.random_range(-16..300));
+                let at = |length: f64, angle: f64| {
+                    let (sin, cos) = angle.to_radians().sin_cos();
+                    ((length * cos).round() as i32, (length * sin).round() as i32)
+                };
+                let (dx2, dy2) = at(l1, turn);
+                let (dx3, dy3) = at(l2, turn + degrees);
+                near += 1;
+                Triangle {
+                    x1,
+                    y1,
+                    x2: x1 + dx2,
+                    y2: y1 + dy2,
+                    x3: x1 + dx3,
+                    y3: y1 + dy3,
+                }
+            };
+            assert_eq!(triangle.is_valid(), acos_valid(&triangle), "{triangle:?}");
+            if triangle.is_valid() {
+                valid += 1;
+            } else {
+                invalid += 1;
+            }
+        }
+        assert!(
+            valid > 50_000 && invalid > 50_000 && near > 0,
+            "{valid} {invalid}"
+        );
+    }
+
+    fn quad(points: [(f64, f64); 4]) -> Polygon {
+        Polygon {
+            order: 4,
+            x: points.map(|(x, _)| x),
+            y: points.map(|(_, y)| y),
+        }
+    }
+
+    /// The same quad with its vertices in the opposite order.
+    fn reversed(polygon: Polygon) -> Polygon {
+        let mut reversed = polygon;
+        reversed.x.reverse();
+        reversed.y.reverse();
+        reversed
+    }
+
+    /// A strictly convex quad whose angle at the origin is `degrees`,
+    /// between edges of 100 px; its fourth vertex lies on the bisector,
+    /// 20 px beyond the chord of the other two.
+    fn quad_with_angle(degrees: f64) -> Polygon {
+        let (sin, cos) = degrees.to_radians().sin_cos();
+        let (half_sin, half_cos) = (degrees / 2.0).to_radians().sin_cos();
+        let reach = 100.0 * half_cos + 20.0;
+        let polygon = quad([
+            (0.0, 0.0),
+            (100.0, 0.0),
+            (reach * half_cos, reach * half_sin),
+            (100.0 * cos, 100.0 * sin),
+        ]);
+        let turns: Vec<f64> = (0..4)
+            .map(|i| {
+                let (j, k) = ((i + 1) % 4, (i + 2) % 4);
+                (polygon.x[j] - polygon.x[i]) * (polygon.y[k] - polygon.y[j])
+                    - (polygon.y[j] - polygon.y[i]) * (polygon.x[k] - polygon.x[j])
+            })
+            .collect();
+        assert!(turns.iter().all(|&turn| turn > 0.0), "{turns:?}");
+        polygon
+    }
+
+    #[test]
+    fn polygon_validity_accepts_strictly_convex_quads_in_either_orientation() {
+        let square = quad([(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]);
+        let kite = quad([(0.0, 0.0), (30.0, -4.0), (40.0, 0.0), (30.0, 4.0)]);
+        for polygon in [square, kite, quad_with_angle(15.1)] {
+            assert!(polygon.is_valid(), "{polygon:?}");
+            assert!(reversed(polygon).is_valid(), "{polygon:?}");
+        }
+    }
+
+    #[test]
+    fn polygon_validity_rejects_crossed_concave_and_degenerate_quads() {
+        let crossed = quad([(0.0, 0.0), (10.0, 10.0), (10.0, 0.0), (0.0, 10.0)]);
+        let concave = quad([(0.0, 0.0), (10.0, 0.0), (3.0, 3.0), (0.0, 10.0)]);
+        // A vertex on its neighbours' edge (an angle of 180°), and a
+        // repeated vertex.
+        let straight = quad([(0.0, 0.0), (5.0, 0.0), (10.0, 0.0), (5.0, 8.0)]);
+        let repeated = quad([(0.0, 0.0), (10.0, 0.0), (10.0, 0.0), (0.0, 10.0)]);
+        for polygon in [crossed, concave, straight, repeated] {
+            assert!(!polygon.is_valid(), "{polygon:?}");
+            assert!(!reversed(polygon).is_valid(), "{polygon:?}");
+        }
+    }
+
+    #[test]
+    fn polygon_validity_rejects_an_angle_of_15_degrees_or_less() {
+        for degrees in [14.9, 10.0, 1.0] {
+            let polygon = quad_with_angle(degrees);
+            assert!(!polygon.is_valid(), "{degrees}");
+            assert!(!reversed(polygon).is_valid(), "{degrees}");
+        }
+    }
+
+    #[test]
+    fn rotated_rectangle_validity_caps_the_aspect_ratio_at_8() {
+        let rect = |sx, sy| RotatedRectangle {
+            x: 8,
+            y: 8,
+            sx,
+            sy,
+            angle: 30,
+        };
+        for (sx, sy) in [(1, 1), (8, 1), (1, 8), (80, 10), (10, 80), (255, 32)] {
+            assert!(rect(sx, sy).is_valid(), "{sx} × {sy}");
+        }
+        for (sx, sy) in [(9, 1), (1, 9), (81, 10), (10, 81), (17, 2), (255, 31)] {
+            assert!(!rect(sx, sy).is_valid(), "{sx} × {sy}");
+        }
+    }
+
+    /// The cap counts pixels: `x1..=x2` is `x2 − x1 + 1` wide, in either
+    /// order of the corners.
+    #[test]
+    fn rectangle_validity_caps_the_aspect_ratio_at_8() {
+        let rect = |w: i32, h: i32| Rectangle {
+            x1: 3,
+            y1: 5,
+            x2: 3 + w - 1,
+            y2: 5 + h - 1,
+        };
+        let swapped = |r: Rectangle| Rectangle {
+            x1: r.x2,
+            y1: r.y2,
+            x2: r.x1,
+            y2: r.y1,
+        };
+        for (w, h) in [(1, 1), (8, 1), (1, 8), (80, 10), (10, 80), (255, 32)] {
+            assert!(rect(w, h).is_valid(), "{w} × {h}");
+            assert!(swapped(rect(w, h)).is_valid(), "{w} × {h}");
+        }
+        for (w, h) in [(9, 1), (1, 9), (81, 10), (10, 81), (17, 2), (255, 31)] {
+            assert!(!rect(w, h).is_valid(), "{w} × {h}");
+            assert!(!swapped(rect(w, h)).is_valid(), "{w} × {h}");
+        }
+    }
+
+    /// The legibility rules hold for every shape the search makes and
+    /// moves: random polygons, rectangles and rotated rectangles, and every
+    /// greedy and refit move of them, over many seeds and canvas sizes.
+    #[test]
+    fn random_and_mutate_keep_polygons_and_rectangles_valid() {
+        fn assert_valid(shape: &Shape, context: &str) {
+            match shape {
+                Shape::Polygon(polygon) => assert!(polygon.is_valid(), "{context}: {polygon:?}"),
+                Shape::Rectangle(rect) => assert!(rect.is_valid(), "{context}: {rect:?}"),
+                Shape::RotatedRectangle(rect) => assert!(rect.is_valid(), "{context}: {rect:?}"),
+                _ => {}
+            }
+        }
+        let steps = [
+            Step::Coarse,
+            Step::Scaled(1.0),
+            Step::Scaled(0.3),
+            Step::Scaled(crate::refine::MIN_SCALE),
+        ];
+        let (mut polygons, mut rects, mut aligned) = (0, 0, 0);
+        for seed in 0..40 {
+            for (width, height) in [(2, 2), (3, 7), (64, 48), (256, 171), (300, 9)] {
+                let (mut worker, round) = make_test_round(width, height, 0x1e91 + seed);
+                for kind in [
+                    ShapeKind::Polygon,
+                    ShapeKind::Rectangle,
+                    ShapeKind::RotatedRectangle,
+                    ShapeKind::Any,
+                ] {
+                    for sample in 0..10 {
+                        let mut shape = Shape::random(kind, &mut worker, &round);
+                        let context = format!("{kind:?} {width}×{height} seed {seed} #{sample}");
+                        assert_valid(&shape, &context);
+                        polygons += usize::from(matches!(shape, Shape::Polygon(_)));
+                        rects += usize::from(matches!(shape, Shape::RotatedRectangle(_)));
+                        aligned += usize::from(matches!(shape, Shape::Rectangle(_)));
+                        for step in steps {
+                            for _ in 0..25 {
+                                shape.mutate(&mut worker, step);
+                                assert_valid(&shape, &format!("{context} {step:?}"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            polygons > 1000 && rects > 1000 && aligned > 1000,
+            "{polygons} {rects} {aligned}"
+        );
+    }
+
+    #[test]
     fn rectangle_rasterize_matches_bounds() {
         let (mut worker, _) = round(8, 8);
         let shape = Shape::Rectangle(Rectangle {
@@ -1512,7 +1941,7 @@ mod tests {
         let mut shape = Shape::Circle(Circle { x: 10, y: 10, r: 4 });
         let mut radii = std::collections::BTreeSet::new();
         for _ in 0..500 {
-            shape.mutate(&mut worker);
+            shape.mutate(&mut worker, Step::Coarse);
             let &Shape::Circle(circle) = &shape else {
                 panic!("expected circle")
             };
@@ -1604,7 +2033,7 @@ mod tests {
                 width: 0.5,
             };
 
-            quadratic.mutate(&mut worker);
+            quadratic.mutate(&mut worker, Step::Coarse);
             assert!(quadratic.is_valid(), "seed {seed} produced invalid shape");
         }
     }
@@ -1756,15 +2185,53 @@ mod tests {
             for &kind in ShapeKind::all_kinds() {
                 for sample in 0..150 {
                     let mut shape = Shape::random(kind, &mut worker, &round);
-                    for step in 0..4 {
-                        let context = format!("{kind:?} sample {sample} step {step}");
+                    let steps = [
+                        Step::Coarse,
+                        Step::Coarse,
+                        Step::Coarse,
+                        Step::Coarse,
+                        Step::Scaled(1.0),
+                        Step::Scaled(crate::refine::MIN_SCALE),
+                        Step::Scaled(crate::refine::MIN_SCALE),
+                    ];
+                    for (index, step) in steps.into_iter().enumerate() {
+                        let context = format!("{kind:?} sample {sample} step {index}");
                         let lines = shape.rasterize(&mut worker).to_vec();
                         assert_lines_well_formed(&lines, width as i32, height as i32, &context);
-                        shape.mutate(&mut worker);
+                        shape.mutate(&mut worker, step);
                     }
+                    let lines = shape.rasterize(&mut worker).to_vec();
+                    let context = format!("{kind:?} sample {sample} last step");
+                    assert_lines_well_formed(&lines, width as i32, height as i32, &context);
                 }
             }
         }
+    }
+
+    /// Scaled integer offsets are rounded and never zero: a single offset
+    /// is non-zero, and a pair is not both zero, though one of them can
+    /// be. At the refit's smallest scale they are one- and two-pixel
+    /// moves, while a coarse offset is often zero.
+    #[test]
+    fn scaled_integer_offsets_are_never_zero() {
+        let mut rng = crate::rng::create_rng(0x0ff5);
+        let fine = Step::Scaled(crate::refine::MIN_SCALE);
+        let (mut small, mut axis) = (0, 0);
+        for _ in 0..2000 {
+            let offset = fine.offset(&mut rng, POSITION_SIGMA);
+            assert!(offset != 0 && offset.abs() <= 6, "{offset}");
+            small += usize::from(offset.abs() <= 2);
+            let (x, y) = fine.offsets(&mut rng, POSITION_SIGMA);
+            assert!((x, y) != (0, 0) && x.abs() <= 6 && y.abs() <= 6, "{x}, {y}");
+            axis += usize::from(x == 0 || y == 0);
+            assert_ne!(Step::Scaled(1.0).offset(&mut rng, ANGLE_SIGMA), 0);
+        }
+        assert!(small > 1800, "{small} of 2000 offsets within 2 px");
+        assert!(axis > 500, "{axis} of 2000 pairs move along one axis");
+        let zero = (0..2000)
+            .filter(|_| Step::Coarse.offset(&mut rng, POSITION_SIGMA) == 0)
+            .count();
+        assert!(zero > 50, "{zero} of 2000 coarse offsets are zero");
     }
 
     #[test]
@@ -1791,7 +2258,7 @@ mod tests {
             angle: 0.0,
         });
         for _ in 0..200 {
-            shape.mutate(&mut worker);
+            shape.mutate(&mut worker, Step::Coarse);
             let Shape::RotatedEllipse(ellipse) = &shape else {
                 panic!("expected a rotated ellipse");
             };
