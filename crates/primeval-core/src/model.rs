@@ -2,6 +2,7 @@ use crate::alpha::Alpha;
 use crate::coarse::Coarse;
 use crate::drawing::{Drawing, DrawnShape};
 use crate::error_grid::ErrorGrid;
+use crate::refine::RefineEffort;
 use crate::score;
 use crate::shapes::{Shape, ShapeKind};
 use crate::state::State;
@@ -111,6 +112,9 @@ pub struct Model {
     /// The search effort of [`Model::step`] for every kind, set only by
     /// the lab hook; otherwise each kind's [`Effort::of`].
     effort: Option<Effort>,
+    /// The effort of every refit pass: [`RefineEffort::DEFAULT`] unless the
+    /// lab hook set it.
+    refine_effort: RefineEffort,
     /// Whether the search may stop evaluations early; see
     /// `WorkerCtx::pruning`.
     #[cfg(test)]
@@ -169,6 +173,7 @@ impl Model {
             passes: 0,
             scratch,
             effort: None,
+            refine_effort: RefineEffort::DEFAULT,
             #[cfg(test)]
             pruning: true,
             #[cfg(test)]
@@ -265,6 +270,17 @@ impl Model {
         });
     }
 
+    /// Lab only: makes every later [`Model::refine`] run `rounds`
+    /// independent hill climbs per layer instead of 4, each stopping after
+    /// `age` moves in a row are not kept instead of 25. Both are at least
+    /// 1. Not part of the supported API.
+    #[cfg(feature = "lab")]
+    #[doc(hidden)]
+    pub fn set_refine_effort(&mut self, rounds: u64, age: usize) {
+        assert!(rounds > 0 && age > 0, "refine effort must be positive");
+        self.refine_effort = RefineEffort { rounds, age };
+    }
+
     /// Runs one refit pass: re-optimises every committed shape at its own
     /// layer, with the others fixed, from the top layer down.
     ///
@@ -310,6 +326,7 @@ impl Model {
         let streams = crate::refine::Streams {
             seed: self.seed,
             pass: self.passes,
+            effort: self.refine_effort,
         };
         let (refitted, evaluations) = crate::refine::pass(
             &self.target,
@@ -1058,15 +1075,69 @@ mod tests {
         assert_consistent(&model, "covered");
     }
 
+    /// A lower refit effort runs fewer evaluations and still leaves a
+    /// consistent model that scores no worse.
+    #[cfg(feature = "lab")]
+    #[test]
+    fn a_lower_refine_effort_runs_fewer_evaluations() {
+        let before = improvable_model();
+        let mut default = before.clone();
+        let expected = default.refine(Alpha::Auto);
+
+        let mut model = before.clone();
+        model.set_refine_effort(1, 1);
+        let evaluations = model.refine(Alpha::Auto);
+
+        assert!(evaluations < expected, "{evaluations} against {expected}");
+        assert!(model.score <= before.score);
+        assert_eq!(model.history.len(), before.history.len());
+        assert_consistent(&model, "refine effort 1:1");
+    }
+
+    /// A higher refit effort runs at least its own climbs' evaluations and
+    /// leaves a consistent model that scores no worse than before the pass.
+    /// It need not score below the default pass: at the first layer where
+    /// the two passes differ its refit has a strictly lower model energy,
+    /// since its first climbs draw the default's streams, but every layer
+    /// below then sees different layers above. On this model it ends 82
+    /// above the default, of 2.69 million;
+    /// `refine::tests::more_climbs_per_layer_extend_the_default_climbs`
+    /// checks the property per layer.
+    #[cfg(feature = "lab")]
+    #[test]
+    fn a_higher_refine_effort_keeps_the_model_consistent() {
+        let before = improvable_model();
+        let mut model = before.clone();
+        model.set_refine_effort(8, 25);
+        let evaluations = model.refine(Alpha::Auto);
+
+        let minimum = before.history.len() as u64 * 8 * 25;
+        assert!(evaluations >= minimum, "{evaluations}");
+        assert!(model.score < before.score, "the pass changed nothing");
+        assert_eq!(model.history.len(), before.history.len());
+        assert_consistent(&model, "refine effort 8:25");
+    }
+
     /// [`seeded_drawing`] with a refit pass after every other step when
     /// `refine` is set.
     fn refined_drawing(seed: u64, threads: usize, refine: bool) -> Drawing {
+        refined_drawing_with(seed, threads, refine, |_| {})
+    }
+
+    /// [`refined_drawing`] of a model that `configure` set up first.
+    fn refined_drawing_with(
+        seed: u64,
+        threads: usize,
+        refine: bool,
+        configure: impl FnOnce(&mut Model) + Send,
+    ) -> Drawing {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .build()
             .expect("test thread pool");
         pool.install(|| {
             let mut model = stepped_model(seed, SMALL, ShapeKind::Any, 0);
+            configure(&mut model);
             for step in 0..6 {
                 model.step(ShapeKind::Any, Alpha::Auto);
                 if refine && step % 2 == 1 {
@@ -1091,6 +1162,26 @@ mod tests {
                 reference,
                 "{threads} threads"
             );
+        }
+    }
+
+    /// The refit's climbs per layer change the pass's parallelism, not its
+    /// result: twice the default climbs give the same drawing on any number
+    /// of threads.
+    #[cfg(feature = "lab")]
+    #[test]
+    fn seeded_refine_at_a_higher_effort_is_independent_of_the_thread_count() {
+        let drawing = |threads| {
+            refined_drawing_with(42, threads, true, |model| model.set_refine_effort(8, 25))
+        };
+        let reference = drawing(1);
+        assert_ne!(
+            reference,
+            refined_drawing(42, 1, true),
+            "the effort changed nothing"
+        );
+        for threads in [2, 4, 8] {
+            assert_eq!(drawing(threads), reference, "{threads} threads");
         }
     }
 }

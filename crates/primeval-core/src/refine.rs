@@ -53,10 +53,11 @@
 //! tasks, each on its own [`refine_rng`] stream. Their moves start at the
 //! greedy search's coarse size and adapt to how often they are kept
 //! ([`StepScale`]), down to one- and two-pixel moves that polish the
-//! shape; a climb stops after [`AGE`] moves in a row are not kept. The
-//! best climb wins, ties going to the lowest round, and replaces the
-//! committed shape only if it is strictly below the bar. The result does
-//! not depend on the number of threads or on scheduling.
+//! shape; a climb stops after [`AGE`] moves in a row are not kept
+//! ([`RefineEffort`] holds both). The best climb wins, ties going to the
+//! lowest round, and replaces the committed shape only if it is strictly
+//! below the bar. The result does not depend on the number of threads or
+//! on scheduling.
 //! [`crate::Model::refine`] then verifies the pass on the exact canvas and
 //! keeps it only if the exact score improved.
 
@@ -97,6 +98,26 @@ pub(crate) const ROUNDS: u64 = 4;
 /// Consecutive non-improving moves after which a refit climb stops; see
 /// [`ROUNDS`].
 pub(crate) const AGE: usize = 25;
+
+/// The effort of a refit pass: `rounds` independent climbs per layer, each
+/// stopping after `age` moves in a row are not kept.
+///
+/// Every pass runs [`Self::DEFAULT`], [`ROUNDS`] and [`AGE`]. The struct
+/// exists for the lab hook `Model::set_refine_effort`, which overrides it
+/// to measure the pass with the engine runner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RefineEffort {
+    pub(crate) rounds: u64,
+    pub(crate) age: usize,
+}
+
+impl RefineEffort {
+    /// [`ROUNDS`] climbs of [`AGE`].
+    pub(crate) const DEFAULT: Self = Self {
+        rounds: ROUNDS,
+        age: AGE,
+    };
+}
 
 /// The factor by which a kept move scales a refit climb's moves up; see
 /// [`StepScale`].
@@ -444,11 +465,13 @@ pub(crate) fn render<R: Rng>(
     canvas
 }
 
-/// The random streams of one pass.
+/// The random streams of one pass, one per layer and climb, and the effort
+/// of the climbs that draw from them.
 #[derive(Clone, Copy)]
 pub(crate) struct Streams {
     pub(crate) seed: u64,
     pub(crate) pass: u64,
+    pub(crate) effort: RefineEffort,
 }
 
 /// Runs one refit pass over `layers` against `target`, from a canvas of
@@ -520,7 +543,8 @@ fn refine_layer<R: Rng>(
 
     let (width, height) = (scratch.width, scratch.height);
     let (seed, pass, index) = (streams.seed, streams.pass, index as u64);
-    let results: Vec<(State, f64, Color, u64)> = (0..ROUNDS)
+    let RefineEffort { rounds, age } = streams.effort;
+    let results: Vec<(State, f64, Color, u64)> = (0..rounds)
         .into_par_iter()
         .map_init(
             || WorkerCtx::new(width, height, refine_rng(seed, pass, index, 0)),
@@ -528,7 +552,7 @@ fn refine_layer<R: Rng>(
                 worker.rng = refine_rng(seed, pass, index, round);
                 let evaluations_before = worker.evaluations;
                 let (state, energy, color) =
-                    climb(state.clone(), start, worker, AGE, |state, worker| {
+                    climb(state.clone(), start, worker, age, |state, worker| {
                         worker.evaluations += 1;
                         let lines = state.shape.rasterize(worker);
                         layer.evaluate(lines, state.alpha, rgb)
@@ -924,6 +948,75 @@ mod tests {
             scale.update(kept);
         }
         assert!((scale.0 / before - 1.0).abs() < 1e-12, "{scale:?}");
+    }
+
+    /// Every refit pass runs the default effort, so changing it changes
+    /// `approximate`'s output and must be deliberate.
+    #[test]
+    fn the_default_refine_effort_is_four_climbs_of_age_25() {
+        assert_eq!(RefineEffort::DEFAULT, RefineEffort { rounds: 4, age: 25 });
+    }
+
+    /// More climbs per layer extend the default ones: the first [`ROUNDS`]
+    /// climbs draw the same streams and ties go to the lowest round, so a
+    /// layer's refit is the default's or has a strictly lower model energy,
+    /// and the extra climbs add at least [`AGE`] evaluations each.
+    #[test]
+    fn more_climbs_per_layer_extend_the_default_climbs() {
+        let mut rng = ChaCha8Rng::seed_from_u64(0xe4f);
+        let more = RefineEffort {
+            rounds: 2 * ROUNDS,
+            age: AGE,
+        };
+        let (mut refitted, mut lowered) = (0, 0);
+        for &kind in ShapeKind::all_kinds() {
+            let (width, height) = (31, 26);
+            let target = noise(&mut rng, width, height);
+            let background = opaque(&mut rng);
+            let layers = random_layers(&mut rng, kind, 12, (width, height));
+            let (mut worker, _) = make_test_round(width, height, rng.random());
+            for index in [0, 6, 11] {
+                let (below, above) =
+                    layer_context(&target, background, &layers, index, &mut worker);
+                let layer = Layer {
+                    target: &target,
+                    below: &below,
+                    above: &above,
+                };
+                let mut refit = |effort| {
+                    let streams = Streams {
+                        seed: 7,
+                        pass: 3,
+                        effort,
+                    };
+                    let committed = &layers[index];
+                    refine_layer(&layer, committed, index, Alpha::Auto, streams, &mut worker)
+                };
+                let (default, default_count) = refit(RefineEffort::DEFAULT);
+                let (extended, extended_count) = refit(more);
+                let context = format!("{kind:?}, layer {index}");
+                assert!(
+                    extended_count >= default_count + (more.rounds - ROUNDS) * AGE as u64,
+                    "{context}: {extended_count} against {default_count}"
+                );
+                let Some(default) = default else {
+                    continue;
+                };
+                let extended = extended.expect("the default climbs found a refit");
+                refitted += 1;
+                if extended != default {
+                    let mut energy = |refit: &CommittedShape| {
+                        let color = refit.color;
+                        let lines = refit.shape.rasterize(&mut worker).to_vec();
+                        layer.delta(&lines, color.a, [color.r, color.g, color.b])
+                    };
+                    assert!(energy(&extended) < energy(&default), "{context}");
+                    lowered += 1;
+                }
+            }
+        }
+        assert!(refitted > 10, "only {refitted} layers were refitted");
+        assert!(lowered > 0, "the extra climbs never found a lower energy");
     }
 
     #[test]

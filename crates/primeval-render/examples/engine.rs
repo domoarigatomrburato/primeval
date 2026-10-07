@@ -46,6 +46,9 @@
 //!                       multiples of each round's random candidates and
 //!                       climb age (default: the model's for the kind, 16
 //!                       rounds and 1 time the age, 2 for quadratics)
+//!   --refine-effort R:A every refit pass's hill climbs per layer and the
+//!                       non-improving moves that stop a climb (default:
+//!                       the model's, 4 climbs of age 25)
 //! ```
 //!
 //! For every image × shape kind it runs one greedy search to the largest
@@ -198,6 +201,9 @@ struct Config {
     joint_scale: Option<u32>,
     /// `--effort`: rounds, candidate and age multiples.
     effort: Option<(u64, usize, usize)>,
+    /// `--refine-effort`: climbs per layer and climb age of every refit
+    /// pass.
+    refine_effort: Option<(u64, usize)>,
 }
 
 impl Config {
@@ -271,6 +277,22 @@ fn parse_effort(value: &str) -> Result<(u64, usize, usize), BoxError> {
         age.parse().map_err(|_| invalid())?,
     );
     if effort.0 == 0 || effort.1 == 0 || effort.2 == 0 {
+        return Err(invalid().into());
+    }
+    Ok(effort)
+}
+
+fn parse_refine_effort(value: &str) -> Result<(u64, usize), BoxError> {
+    let invalid = || format!("--refine-effort: expected R:A, both positive, got {value}");
+    let parts: Vec<&str> = value.split(':').collect();
+    let [rounds, age] = parts.as_slice() else {
+        return Err(invalid().into());
+    };
+    let effort = (
+        rounds.parse().map_err(|_| invalid())?,
+        age.parse().map_err(|_| invalid())?,
+    );
+    if effort.0 == 0 || effort.1 == 0 {
         return Err(invalid().into());
     }
     Ok(effort)
@@ -461,6 +483,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
     let mut final_refits = None;
     let mut joint_scale = None;
     let mut effort = None;
+    let mut refine_effort = None;
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{arg} needs a value"));
         match arg.as_str() {
@@ -489,6 +512,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
             "--final-refits" => final_refits = Some(parse_refits(&value()?)?),
             "--joint-scale" => joint_scale = Some(value()?.parse()?),
             "--effort" => effort = Some(parse_effort(&value()?)?),
+            "--refine-effort" => refine_effort = Some(parse_refine_effort(&value()?)?),
             other => return Err(format!("unknown argument {other}; see the doc comment").into()),
         }
     }
@@ -536,6 +560,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
         final_refits,
         joint_scale,
         effort,
+        refine_effort,
     })
 }
 
@@ -574,6 +599,9 @@ fn search(input: &[u8], shape: ShapeKind, config: &Config) -> Result<Vec<Checkpo
     let mut model = Model::new(target, background, options);
     if let Some((rounds, candidates, age)) = config.effort {
         model.set_search_effort(rounds, candidates, age);
+    }
+    if let Some((rounds, age)) = config.refine_effort {
+        model.set_refine_effort(rounds, age);
     }
 
     let mut search = Duration::ZERO;
@@ -763,6 +791,9 @@ fn print_header(config: &Config) {
     }
     if let Some((rounds, candidates, age)) = config.effort {
         println!("- search effort: {rounds} rounds, candidates x{candidates}, climb age x{age}");
+    }
+    if let Some((rounds, age)) = config.refine_effort {
+        println!("- refine effort: {rounds} climbs per layer, climb age {age}");
     }
     println!();
 }
