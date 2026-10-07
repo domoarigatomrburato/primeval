@@ -696,7 +696,7 @@ for (const isolated of [true, false]) {
     // only absorbed by rounding today (see the WebAssembly plan, W0 results).
     test(`SVG output equals the native addon's for fixed seeds (${variant} build)`, async () => {
       // Every shape kind, with enough steps that each kind's search runs at
-      // least one refit pass (the first comes at step 5, 10 or 20) before
+      // least one refit pass (the first comes at step 10 or 20) before
       // its final stage.
       const renders = [];
       for (const seed of [1, 2, 3]) {

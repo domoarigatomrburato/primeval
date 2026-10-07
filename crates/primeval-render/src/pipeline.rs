@@ -83,15 +83,25 @@ pub(crate) enum Refits {
 
 /// [`crate::approximate`]'s pipeline for `shape`, chosen with the engine
 /// runner on its default corpus by the median RMSE of the export at 100
-/// and 200 shapes: each stage was extended while the last extension
+/// and 200 shapes. Each stage was first extended while the last extension
 /// lowered the mean of the two medians by at least 0.5% without raising
 /// the mean of the per-image changes; otherwise the cheaper configuration
-/// stayed, by a deterministic count of evaluations.
+/// stayed, by a deterministic count of evaluations. The passes during the
+/// search of `any`, triangles and ellipses were then thinned to trade
+/// some of that quality for time, on the measurements of
+/// `docs/algorithm-leap-review-2026-10-07.md`: the mean of the two
+/// medians against the previous `approximate` (16 search rounds, then one
+/// refit pass) and the time over the same rows, on an Apple M2 Pro.
 ///
 /// - Every kind runs refit passes during the search, on a [`During::Spaced`]
 ///   schedule whose cost grows linearly with the shape count. Before any
 ///   other change they lowered the median RMSE by 0.4% (quadratics) to 7%
-///   (`any`, ellipses and rotated ellipses).
+///   (`any`, ellipses and rotated ellipses). As first chosen they were
+///   45–70% of the pipeline's time for `any`, triangles, rectangles,
+///   ellipses and circles, and the only stage that lost at equal time to
+///   the greedy search with more shapes, while the joint optimisation, at
+///   10–15% of the time for most kinds that run it, is the most efficient
+///   stage.
 /// - Triangles, polygons, rectangles and rotated rectangles end with the
 ///   joint optimisation of every shape, rotated rectangles with twice its
 ///   default iterations; refit passes before it, or more iterations for
@@ -100,9 +110,23 @@ pub(crate) enum Refits {
 ///   the doubled iterations, 2.2% below no passes during the search and
 ///   the default iterations; the doubled iterations alone gained 0.4%,
 ///   and passes every 20 steps up to step 100 cost more and gained less.
-/// - [`ShapeKind::Any`] ends with one refit pass, then the joint
-///   optimisation of its triangles, polygons and rectangles, every other
-///   shape fixed in geometry: 3.2% below the refit pass alone.
+/// - Triangles, as rectangles and polygons, refit every 20 steps up to
+///   step 100, then each fifth of the step number: with the joint
+///   optimisation, 12.9% below the previous `approximate` at 2.06 times
+///   its time, against 14.8% at 3.22 times with passes every 5 steps up
+///   to step 50, then each tenth (`Spaced(5, 10)`). The joint
+///   optimisation alone, with no passes during the search, is 10.6% below
+///   at 1.11 times, so the passes are what cost: `Spaced(20, 5)` keeps
+///   55% of their gain for 45% of their cost.
+/// - [`ShapeKind::Any`] refits on the same schedule as triangles and ends
+///   with one refit pass, then the joint optimisation of its triangles,
+///   polygons and rectangles, every other shape fixed in geometry: 3.2%
+///   below the refit pass alone. With 16 search rounds the whole pipeline
+///   is 6.9% below the previous `approximate` at 1.57 times its time;
+///   with 32 rounds and `Spaced(5, 10)` it was 10.8% below at 2.78 times.
+///   At equal time and 200 shapes it is now neutral against the previous
+///   greedy search with more shapes (a ratio of 1.01), where it was 18%
+///   worse.
 /// - The joint optimisation's result is kept only if its export is closer
 ///   to the target than its input ([`better_export`]): on finely fitted
 ///   polygons it could double the export's error while its own objective
@@ -114,20 +138,29 @@ pub(crate) enum Refits {
 /// - Ellipses, circles and rotated ellipses end with one refit pass:
 ///   after the passes during the search, passes until one gained less
 ///   than 1%, 0.5% or 0.2% gained less than 0.5%.
+/// - Ellipses, as circles and rotated ellipses, refit every 10 steps up
+///   to step 100, then each tenth of the step number: 5.1% below the
+///   previous `approximate` at 2.15 times its time, against 7.2% at 3.11
+///   times with `Spaced(5, 20)` and 3.3% at 1.60 times with
+///   `Spaced(20, 5)`. The gain is roughly linear in the passes, so this
+///   is a choice of time against quality, not a measured optimum.
 ///
-/// With the model's search effort per kind, the whole pipeline lowers the
-/// median RMSE by 1–11% against the greedy search followed by the final
-/// stage alone.
+/// Against the first selection, with the model's search effort retuned
+/// alongside, this gives back 2–4 points on `any`, triangles, ellipses
+/// and rotated ellipses, and cuts their time from 2.8–3.2 to 1.6–2.2
+/// times the previous `approximate`'s.
 pub(crate) fn pipeline(shape: ShapeKind) -> Pipeline {
     let spaced = |interval, divisor| During::Spaced { interval, divisor };
     let (none, one) = (Refits::Passes(0), Refits::Passes(1));
     let (during, refits, joint) = match shape {
-        ShapeKind::Any => (spaced(5, 10), one, Some(1)),
-        ShapeKind::Triangle => (spaced(5, 10), none, Some(1)),
-        ShapeKind::Rectangle | ShapeKind::Polygon => (spaced(20, 5), none, Some(1)),
+        ShapeKind::Any => (spaced(20, 5), one, Some(1)),
+        ShapeKind::Triangle | ShapeKind::Rectangle | ShapeKind::Polygon => {
+            (spaced(20, 5), none, Some(1))
+        }
         ShapeKind::RotatedRectangle => (spaced(20, 2), none, Some(2)),
-        ShapeKind::Ellipse => (spaced(5, 20), one, None),
-        ShapeKind::Circle | ShapeKind::RotatedEllipse => (spaced(10, 10), one, None),
+        ShapeKind::Ellipse | ShapeKind::Circle | ShapeKind::RotatedEllipse => {
+            (spaced(10, 10), one, None)
+        }
         ShapeKind::Quadratic => (
             spaced(20, 5),
             Refits::Until {
@@ -325,6 +358,19 @@ mod tests {
         joint::optimise(model, Alpha::Auto, settings, || false).expect("not cancelled")
     }
 
+    /// Every shape kind, `any` included.
+    const KINDS: [ShapeKind; 9] = [
+        ShapeKind::Any,
+        ShapeKind::Triangle,
+        ShapeKind::Rectangle,
+        ShapeKind::Ellipse,
+        ShapeKind::Circle,
+        ShapeKind::RotatedRectangle,
+        ShapeKind::Quadratic,
+        ShapeKind::RotatedEllipse,
+        ShapeKind::Polygon,
+    ];
+
     fn stages(refits: Refits, joint: Option<u32>) -> Pipeline {
         Pipeline {
             during: During::Never,
@@ -374,6 +420,22 @@ mod tests {
         }
     }
 
+    /// The passes during the search are the pipeline's most expensive
+    /// stage and the only one that loses at equal time
+    /// (`docs/algorithm-leap-review-2026-10-07.md`): up to 200 steps they
+    /// refit at most 5 layers per step for the kinds that end with the
+    /// joint optimisation, which gains more for less, and at most 10 for
+    /// the others.
+    #[test]
+    fn passes_during_the_search_stay_cheap() {
+        for shape in KINDS {
+            let stages = pipeline(shape);
+            let layers: u32 = due_steps(stages.during, 200).iter().sum();
+            let most = if stages.joint.is_some() { 5 } else { 10 };
+            assert!(layers <= most * 200, "{shape:?}: {layers} layers");
+        }
+    }
+
     /// Every kind's path through the pipeline, its greedy steps at its
     /// search effort, a refit pass in the search and its final stage, gives
     /// the same drawing at 1, 2, 4 and 8 threads. The schedule's steps
@@ -381,17 +443,7 @@ mod tests {
     /// runs the whole of `approximate`'s path.
     #[test]
     fn every_kind_path_is_identical_across_thread_counts() {
-        for shape in [
-            ShapeKind::Any,
-            ShapeKind::Triangle,
-            ShapeKind::Rectangle,
-            ShapeKind::Ellipse,
-            ShapeKind::Circle,
-            ShapeKind::RotatedRectangle,
-            ShapeKind::Quadratic,
-            ShapeKind::RotatedEllipse,
-            ShapeKind::Polygon,
-        ] {
+        for shape in KINDS {
             let stages = pipeline(shape);
             let on_threads = |threads| {
                 let pool = rayon::ThreadPoolBuilder::new()

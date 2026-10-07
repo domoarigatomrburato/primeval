@@ -45,7 +45,7 @@
 //!   --effort R:C:A      the greedy search's rounds per step, and the
 //!                       multiples of each round's random candidates and
 //!                       climb age (default: the model's for the kind, 16
-//!                       or 32 rounds and 1 or 2 times the age)
+//!                       rounds and 1 time the age, 2 for quadratics)
 //! ```
 //!
 //! For every image × shape kind it runs one greedy search to the largest

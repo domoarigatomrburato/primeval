@@ -811,22 +811,19 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
   - The lab identity test now covers all nine kinds and asserts that each runs at least one refit pass during the search.
   - The browser native–wasm tripwire adds ellipse and circle and runs 20 steps instead of 12, so every kind reaches its first refit pass. It now takes about 58 s on the single-threaded build.
   - Known gap: `approximate`'s cancellation test would pass even if a refit pass in the search ignored the token, since the next step returns `Aborted` anyway. The pipeline's unit test covers the pass itself.
-- **The chosen pipelines,** as in `pipeline()` (updated 2026-10-04, after the B guard below):
+- **The chosen pipelines,** as in `pipeline()` (updated 2026-10-07, after the retune below):
 
   | Kind | Search effort (rounds, climb age) | During the search | Final refit passes | B (× default K) |
   | --- | --- | --- | --- | --- |
-  | `any` | 32, ×1 | every 5, then spaced (÷10) | 1 | ×1 |
-  | triangle | 16, ×1 | every 5, then spaced (÷10) | 0 | ×1 |
-  | rectangle, polygon | 16, ×1 | every 20, then spaced (÷5) | 0 | ×1 |
+  | `any` | 16, ×1 | every 20, then spaced (÷5) | 1 | ×1 |
+  | triangle, rectangle, polygon | 16, ×1 | every 20, then spaced (÷5) | 0 | ×1 |
   | rotated rectangle | 16, ×1 | every 20, then spaced (÷2) | 0 | ×2 |
-  | ellipse | 16, ×1 | every 5, then spaced (÷20) | 1 | — |
-  | circle | 16, ×1 | every 10, then spaced (÷10) | 1 | — |
-  | rotated ellipse | 32, ×2 | every 10, then spaced (÷10) | 1 | — |
+  | ellipse, circle, rotated ellipse | 16, ×1 | every 10, then spaced (÷10) | 1 | — |
   | quadratic | 16, ×2 | every 20, then spaced (÷5) | until a pass gains < 1%, at most 4 | — |
 
   B's result is kept only if it exports closer to the target than its input (the guard below).
 
-  Selection rule: each stage was extended while the last extension lowered the mean of the 100- and 200-shape medians by at least 0.5% without worsening the mean of the per-image changes; otherwise the cheaper configuration stayed. Final refit passes until a pass gains less than 1%, 0.5% or 0.2% gained less than 0.5% for ellipses, circles and rotated ellipses, so one pass stays.
+  Selection rule: each stage was extended while the last extension lowered the mean of the 100- and 200-shape medians by at least 0.5% without worsening the mean of the per-image changes; otherwise the cheaper configuration stayed. Final refit passes until a pass gains less than 1%, 0.5% or 0.2% gained less than 0.5% for ellipses, circles and rotated ellipses, so one pass stays. The retune of 2026-10-07 (below) traded some quality for time on `any`, triangle, ellipse and rotated ellipse.
 - **Quality of the WIP pipeline, before the guard** (median rmse256 against the previous `approximate` at 50 / 100 / 200 / 500 shapes; deterministic, so valid; polygon, rotated rectangle and quadratic are superseded by the re-measure below):
   - `any` −7.7 / −10.3 / −11.4 / −10.2%;
   - rotated ellipse −6.5 / −8.4 / −10.2 / −10.9%;
@@ -881,6 +878,13 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
   - Polygon's greedy digest returned to its value before the 32 rounds (`0xb57dc794666b2a2b`); quadratic's is new (`0xe3a5dd0d1b3341ff`).
   - Not re-measured: triangle, rectangle and `any`, whose pipelines did not change but which the guard also covers. The investigator's emulation of the guard found triangle unchanged and `any` on synthetic-shapes at 100 / 500 going from +5.8 / +5.7% to −11.0 / −29.5%, with unchanged medians.
 - **Known property: ellipse on synthetic-shapes at 500 (+19.5%).** Refit passes optimise the aliased engine canvas, while rmse256 measures the anti-aliased export: on that image 12 of 54 passes raised the export's error. Seeds 1–5 range from −11% to +22% there. No cheap guard fixes it (a pass is already kept only if it lowers the engine's score); anti-aliased refits would.
+- **Retune** (2026-10-07), on the measurements of `docs/algorithm-leap-review-2026-10-07.md` (Apple M2 Pro, PERF-0 corpus; mean of the 100- and 200-shape median rmse256 against the previous `approximate`, time ratio over the same rows). The passes during the search were 45–70% of the time for five kinds and the only stage that lost at equal time, and the doubled effort bought little:
+  - `any`: 16 rounds and `Spaced(20, 5)`, −6.9% at 1.57× (was −10.8% at 2.78×); equal-time ratio at 200 shapes 1.01 (was 1.18);
+  - triangle: `Spaced(20, 5)`, −12.9% at 2.06× (was −14.8% at 3.22×);
+  - ellipse: `Spaced(10, 10)`, −5.1% at 2.15× (was −7.2% at 3.11×);
+  - rotated ellipse: 16 rounds and climb age ×1, −7.0% at 1.56× (was −9.2% at 3.03×).
+
+  Quadratics keep the age ×2 (2.6 points for 57% more time; no cheaper lever). Rotated ellipse's greedy digest is new (`0xf9f17763932224cc`); `any`'s is unchanged.
 - **Next:**
   1. Re-run `versus_go` on the branch for the README (polygon and quadratic were below Go on x86 before these changes).
   2. Optionally, fix B's coverage of near-collinear edges, so that the guard rejects B less often.

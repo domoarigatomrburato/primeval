@@ -1278,7 +1278,8 @@ mod tests {
     #[test]
     fn cancellation_during_a_refit_in_the_search_returns_abort_error() {
         let mut request = request(fixture_bytes(), OutputFormat::Svg);
-        request.render.count = 8;
+        // Past the triangles' first pass, at step 20, with steps after it.
+        request.render.count = 24;
         let during = pipeline::pipeline(request.render.shape).during;
         let due = (1..=request.render.count)
             .find(|&step| during.due(step))

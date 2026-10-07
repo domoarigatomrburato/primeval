@@ -28,33 +28,29 @@ struct Effort {
 }
 
 impl Effort {
-    /// The effort for `kind`: 16 rounds, or 32 for [`ShapeKind::Any`] and
-    /// rotated ellipses; quadratics and rotated ellipses also climb twice
-    /// as long.
+    /// The effort for `kind`: 16 rounds, and twice the climb age for
+    /// quadratics.
     ///
-    /// Chosen on the engine runner's corpus, with the passes and final
-    /// stage `primeval-render` runs around the search, by the median RMSE
-    /// of the export at 100 and 200 shapes: twice the rounds lowered it by
-    /// 0.7–3.6% for `any`, rotated ellipses, polygons and quadratics, and
-    /// twice the age by 0.5–1.0% more for quadratics and rotated ellipses.
-    /// Neither gained 0.5% for the other kinds, nor did four times either.
-    /// Polygons and quadratics went back to 16 rounds: the doubled rounds
-    /// were most of their pipeline's cost, and quadratics now spend it on
-    /// final refit passes instead, which gain more for less.
+    /// Measured with the engine runner on its corpus, with the passes and
+    /// final stage `primeval-render` runs around the search, by the mean of
+    /// the 100- and 200-shape median RMSE of the export against the
+    /// previous `approximate` (16 rounds, then one refit pass) and by the
+    /// time over the same rows, on an Apple M2 Pro
+    /// (`docs/algorithm-leap-review-2026-10-07.md`). Twice the age buys
+    /// quadratics 2.6 points for 57% more time; it stays because they have
+    /// no cheaper lever in the pipeline. 32 rounds bought `any` 0.8 points
+    /// for 19% more time, and 32 rounds with twice the age bought rotated
+    /// ellipses 2.2 points for 90% more, so both went back to 16 rounds.
+    /// Polygons had gone back before them: the doubled rounds were most of
+    /// their pipeline's cost. For the other kinds, twice or four times the
+    /// rounds or the age never gained 0.5%.
     const fn of(kind: ShapeKind) -> Self {
-        let (rounds, age) = match kind {
-            ShapeKind::Any => (32, 1),
-            ShapeKind::RotatedEllipse => (32, 2),
-            ShapeKind::Quadratic => (16, 2),
-            ShapeKind::Triangle
-            | ShapeKind::Polygon
-            | ShapeKind::Rectangle
-            | ShapeKind::Ellipse
-            | ShapeKind::Circle
-            | ShapeKind::RotatedRectangle => (16, 1),
+        let age = match kind {
+            ShapeKind::Quadratic => 2,
+            _ => 1,
         };
         Self {
-            rounds,
+            rounds: 16,
             candidates: 1,
             age,
         }
@@ -182,11 +178,9 @@ impl Model {
 
     /// Searches for the best next shape of `kind` and paints it.
     ///
-    /// Every step runs 16 independent search rounds, 32 for
-    /// [`ShapeKind::Any`], polygons, quadratics and rotated ellipses, as
-    /// rayon tasks in the current pool: the global pool, unless the caller
-    /// runs `step` inside [`rayon::ThreadPool::install`]. A step of
-    /// [`ShapeKind::Quadratic`] or [`ShapeKind::RotatedEllipse`] also
+    /// Every step runs 16 independent search rounds as rayon tasks in the
+    /// current pool: the global pool, unless the caller runs `step` inside
+    /// [`rayon::ThreadPool::install`]. A step of [`ShapeKind::Quadratic`]
     /// climbs twice as long. Each round draws from its own random
     /// stream, derived from the seed, the step index and the round index,
     /// and the best round wins, ties going to the lowest round index, so the
@@ -252,9 +246,11 @@ impl Model {
     }
 
     /// Lab only: makes every later [`Model::step`] run `rounds` search
-    /// rounds instead of its kind's 16 or 32, each sampling `candidates` times as many random
-    /// candidates and climbing until `age` times as many moves in a row are
-    /// not kept. All three are at least 1. Not part of the supported API.
+    /// rounds instead of 16, each sampling `candidates` times as many
+    /// random candidates and climbing until `age` times as many moves in a
+    /// row are not kept, whatever the kind (by default only quadratics
+    /// climb twice as long). All three are at least 1. Not part of the
+    /// supported API.
     #[cfg(feature = "lab")]
     #[doc(hidden)]
     pub fn set_search_effort(&mut self, rounds: u64, candidates: usize, age: usize) {
@@ -721,7 +717,9 @@ mod tests {
     /// round after the 16th found a better shape. `quadratic` and
     /// `polygon` again when they went back to 16 rounds, quadratics
     /// keeping twice the climb age; `polygon`'s digest is the one it had
-    /// before the 32 rounds.
+    /// before the 32 rounds. `rotated-ellipse` again when it went back to
+    /// 16 rounds and the climb age ×1; `any`, back to 16 rounds as well,
+    /// kept its digests.
     #[test]
     fn seeded_greedy_output_is_pinned() {
         let pinned = [
@@ -732,7 +730,7 @@ mod tests {
             (ShapeKind::Circle, 0x1cc7d6677aa8b599),
             (ShapeKind::RotatedRectangle, 0x52186adc7569380b),
             (ShapeKind::Quadratic, 0xe3a5dd0d1b3341ff),
-            (ShapeKind::RotatedEllipse, 0x02ceb857843573e9),
+            (ShapeKind::RotatedEllipse, 0xf9f17763932224cc),
             (ShapeKind::Polygon, 0xb57dc794666b2a2b),
         ];
         assert_eq!(pinned.len(), every_kind().len());
