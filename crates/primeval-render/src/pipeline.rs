@@ -1,5 +1,5 @@
 //! What [`crate::approximate`] runs around its greedy steps, per shape
-//! kind: refit passes during the search, and the final stage.
+//! kind: refit or joint passes during the search, and the final stage.
 //!
 //! `lab` drives the same functions, so the engine runner cannot drift from
 //! [`crate::approximate`]. Every rule depends only on the request and on
@@ -11,7 +11,8 @@ use primeval_core::{Alpha, Buffer, Drawing, Model, joint};
 /// The stages around the greedy steps of one shape kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Pipeline {
-    /// Refit passes of the model during the search.
+    /// The passes of the model during the search: refit passes, or joint
+    /// passes.
     pub(crate) during: During,
     /// Refit passes of the model after the last step.
     pub(crate) refits: Refits,
@@ -21,8 +22,9 @@ pub(crate) struct Pipeline {
     pub(crate) joint: Option<u32>,
 }
 
-/// When the search runs a refit pass ([`Model::refine`]) of the model
-/// itself, after a step. Later steps build on the refitted shapes.
+/// When the search runs a pass over the model itself after a step, and
+/// which: a refit pass ([`Model::refine`]), or a joint pass. Later steps
+/// build on the revised shapes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum During {
     /// Never.
@@ -43,10 +45,10 @@ pub(crate) enum During {
         /// Positive.
         divisor: u32,
     },
-    /// The joint optimisation ([`joint::optimise`]) of the model in place
-    /// of the refit pass, on [`During::Spaced`]'s schedule, its result
-    /// adopted into the model ([`Model::adopt`]) if `guard` keeps it.
-    #[cfg(any(test, feature = "lab"))]
+    /// The joint optimisation ([`joint::optimise`]) of every shape at once
+    /// in place of the refit pass, on [`During::Spaced`]'s schedule, its
+    /// result adopted into the model ([`Model::adopt`]) if `guard` keeps
+    /// it. Later steps build on the adopted shapes.
     Joint {
         /// As [`During::Spaced`]'s.
         interval: u32,
@@ -60,17 +62,18 @@ pub(crate) enum During {
 }
 
 /// What keeps the result of a joint pass in the search ([`During::Joint`]).
-#[cfg(any(test, feature = "lab"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Guard {
     /// The model's exact canvas, repainted with the adopted shapes, scores
-    /// strictly lower ([`Model::adopt`] without `force`).
+    /// strictly lower ([`Model::adopt`] without `force`), as a refit pass
+    /// is checked; otherwise the model is left as it was.
     Canvas,
-    /// The model's own PNG export at the working size, after adopting the
-    /// joint result, is strictly closer to the target than before
-    /// ([`exports_closer`]): it also sees the rounding of the rectangles
-    /// that adopting converts. Costs a clone of the model and two exports
-    /// per pass, on top of the repaint.
+    /// Lab only: the model's own PNG export at the working size, after
+    /// adopting the joint result, is strictly closer to the target than
+    /// before ([`exports_closer`]): it also sees the rounding of the
+    /// rectangles that adopting converts. Costs a clone of the model and
+    /// two exports per pass, on top of the repaint.
+    #[cfg(any(test, feature = "lab"))]
     Export,
 }
 
@@ -83,7 +86,6 @@ impl During {
             #[cfg(any(test, feature = "lab"))]
             Self::Every(every) => step.is_multiple_of(every),
             Self::Spaced { interval, divisor } => spaced_due(interval, divisor, step),
-            #[cfg(any(test, feature = "lab"))]
             Self::Joint {
                 interval, divisor, ..
             } => spaced_due(interval, divisor, step),
@@ -109,7 +111,6 @@ pub(crate) enum Pass {
     /// A refit pass.
     Refit,
     /// A joint pass, and whether its result was kept.
-    #[cfg(any(test, feature = "lab"))]
     Joint {
         /// Whether the model adopted the joint result.
         kept: bool,
@@ -144,15 +145,15 @@ pub(crate) enum Refits {
 /// medians against the previous `approximate` (16 search rounds, then one
 /// refit pass) and the time over the same rows, on an Apple M2 Pro.
 ///
-/// - Every kind runs refit passes during the search, on a [`During::Spaced`]
-///   schedule whose cost grows linearly with the shape count. Before any
-///   other change they lowered the median RMSE by 0.4% (quadratics) to 7%
-///   (`any`, ellipses and rotated ellipses). As first chosen they were
-///   45–70% of the pipeline's time for `any`, triangles, rectangles,
-///   ellipses and circles, and the only stage that lost at equal time to
-///   the greedy search with more shapes, while the joint optimisation, at
-///   10–15% of the time for most kinds that run it, is the most efficient
-///   stage.
+/// - Every kind but triangles runs refit passes during the search, on a
+///   [`During::Spaced`] schedule whose cost grows linearly with the shape
+///   count. Before any other change they lowered the median RMSE by 0.4%
+///   (quadratics) to 7% (`any`, ellipses and rotated ellipses). As first
+///   chosen they were 45–70% of the pipeline's time for `any`, triangles,
+///   rectangles, ellipses and circles, and the only stage that lost at
+///   equal time to the greedy search with more shapes, while the joint
+///   optimisation, at 10–15% of the time for most kinds that run it, is
+///   the most efficient stage.
 /// - Triangles, polygons, rectangles and rotated rectangles end with the
 ///   joint optimisation of every shape, rotated rectangles with twice its
 ///   default iterations; refit passes before it, or more iterations for
@@ -161,16 +162,32 @@ pub(crate) enum Refits {
 ///   the doubled iterations, 2.2% below no passes during the search and
 ///   the default iterations; the doubled iterations alone gained 0.4%,
 ///   and passes every 20 steps up to step 100 cost more and gained less.
-/// - Triangles, as rectangles and polygons, refit every 20 steps up to
-///   step 100, then each fifth of the step number: with the joint
-///   optimisation, 12.9% below the previous `approximate` at 2.06 times
-///   its time, against 14.8% at 3.22 times with passes every 5 steps up
-///   to step 50, then each tenth (`Spaced(5, 10)`). The joint
-///   optimisation alone, with no passes during the search, is 10.6% below
-///   at 1.11 times, so the passes are what cost: `Spaced(20, 5)` keeps
-///   55% of their gain for 45% of their cost.
-/// - [`ShapeKind::Any`] refits on the same schedule as triangles and ends
-///   with one refit pass, then the joint optimisation of its triangles,
+/// - Rectangles and polygons refit every 20 steps up to step 100, then
+///   each fifth of the step number (`Spaced(20, 5)`). On triangles, with
+///   the joint optimisation, that schedule was 12.9% below the previous
+///   `approximate` at 2.06 times its time, against 14.8% at 3.22 times
+///   with passes every 5 steps up to step 50, then each tenth
+///   (`Spaced(5, 10)`), and 10.6% at 1.11 times with no passes: it keeps
+///   55% of the passes' gain for 45% of their cost.
+/// - Triangles, on the same schedule, run the joint optimisation of every
+///   shape with 20 iterations in place of the refit pass, its result kept
+///   when the exact canvas scores lower ([`During::Joint`],
+///   [`Guard::Canvas`]): 1.3% below the refit passes at 0.70 times the
+///   pipeline's time, where no passes during the search are 2.6% above at
+///   0.55 times. Both paintings improve at 50, 100 and 200 shapes
+///   (American Gothic by 1.4–2.4%, Mona Lisa by 1.0–1.6%), while
+///   synthetic-shapes, on whose hard edges the guard rejects most joint
+///   results, is 6.1% worse at 200. With 40 iterations, or with
+///   `Spaced(10, 10)`, the gain is about the same at 0.87–0.90 times.
+///   The other kinds keep the refit passes: polygons because on
+///   synthetic-shapes the joint result is rejected and they lose 33–41%
+///   at 100–500 shapes, about as with no passes; rectangles and rotated
+///   rectangles because rounding the joint result to their integer
+///   parameters gives back most of its gain; `any` because the joint
+///   optimisation moves only its triangles, polygons and rectangles,
+///   while the refit passes also serve its curved layers.
+/// - [`ShapeKind::Any`] refits on the rectangles' schedule and ends with
+///   one refit pass, then the joint optimisation of its triangles,
 ///   polygons and rectangles, every other shape fixed in geometry: 3.2%
 ///   below the refit pass alone. With 16 search rounds the whole pipeline
 ///   is 6.9% below the previous `approximate` at 1.57 times its time;
@@ -202,12 +219,17 @@ pub(crate) enum Refits {
 /// times the previous `approximate`'s.
 pub(crate) fn pipeline(shape: ShapeKind) -> Pipeline {
     let spaced = |interval, divisor| During::Spaced { interval, divisor };
+    let joint = |interval, divisor, iterations| During::Joint {
+        interval,
+        divisor,
+        iterations,
+        guard: Guard::Canvas,
+    };
     let (none, one) = (Refits::Passes(0), Refits::Passes(1));
     let (during, refits, joint) = match shape {
         ShapeKind::Any => (spaced(20, 5), one, Some(1)),
-        ShapeKind::Triangle | ShapeKind::Rectangle | ShapeKind::Polygon => {
-            (spaced(20, 5), none, Some(1))
-        }
+        ShapeKind::Triangle => (joint(20, 5, 20), none, Some(1)),
+        ShapeKind::Rectangle | ShapeKind::Polygon => (spaced(20, 5), none, Some(1)),
         ShapeKind::RotatedRectangle => (spaced(20, 2), none, Some(2)),
         ShapeKind::Ellipse | ShapeKind::Circle | ShapeKind::RotatedEllipse => {
             (spaced(10, 10), one, None)
@@ -244,7 +266,6 @@ pub(crate) fn after_step(
     if !during.due(step) {
         return Some(Pass::Skipped);
     }
-    #[cfg(any(test, feature = "lab"))]
     if let During::Joint {
         iterations, guard, ..
     } = during
@@ -259,15 +280,14 @@ pub(crate) fn after_step(
 /// A joint pass of `iterations` iterations on `model`, its result adopted
 /// if `guard` keeps it; returns whether it was kept. With
 /// [`Guard::Canvas`] the model's exact canvas decides ([`Model::adopt`]
-/// without `force`); with [`Guard::Export`] the result is adopted by force
-/// into the model, whose own export after adopting must then be strictly
-/// closer to the target than its export before ([`exports_closer`]), or a
-/// clone taken before restores it. A result the model cannot adopt
+/// without `force`); with the lab's `Guard::Export` the result is adopted
+/// by force into the model, whose own export after adopting must then be
+/// strictly closer to the target than its export before
+/// ([`exports_closer`]), or a clone taken before restores it. A result the model cannot adopt
 /// ([`Model::adopt`] returns `None`) is not kept, and a pass not kept
 /// leaves the model as it was. `cancelled` is polled as [`joint::optimise`]
 /// polls it, then once more before the guard; once it returns true,
 /// `None`, with the model unchanged.
-#[cfg(any(test, feature = "lab"))]
 fn joint_pass(
     model: &mut Model,
     iterations: u32,
@@ -283,6 +303,7 @@ fn joint_pass(
     }
     let kept = match guard {
         Guard::Canvas => model.adopt(&optimised, false) == Some(true),
+        #[cfg(any(test, feature = "lab"))]
         Guard::Export => {
             let before = model.drawing();
             let backup = model.clone();
@@ -532,9 +553,9 @@ mod tests {
     /// The passes during the search are the pipeline's most expensive
     /// stage and the only one that loses at equal time
     /// (`docs/algorithm-leap-review-2026-10-07.md`): up to 200 steps they
-    /// refit at most 5 layers per step for the kinds that end with the
-    /// joint optimisation, which gains more for less, and at most 10 for
-    /// the others.
+    /// refit, or jointly optimise, at most 5 layers per step for the kinds
+    /// that end with the joint optimisation, which gains more for less,
+    /// and at most 10 for the others.
     #[test]
     fn passes_during_the_search_stay_cheap() {
         for shape in KINDS {
@@ -835,6 +856,24 @@ mod tests {
             for guard in [Guard::Canvas, Guard::Export] {
                 let joint = joint(interval, divisor, 7, guard);
                 assert_eq!(due_steps(joint, 600), spaced, "{interval}:{divisor}");
+            }
+        }
+    }
+
+    /// Triangles run the joint optimisation during the search, kept by the
+    /// exact canvas; every other kind runs refit passes, so a change to
+    /// another kind's schedule is deliberate.
+    #[test]
+    fn only_triangles_run_joint_passes_during_the_search() {
+        for shape in KINDS {
+            let during = pipeline(shape).during;
+            if shape == ShapeKind::Triangle {
+                assert_eq!(during, joint(20, 5, 20, Guard::Canvas));
+            } else {
+                assert!(
+                    matches!(during, During::Spaced { .. }),
+                    "{shape:?}: {during:?}"
+                );
             }
         }
     }

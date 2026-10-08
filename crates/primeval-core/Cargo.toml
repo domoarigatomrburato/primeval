@@ -32,9 +32,9 @@ tiny-skia = { version = "0.12", default-features = false, features = ["std", "si
 # crate-private items. Never enabled by dependents; see CONTRIBUTING.md.
 bench = ["dep:divan"]
 # Exposes lab-only hooks (`Model::set_search_effort`,
-# `Model::set_refine_effort`, `Model::adopt`) for the engine evaluation
-# runner of `primeval-render` and its tests. Never enabled by dependents
-# outside their dev-dependencies.
+# `Model::set_refine_effort`, and `Model::adopt`'s conversion of rotated
+# rectangles) for the engine evaluation runner of `primeval-render`. Never
+# enabled by dependents.
 lab = []
 
 [lib]

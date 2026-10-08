@@ -18,9 +18,6 @@ primeval-core = { path = "../primeval-core" }
 tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
 
 [dev-dependencies]
-# The tests compile the lab-only pipeline variants (`cfg(test)`), which call
-# `primeval-core`'s lab hooks.
-primeval-core = { path = "../primeval-core", features = ["lab"] }
 rand = { version = "0.10", default-features = false }
 rand_chacha = "0.10"
 rayon = "1.10"

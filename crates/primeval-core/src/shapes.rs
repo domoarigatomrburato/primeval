@@ -412,7 +412,12 @@ impl Shape {
     /// in [`Self::geometry`]'s coordinates, as the engine's shape of the
     /// same family; `None` if it does not convert into a valid one. See
     /// `Model::adopt`, the only caller, for the rules.
-    #[cfg(feature = "lab")]
+    ///
+    /// Computes with `+ − × ÷`, comparisons and `round` only, the
+    /// arithmetic rule of [`crate::joint`], so native and WebAssembly
+    /// builds convert alike. A rotated rectangle converts only in the lab
+    /// build, through `atan2` and `hypot`, which that rule forbids; in the
+    /// production build it is `None`, by the last arm.
     pub(crate) fn adopted(&self, geometry: &Geometry) -> Option<Self> {
         match (self, geometry) {
             (Self::Triangle(_), Geometry::Polygon(points)) if points.len() == 3 => {
@@ -444,6 +449,7 @@ impl Shape {
                     && rectangle.is_valid())
                 .then_some(Self::Rectangle(rectangle))
             }
+            #[cfg(feature = "lab")]
             (Self::RotatedRectangle(_), Geometry::Polygon(points)) if points.len() == 4 => {
                 RotatedRectangle::from_corners(points).map(Self::RotatedRectangle)
             }
@@ -458,7 +464,6 @@ impl Shape {
 
 /// `value` rounded to the nearest integer, half away from zero, if that is
 /// well inside `i32`.
-#[cfg(feature = "lab")]
 fn lattice(value: f64) -> Option<i32> {
     let rounded = value.round();
     (rounded.abs() < f64::from(1 << 30)).then_some(rounded as i32)
@@ -811,8 +816,8 @@ impl RotatedRectangle {
     /// `None` if a side rounds to 0 or the rectangle breaks the
     /// aspect-ratio cap.
     ///
-    /// Lab only: the angle comes from `atan2`, whose last bit can differ
-    /// between platforms.
+    /// Lab only: the angle comes from `atan2` and the sides from `hypot`,
+    /// whose last bit can differ between platforms.
     #[cfg(feature = "lab")]
     fn from_corners(corners: &[Point]) -> Option<Self> {
         let [a, b, c, d] = corners else {
@@ -1234,7 +1239,6 @@ impl Polygon {
 
     /// The polygon through `points`, three or four of them, if it is valid
     /// ([`Self::is_valid`]). The unused vertex of a triangle is the origin.
-    #[cfg(feature = "lab")]
     fn through(points: &[Point]) -> Option<Self> {
         if !(3..=4).contains(&points.len()) {
             return None;
