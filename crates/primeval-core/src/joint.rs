@@ -20,10 +20,11 @@
 //! the shape, computed once.
 //!
 //! The forward model (`diff.rs`) covers each pixel of a triangle, a
-//! polygon or a rotated rectangle by the product of its edges' exact
-//! half-plane areas in the pixel square, and of an axis-aligned rectangle
-//! by the product of its sides', which is its exact area there; it
-//! composites in `f32`. A rotated rectangle is parametrised without
+//! polygon or a rotated rectangle by its exact area in the pixel square:
+//! one edge's half-plane area where only that edge cuts the square, the
+//! square clipped to the inside of the cutting edges near a vertex; and of
+//! an axis-aligned rectangle by the product of its sides', which is its
+//! exact area there; it composites in `f32`. A rotated rectangle is parametrised without
 //! trigonometry, by its centre `c`, a half-side vector `u` and its
 //! half-width `h`, its corners `c ± u ± (h / |u|) · (−u_y, u_x)` computed
 //! with `sqrt` alone. Reverse-mode gradients replay the layer

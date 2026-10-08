@@ -117,6 +117,19 @@ impl Pass {
     }
 }
 
+/// Which drawing [`final_stage`] returned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Chosen {
+    /// The refitted model's: the pipeline has no joint optimisation.
+    Refitted,
+    /// The joint optimisation's result, which exports closer to the target
+    /// than its input.
+    Joint,
+    /// The refitted model's, the joint optimisation's input: its result
+    /// exports no closer to the target, and the guard kept the input.
+    Input,
+}
+
 /// The refit passes of the final stage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refits {
@@ -222,25 +235,30 @@ pub fn after_step(model: &mut Model, pipeline: Pipeline, step: u32, alpha: Alpha
 /// then the joint optimisation, if any, which does not. `iterations`, if
 /// set, overrides the joint optimisation's iteration count.
 ///
-/// Returns the drawing [`crate::approximate`] would encode and its score:
-/// after the joint optimisation, its model's RMSE of that drawing
-/// ([`joint::score`]), otherwise the refitted model's
-/// [`Model::score_f64`].
+/// Returns the drawing [`crate::approximate`] would encode, its score and
+/// which drawing it is. The score is, after the joint optimisation, its
+/// model's RMSE of that drawing ([`joint::score`]), otherwise the refitted
+/// model's [`Model::score_f64`].
 pub fn final_stage(
     model: &mut Model,
     render: &RenderOptions,
     pipeline: Pipeline,
     iterations: Option<u32>,
-) -> (Drawing, f64) {
-    let drawing =
+) -> (Drawing, f64, Chosen) {
+    let (drawing, chosen) =
         crate::pipeline::final_stage(model, pipeline.into(), render.alpha, iterations, || false)
             .expect("a stage that is never cancelled finishes");
+    let chosen = match chosen {
+        crate::pipeline::Chosen::Refitted => Chosen::Refitted,
+        crate::pipeline::Chosen::Joint => Chosen::Joint,
+        crate::pipeline::Chosen::Input => Chosen::Input,
+    };
     let score = if pipeline.joint.is_some() {
         joint::score(model, &drawing)
     } else {
         model.score_f64()
     };
-    (drawing, score)
+    (drawing, score, chosen)
 }
 
 /// Encodes `drawing` as [`crate::approximate`] encodes its final drawing.
@@ -409,7 +427,7 @@ mod tests {
             model.step(render.shape, render.alpha);
             passes += u32::from(after_step(&mut model, stages, step, render.alpha).ran());
         }
-        let (drawing, _) = final_stage(&mut model, render, stages, None);
+        let (drawing, ..) = final_stage(&mut model, render, stages, None);
         let bytes = encode(&drawing, render.output_size, output)
             .expect("encode")
             .into_bytes();
@@ -419,7 +437,10 @@ mod tests {
     /// The final stage's score is the joint optimisation's model RMSE of
     /// its drawing for the kinds that end with it, and the refitted
     /// model's score for the other kinds; an iteration count overrides the
-    /// joint optimisation's scaled default.
+    /// joint optimisation's scaled default. It says which drawing it
+    /// returned: the refitted model's for a kind without the joint
+    /// optimisation, otherwise the joint result or, if the guard rejected
+    /// it, the refitted model's.
     #[test]
     fn the_final_stage_scores_its_drawing() {
         let input = png_bytes(&fixture());
@@ -446,22 +467,29 @@ mod tests {
             }
             let greedy = model.clone();
             let stages = pipeline(shape);
-            let (drawing, score) = final_stage(&mut model, &render, stages, None);
+            let (drawing, score, chosen) = final_stage(&mut model, &render, stages, None);
             if let Some(scale) = stages.joint {
                 assert_ne!(shape, ShapeKind::Ellipse);
                 assert_eq!(score, primeval_core::joint::score(&model, &drawing));
-                let (fewer, _) = final_stage(&mut greedy.clone(), &render, stages, Some(1));
+                match chosen {
+                    Chosen::Joint => assert_ne!(drawing, model.drawing(), "{shape:?}"),
+                    Chosen::Input => assert_eq!(drawing, model.drawing(), "{shape:?}"),
+                    Chosen::Refitted => panic!("{shape:?}: the joint optimisation ran"),
+                }
+                let (fewer, ..) = final_stage(&mut greedy.clone(), &render, stages, Some(1));
                 assert_ne!(fewer, drawing);
                 // Without an override, 5 shapes run the rule's 80
                 // iterations, times the kind's multiple.
                 let iterations = 80 * scale;
-                let (rule, _) = final_stage(&mut greedy.clone(), &render, stages, Some(iterations));
+                let (rule, ..) =
+                    final_stage(&mut greedy.clone(), &render, stages, Some(iterations));
                 assert_eq!(rule, drawing);
-                let (fewer, _) =
+                let (fewer, ..) =
                     final_stage(&mut greedy.clone(), &render, stages, Some(iterations - 30));
                 assert_ne!(fewer, drawing);
             } else {
                 assert_eq!(shape, ShapeKind::Ellipse);
+                assert_eq!(chosen, Chosen::Refitted);
                 assert_eq!(score, model.score_f64());
                 assert_eq!(drawing, model.drawing());
                 assert!(score <= greedy.score_f64());

@@ -527,7 +527,7 @@ pub fn approximate(
     // The final stage revises the greedy shapes before encoding; it reports
     // no progress and stops once cancelled.
     execution.check_cancelled()?;
-    let drawing = pipeline::final_stage(&mut model, pipeline, render.alpha, None, || {
+    let (drawing, _) = pipeline::final_stage(&mut model, pipeline, render.alpha, None, || {
         execution.is_cancelled()
     })
     .ok_or(ApproximateError::Aborted)?;

@@ -3,10 +3,13 @@
 //! fit. The arithmetic rule of [`super`] applies to everything here.
 //!
 //! A layer is a triangle, a convex quadrilateral or a rotated rectangle,
-//! covered by the product of its edges' box-filtered half-planes; an
-//! axis-aligned rectangle, covered by the product of its four sides'
-//! box-filtered half-planes, which for an axis-aligned box is its exact
-//! pixel area; or a fixed layer, covered by a [`Mask`] that does not move.
+//! covered by its exact area in the pixel's filter square: the one edge's
+//! box-filtered half-plane where at most one edge cuts the square, and the
+//! square clipped to the inside of its cutting edges where two or more do,
+//! near a vertex; an axis-aligned rectangle, covered by the product of its
+//! four sides' box-filtered half-planes, which for an axis-aligned box is
+//! its exact pixel area; or a fixed layer, covered by a [`Mask`] that does
+//! not move.
 //!
 //! Coordinates are the engine's: the centre of pixel `(i, j)` is `(i, j)`,
 //! so a vertex `v` is the drawing's `v + 0.5`.
@@ -265,8 +268,8 @@ pub(super) struct Scene<F> {
     pub(super) target: Vec<F>,
     pub(super) background: [F; 3],
     /// Width in pixels of the box filter the coverage is convolved with:
-    /// `1` is exact pixel-area coverage of each edge's half-plane, and the
-    /// only width production uses.
+    /// `1` is exact pixel-area coverage, and the only width production
+    /// uses.
     pub(super) filter: f64,
     /// The coverage of each fixed layer ([`Outline::Fixed`]).
     pub(super) masks: Vec<Mask<F>>,
@@ -352,12 +355,36 @@ pub(super) struct Prepared<'a, F> {
     /// A fixed layer's coverage over the bounding box, row-major; empty
     /// for the others.
     mask: &'a [F],
+    /// Half the filter width and `1 / filter²`, for the exact clip of
+    /// [`Self::clip`]; zero for an axis-aligned rectangle and a fixed
+    /// layer.
+    half: F,
+    inv_area: F,
     x0: usize,
     x1: usize,
     y0: usize,
     y1: usize,
     opacity: F,
     color: [F; 3],
+}
+
+/// The most vertices a pixel square clipped by a layer's edges can have:
+/// the square's four, and one more per edge, at most four.
+const CLIP: usize = 8;
+
+/// No edge of the layer: the label of a side of the pixel square.
+const SQUARE: u8 = u8::MAX;
+
+/// The filter square of a pixel clipped to the inside of a layer's
+/// cutting edges ([`Prepared::clip`]): a convex polygon, its vertices
+/// relative to the pixel centre, and for each vertex `i` the edge of the
+/// layer the side from vertex `i` to vertex `i + 1` lies on, or
+/// [`SQUARE`].
+struct Clipped<F> {
+    u: [F; CLIP],
+    v: [F; CLIP],
+    on: [u8; CLIP],
+    len: usize,
 }
 
 impl<F: Real> Edge<F> {
@@ -483,6 +510,8 @@ impl<'a, F: Real> Prepared<'a, F> {
                     edges: [Edge::default(); 4],
                     rect: [F::of(0.0); 5],
                     mask: &mask.coverage,
+                    half: F::of(0.0),
+                    inv_area: F::of(0.0),
                     x0: mask.x0,
                     x1: mask.x1,
                     y0: mask.y0,
@@ -509,6 +538,8 @@ impl<'a, F: Real> Prepared<'a, F> {
                 edges: [Edge::default(); 4],
                 rect: [p[0], p[1], p[2], p[3], 1.0 / filter].map(F::of),
                 mask: &[],
+                half: F::of(0.0),
+                inv_area: F::of(0.0),
                 x0,
                 x1,
                 y0,
@@ -615,6 +646,8 @@ impl<'a, F: Real> Prepared<'a, F> {
             edges,
             rect: [F::of(0.0); 5],
             mask: &[],
+            half: F::of(filter / 2.0),
+            inv_area: F::of(1.0 / (filter * filter)),
             x0,
             x1,
             y0,
@@ -642,7 +675,7 @@ impl<'a, F: Real> Prepared<'a, F> {
     }
 
     /// The coverage of the pixel centred at `(x, y)` by the edges or the
-    /// sides: the product of their box-filtered half-planes.
+    /// sides: the layer's exact area in the pixel's filter square.
     #[cfg(test)]
     fn coverage(&self, x: F, y: F) -> F {
         match self.kind {
@@ -727,54 +760,202 @@ impl<'a, F: Real> Prepared<'a, F> {
     /// [`Self::coverage`] of the first `N` edges, three or four.
     #[inline]
     fn edge_coverage<const N: usize>(&self, x: F, y: F) -> F {
-        let mut product = F::of(1.0);
-        for edge in &self.edges[..N] {
-            let f = edge.cdf(edge.distance(x, y));
-            if f <= F::of(0.0) {
-                return F::of(0.0);
-            }
-            product = product * f;
+        let d: [F; N] = std::array::from_fn(|e| self.edges[e].distance(x, y));
+        let Some((cutting, last)) = self.cutting(&d) else {
+            return F::of(0.0);
+        };
+        match cutting {
+            0 => F::of(1.0),
+            1 => self.edges[last].cdf(d[last]),
+            _ => self.clip(&d).coverage(self.inv_area),
         }
-        product
+    }
+
+    /// The number of the first `N` edges whose reach holds the filter
+    /// square of a pixel at the signed distances `d` from them, those with
+    /// `−half_sum < d < half_sum`, and the last of them; `None` if the
+    /// square is outside an edge.
+    #[inline]
+    fn cutting<const N: usize>(&self, d: &[F; N]) -> Option<(usize, usize)> {
+        let (mut cutting, mut last) = (0, 0);
+        for (e, &d) in d.iter().enumerate() {
+            let reach = self.edges[e].half_sum;
+            if d <= -reach {
+                return None;
+            }
+            if d < reach {
+                cutting += 1;
+                last = e;
+            }
+        }
+        Some((cutting, last))
+    }
+
+    /// The filter square of a pixel at the signed distances `d` from the
+    /// first `N` edges, clipped to the inside of each edge whose reach
+    /// holds it, in edge order (Sutherland–Hodgman). Every edge outside the
+    /// square's reach holds it whole and clips nothing.
+    #[inline]
+    fn clip<const N: usize>(&self, d: &[F; N]) -> Clipped<F> {
+        let (zero, h) = (F::of(0.0), self.half);
+        let mut polygon = Clipped::empty();
+        for (u, v) in [(-h, -h), (h, -h), (h, h), (-h, h)] {
+            polygon.push(u, v, SQUARE);
+        }
+        for (e, &d) in d.iter().enumerate() {
+            let edge = &self.edges[e];
+            if d >= edge.half_sum {
+                continue;
+            }
+            let mut inside = [zero; CLIP];
+            for (i, inside) in inside.iter_mut().enumerate().take(polygon.len) {
+                *inside = edge.nx * polygon.u[i] + edge.ny * polygon.v[i] + d;
+            }
+            let mut clipped = Clipped::empty();
+            for i in 0..polygon.len {
+                let j = if i + 1 == polygon.len { 0 } else { i + 1 };
+                let (si, sj) = (inside[i], inside[j]);
+                let crossing = || {
+                    let t = si / (si - sj);
+                    (
+                        polygon.u[i] + t * (polygon.u[j] - polygon.u[i]),
+                        polygon.v[i] + t * (polygon.v[j] - polygon.v[i]),
+                    )
+                };
+                if si >= zero {
+                    clipped.push(polygon.u[i], polygon.v[i], polygon.on[i]);
+                    if sj < zero {
+                        let (u, v) = crossing();
+                        clipped.push(u, v, e as u8);
+                    }
+                } else if sj >= zero {
+                    let (u, v) = crossing();
+                    clipped.push(u, v, polygon.on[i]);
+                }
+            }
+            polygon = clipped;
+            if polygon.len == 0 {
+                break;
+            }
+        }
+        polygon
     }
 
     /// The coverage of the pixel centred at `(x, y)` by the first `N`
     /// edges, three or four, and its gradient with respect to the
     /// vertex coordinates, or `None` where the coverage is zero.
+    ///
+    /// The coverage is the exact area of the polygon in the filter square,
+    /// over the square's area. Where at most one edge cuts the square, it
+    /// is that edge's box-filtered half-plane `F(d)` ([`Edge::cdf`]), with
+    /// its derivative. Where two or more do, it is the area of the square
+    /// clipped to the inside of each ([`Self::clip`]), by the shoelace
+    /// formula, and its derivative is the first variation of that area:
+    /// the square's sides do not move, so only the clipped segments of the
+    /// edges contribute, each by its outward normal integrated against the
+    /// velocity of its points. The two agree where a second edge's reach
+    /// ends on the square's corner, in value and in gradient.
     #[inline]
     fn edge_coverage_grad<const N: usize>(&self, x: F, y: F) -> Option<(F, [F; COORDS])> {
         let zero = F::of(0.0);
         let d: [F; N] = std::array::from_fn(|e| self.edges[e].distance(x, y));
-        if (0..N).any(|e| d[e] <= -self.edges[e].half_sum) {
-            return None;
-        }
-        if (0..N).all(|e| d[e] >= self.edges[e].half_sum) {
-            return Some((F::of(1.0), [zero; COORDS]));
-        }
-        let values: [EdgeValue<F>; N] = std::array::from_fn(|e| self.edges[e].cdf_grad(d[e]));
-        // The product of the other edges' coverages, in edge order.
-        let others: [F; N] = std::array::from_fn(|e| {
-            let mut product = F::of(1.0);
-            for (j, value) in values.iter().enumerate() {
-                if j != e {
-                    product = product * value.f;
-                }
-            }
-            product
-        });
+        let (cutting, last) = self.cutting(&d)?;
         let mut grad = [zero; COORDS];
-        for e in 0..N {
-            if values[e].fd == zero && values[e].fa == zero && values[e].fb == zero {
-                continue;
+        match cutting {
+            0 => Some((F::of(1.0), grad)),
+            1 => {
+                let edge = &self.edges[last];
+                let value = edge.cdf_grad(d[last]);
+                let g = edge.endpoint_grad(value, x, y, d[last]);
+                let (p, q) = (last, (last + 1) % N);
+                grad[2 * p] += g[0];
+                grad[2 * p + 1] += g[1];
+                grad[2 * q] += g[2];
+                grad[2 * q + 1] += g[3];
+                Some((value.f, grad))
             }
-            let g = self.edges[e].endpoint_grad(values[e], x, y, d[e]);
-            let (p, q) = (e, (e + 1) % N);
-            grad[2 * p] += others[e] * g[0];
-            grad[2 * p + 1] += others[e] * g[1];
-            grad[2 * q] += others[e] * g[2];
-            grad[2 * q + 1] += others[e] * g[3];
+            _ => {
+                let polygon = self.clip(&d);
+                if polygon.len == 0 {
+                    return None;
+                }
+                // Only the clipped segments of the edges move: each moves
+                // the boundary along its outward normal `−(nx, ny)` at the
+                // velocity `(1 − t) δP + t δQ` of its point at `t` along
+                // `PQ`. With `s = t · |PQ|` from `s0` to `s1` on the
+                // segment, the area moves by `L ∫ (1 − t) dt =
+                // (s1 − s0) − (s1² − s0²) / (2 |PQ|)` per unit of `P` and
+                // `(s1² − s0²) / (2 |PQ|)` per unit of `Q`.
+                for i in 0..polygon.len {
+                    let e = usize::from(polygon.on[i]);
+                    if e >= N {
+                        continue;
+                    }
+                    let j = if i + 1 == polygon.len { 0 } else { i + 1 };
+                    let edge = &self.edges[e];
+                    let (tx, ty) = (edge.ex * edge.inv_l, edge.ey * edge.inv_l);
+                    let centre = (x - edge.px) * tx + (y - edge.py) * ty;
+                    let s0 = centre + polygon.u[i] * tx + polygon.v[i] * ty;
+                    let s1 = centre + polygon.u[j] * tx + polygon.v[j] * ty;
+                    let (low, high) = if s0 <= s1 { (s0, s1) } else { (s1, s0) };
+                    let length = high - low;
+                    let to_q = F::of(0.5) * length * (high + low) * edge.inv_l;
+                    let to_p = length - to_q;
+                    let (ox, oy) = (-edge.nx * self.inv_area, -edge.ny * self.inv_area);
+                    let (p, q) = (e, (e + 1) % N);
+                    grad[2 * p] += ox * to_p;
+                    grad[2 * p + 1] += oy * to_p;
+                    grad[2 * q] += ox * to_q;
+                    grad[2 * q + 1] += oy * to_q;
+                }
+                Some((polygon.coverage(self.inv_area), grad))
+            }
         }
-        Some((values[0].f * others[0], grad))
+    }
+}
+
+impl<F: Real> Clipped<F> {
+    fn empty() -> Self {
+        Self {
+            u: [F::of(0.0); CLIP],
+            v: [F::of(0.0); CLIP],
+            on: [SQUARE; CLIP],
+            len: 0,
+        }
+    }
+
+    /// Appends the vertex `(u, v)`, the side from it to the next lying on
+    /// `on`. Clipping a convex polygon by a half-plane adds at most one
+    /// vertex, so there is room for every vertex; should rounding ever
+    /// make the signs of the vertices alternate more than twice, the
+    /// vertices past [`CLIP`] are dropped.
+    #[inline]
+    fn push(&mut self, u: F, v: F, on: u8) {
+        if self.len < CLIP {
+            self.u[self.len] = u;
+            self.v[self.len] = v;
+            self.on[self.len] = on;
+            self.len += 1;
+        }
+    }
+
+    /// The polygon's area times `inv_area`, `1 / filter²`, by the shoelace
+    /// formula, in `0..=1`.
+    #[inline]
+    fn coverage(&self, inv_area: F) -> F {
+        let mut twice = F::of(0.0);
+        for i in 0..self.len {
+            let j = if i + 1 == self.len { 0 } else { i + 1 };
+            twice += self.u[i] * self.v[j] - self.u[j] * self.v[i];
+        }
+        let coverage = F::of(0.5) * twice * inv_area;
+        if coverage < F::of(0.0) {
+            F::of(0.0)
+        } else if coverage > F::of(1.0) {
+            F::of(1.0)
+        } else {
+            coverage
+        }
     }
 }
 
@@ -822,7 +1003,7 @@ impl Cover for Boxed {
     }
 }
 
-/// The product of `N` edges' half-planes.
+/// The exact area of a polygon of `N` edges in the filter square.
 struct Edges<const N: usize>;
 
 impl Cover for Masked {
@@ -1379,6 +1560,98 @@ pub(super) mod tests {
             .collect()
     }
 
+    /// The direction at `degrees` from `x`, turned by `turn` radians.
+    fn direction(degrees: f64, turn: f64) -> (f64, f64) {
+        let (sin, cos) = (degrees.to_radians() + turn).sin_cos();
+        (cos, sin)
+    }
+
+    /// Triangles with a vertex of 20° and one of 155° (whose other two
+    /// angles are acute too), each in both orientations, at random places
+    /// and turns in a canvas of `size`: every vertex lies inside a pixel,
+    /// where two edges cut its square.
+    fn sharp_tris(rng: &mut ChaCha8Rng, size: f64) -> Vec<Layer> {
+        let mut layers = Vec::new();
+        for angle in [20.0, 155.0] {
+            let (ax, ay) = (
+                rng.random_range(size / 4.0..3.0 * size / 4.0),
+                rng.random_range(size / 4.0..3.0 * size / 4.0),
+            );
+            let turn = rng.random_range(0.0..std::f64::consts::TAU);
+            let (r1, r2) = (rng.random_range(4.0..10.0), rng.random_range(4.0..10.0));
+            let (b, c) = (direction(0.0, turn), direction(angle, turn));
+            let v = [
+                ax,
+                ay,
+                ax + r1 * b.0,
+                ay + r1 * b.1,
+                ax + r2 * c.0,
+                ay + r2 * c.1,
+            ];
+            let reversed = [v[4], v[5], v[2], v[3], v[0], v[1]];
+            for v in [v, reversed] {
+                let alpha = rng.random_range(40.0..250.0);
+                let color = std::array::from_fn(|_| rng.random_range(0.0..255.0));
+                layers.push(Layer::triangle(v, alpha, color));
+            }
+        }
+        layers
+    }
+
+    /// Convex quadrilaterals `A, B, C, D` with a vertex `A` of 165° or of
+    /// 25°, `C` on the diagonal from `A` through the middle of `BD`, at or
+    /// beyond the parallelogram's fourth vertex, so that each has an angle
+    /// of at least 150° and one of at most 30°, each in both orientations,
+    /// at random places and turns in a canvas of `size`.
+    fn sharp_quads(rng: &mut ChaCha8Rng, size: f64) -> Vec<Layer> {
+        let mut layers = Vec::new();
+        for angle in [165.0, 25.0] {
+            let (ax, ay) = (
+                rng.random_range(size / 4.0..3.0 * size / 4.0),
+                rng.random_range(size / 4.0..3.0 * size / 4.0),
+            );
+            let turn = rng.random_range(0.0..std::f64::consts::TAU);
+            let (r1, r2) = (rng.random_range(4.0..10.0), rng.random_range(4.0..10.0));
+            let (b, d) = (direction(0.0, turn), direction(angle, turn));
+            let (b, d) = ((r1 * b.0, r1 * b.1), (r2 * d.0, r2 * d.1));
+            let s = rng.random_range(1.0..1.3);
+            let v = [
+                ax,
+                ay,
+                ax + b.0,
+                ay + b.1,
+                ax + s * (b.0 + d.0),
+                ay + s * (b.1 + d.1),
+                ax + d.0,
+                ay + d.1,
+            ];
+            let angles: [f64; 4] = std::array::from_fn(|k| {
+                let (o, p, q) = (k, (k + 3) % 4, (k + 1) % 4);
+                let (ux, uy) = (v[2 * p] - v[2 * o], v[2 * p + 1] - v[2 * o + 1]);
+                let (wx, wy) = (v[2 * q] - v[2 * o], v[2 * q + 1] - v[2 * o + 1]);
+                ((ux * wx + uy * wy) / (ux.hypot(uy) * wx.hypot(wy)))
+                    .acos()
+                    .to_degrees()
+            });
+            assert!(
+                (angles.iter().sum::<f64>() - 360.0).abs() < 1e-6,
+                "{angles:?}"
+            );
+            assert!(angles.iter().any(|&a| a >= 150.0), "{angles:?}");
+            assert!(angles.iter().any(|&a| a <= 30.0), "{angles:?}");
+            let reversed = [v[6], v[7], v[4], v[5], v[2], v[3], v[0], v[1]];
+            for params in [v, reversed] {
+                layers.push(Layer {
+                    outline: Outline::Quad,
+                    params,
+                    alpha: rng.random_range(40.0..250.0),
+                    color: std::array::from_fn(|_| rng.random_range(0.0..255.0)),
+                });
+            }
+        }
+        layers
+    }
+
     /// The vertices of a random strictly convex quadrilateral around
     /// `centre`, with radii up to `size`: four points on an ellipse whose
     /// angles are at least 20° apart, in a random orientation.
@@ -1606,7 +1879,8 @@ pub(super) mod tests {
         (worst, overall, checked)
     }
 
-    /// On 32 × 32 random targets with random triangles, at the export's
+    /// On 32 × 32 random targets with random triangles, and triangles
+    /// with acute and obtuse vertices ([`sharp_tris`]), at the export's
     /// filter width and at wider ones.
     #[test]
     fn analytic_gradients_match_finite_differences() {
@@ -1620,7 +1894,8 @@ pub(super) mod tests {
             let mut rng = ChaCha8Rng::seed_from_u64(seed);
             let mut scene = random_scene::<f64>(&mut rng, 32, 32);
             scene.filter = filter;
-            let tris = random_tris(&mut rng, count, 32.0);
+            let mut tris = random_tris(&mut rng, count, 32.0);
+            tris.extend(sharp_tris(&mut rng, 32.0));
             let (worst, overall, checked) = gradient_check(&scene, &tris);
             assert!(checked >= count * 4, "seed {seed}: {checked} checked");
             assert!(worst < 1e-3, "seed {seed}: worst {worst}");
@@ -1628,7 +1903,8 @@ pub(super) mod tests {
         }
     }
 
-    /// The same with random convex quadrilaterals.
+    /// The same with random convex quadrilaterals, and quadrilaterals with
+    /// acute and obtuse vertices ([`sharp_quads`]).
     #[test]
     fn analytic_gradients_of_polygons_match_finite_differences() {
         for (seed, count, filter) in [
@@ -1641,7 +1917,8 @@ pub(super) mod tests {
             let mut rng = ChaCha8Rng::seed_from_u64(seed);
             let mut scene = random_scene::<f64>(&mut rng, 32, 32);
             scene.filter = filter;
-            let quads = random_quads(&mut rng, count, 32.0);
+            let mut quads = random_quads(&mut rng, count, 32.0);
+            quads.extend(sharp_quads(&mut rng, 32.0));
             let (worst, overall, checked) = gradient_check(&scene, &quads);
             assert!(checked >= count * 6, "seed {seed}: {checked} checked");
             assert!(worst < 1e-3, "seed {seed}: worst {worst}");
@@ -1750,6 +2027,67 @@ pub(super) mod tests {
         }
     }
 
+    /// A quadrilateral whose vertex at the centre of a pixel has an
+    /// interior angle of 175°: its two edges nearly coincide there, each
+    /// covering about half the pixel, and the wedge between them covers
+    /// `1/2 − tan(2.5°) / 4` of it, about 0.489, in either orientation.
+    #[test]
+    fn a_vertex_of_175_degrees_covers_about_half_its_pixel() {
+        let scene = blank_scene(32, 32);
+        let t = 2.5_f64.to_radians().tan();
+        let v = [
+            10.0,
+            10.0,
+            16.0,
+            10.0 + 6.0 * t,
+            10.0,
+            20.0,
+            4.0,
+            10.0 + 6.0 * t,
+        ];
+        let reversed = [v[6], v[7], v[4], v[5], v[2], v[3], v[0], v[1]];
+        let expected = 0.5 - t / 4.0;
+        for params in [v, reversed] {
+            let layer = Layer {
+                outline: Outline::Quad,
+                params,
+                alpha: 255.0,
+                color: [255.0; 3],
+            };
+            let prepared = Prepared::<f64>::new(&layer, &scene);
+            let cover = prepared.coverage(10.0, 10.0);
+            assert!((cover - expected).abs() < 1e-12, "{cover} vs {expected}");
+            let (value, _) = prepared
+                .edge_coverage_grad::<4>(10.0, 10.0)
+                .expect("covered");
+            assert!((value - expected).abs() < 1e-12, "{value} vs {expected}");
+        }
+    }
+
+    /// A triangle whose vertex at the centre of a pixel has an angle of
+    /// 20°, its bisector along `x`: the wedge `|y − 10| ≤ (x − 10) ·
+    /// tan(10°)` for `10 ≤ x ≤ 10.5` stays inside the pixel, so it covers
+    /// `∫₀^½ 2 u tan(10°) du = tan(10°) / 4`, about 0.044, in either
+    /// orientation, where each edge alone covers half the pixel.
+    #[test]
+    fn a_vertex_of_20_degrees_covers_its_wedge() {
+        let scene = blank_scene(32, 32);
+        let t = 10.0_f64.to_radians().tan();
+        let v = [10.0, 10.0, 16.0, 10.0 - 6.0 * t, 16.0, 10.0 + 6.0 * t];
+        let reversed = [v[4], v[5], v[2], v[3], v[0], v[1]];
+        let expected = t / 4.0;
+        for v in [v, reversed] {
+            let layer = Layer::triangle(v, 255.0, [255.0; 3]);
+            let prepared = Prepared::<f64>::new(&layer, &scene);
+            let cover = prepared.coverage(10.0, 10.0);
+            assert!((cover - expected).abs() < 1e-12, "{cover} vs {expected}");
+            let (value, _) = prepared
+                .edge_coverage_grad::<3>(10.0, 10.0)
+                .expect("covered");
+            assert!((value - expected).abs() < 1e-12, "{value} vs {expected}");
+        }
+    }
+
     /// The area of the part of the convex polygon `v` (engine coordinates,
     /// `x0, y0, x1, y1, …`) inside the pixel square centred at `(x, y)`:
     /// the polygon clipped to the square's four sides (Sutherland–Hodgman),
@@ -1791,62 +2129,19 @@ pub(super) mod tests {
         twice.abs() / 2.0
     }
 
-    /// The areas of the pixel square centred at `(x, y)` on the inside of
-    /// each of the convex polygon's edge lines, by the same clipping: the
-    /// pixel clipped to one half-plane at a time.
-    fn edge_areas(v: &[f64], x: f64, y: f64) -> Vec<f64> {
-        let n = v.len() / 2;
-        let twice: f64 = (0..n)
-            .map(|i| {
-                let j = (i + 1) % n;
-                v[2 * i] * v[2 * j + 1] - v[2 * j] * v[2 * i + 1]
-            })
-            .sum();
-        let sigma = if twice < 0.0 { -1.0 } else { 1.0 };
-        (0..n)
-            .map(|e| {
-                let (p, q) = (e, (e + 1) % n);
-                let (px, py) = (v[2 * p], v[2 * p + 1]);
-                let (ex, ey) = (v[2 * q] - px, v[2 * q + 1] - py);
-                // A triangle far larger than the pixel with this edge: the
-                // edge's half-plane, as far as the pixel can tell.
-                let far = 1e4 / ex.hypot(ey);
-                let (ox, oy) = (-sigma * ey * far, sigma * ex * far);
-                let big = [
-                    px - far * ex,
-                    py - far * ey,
-                    px + (1.0 + far) * ex,
-                    py + (1.0 + far) * ey,
-                    px + 0.5 * ex + ox,
-                    py + 0.5 * ey + oy,
-                ];
-                exact_coverage(&big, x, y)
-            })
-            .collect()
-    }
-
     /// The forward model's coverage of `layer` against the exact area of
     /// the polygon inside each pixel of a `SIZE × SIZE` canvas, computed
-    /// independently by clipping.
-    ///
-    /// The model multiplies the edges' exact half-plane areas, which is the
-    /// exact area wherever at most one edge crosses the pixel. Where more
-    /// cross (near a vertex) the product is not the area of the
-    /// intersection, but both lie within the Fréchet bounds of `n` sets of
-    /// areas `a_i` in a unit square,
-    /// `max(0, Σ a_i − (n − 1)) ≤ · ≤ min a_i`. So every pixel is held to
-    /// that interval's width, which is zero on single-edge pixels, plus
-    /// `1e-6` (the model treats a filter projection narrower than `1e-6`
-    /// as zero). Returns the model's and the exact area, and the sum and
-    /// count of the errors over edge pixels.
-    fn compare_coverage(layer: &Layer) -> (f64, f64, f64, u32) {
+    /// independently by clipping the polygon to the pixel
+    /// ([`exact_coverage`]): every pixel within `1e-9`, inside the layer's
+    /// bounding box wherever it is covered, and the same coverage from the
+    /// gradient's path. Returns the model's and the exact total area.
+    fn compare_coverage(layer: &Layer) -> (f64, f64) {
         const SIZE: usize = 64;
         let scene = blank_scene(SIZE, SIZE);
         let corners = layer.corners();
         let v = &corners[..2 * layer.outline.sides()];
         let prepared = Prepared::<f64>::new(layer, &scene);
         let (mut model_area, mut exact_area) = (0.0, 0.0);
-        let (mut error_sum, mut edge_pixels) = (0.0, 0);
         for y in 0..SIZE {
             for x in 0..SIZE {
                 let (fx, fy) = (x as f64, y as f64);
@@ -1855,38 +2150,35 @@ pub(super) mod tests {
                     && (prepared.y0..prepared.y1).contains(&y);
                 let model = prepared.coverage(fx, fy);
                 assert!(in_box || exact == 0.0, "{v:?}: ({x}, {y}) outside the box");
-                let areas = edge_areas(v, fx, fy);
-                let low = (areas.iter().sum::<f64>() - (areas.len() - 1) as f64).max(0.0);
-                let width = areas.iter().copied().fold(1.0, f64::min) - low;
-                let error = (model - exact).abs();
                 assert!(
-                    error <= width + 1e-6,
-                    "{v:?} at ({x}, {y}): {model} vs {exact}, bound {width}"
+                    (model - exact).abs() < 1e-9,
+                    "{v:?} at ({x}, {y}): {model} vs {exact}"
                 );
+                let with_grad = match layer.outline.sides() {
+                    3 => prepared.edge_coverage_grad::<3>(fx, fy),
+                    _ => prepared.edge_coverage_grad::<4>(fx, fy),
+                };
+                assert_eq!(with_grad.map_or(0.0, |(cover, _)| cover), model);
                 model_area += model;
                 exact_area += exact;
-                if (exact > 0.0 && exact < 1.0) || (model > 0.0 && model < 1.0) {
-                    error_sum += error;
-                    edge_pixels += 1;
-                }
             }
         }
-        (model_area, exact_area, error_sum, edge_pixels)
+        assert!(
+            (model_area - exact_area).abs() < 1e-9 * exact_area.max(1.0),
+            "{v:?}: area {model_area} vs {exact_area}"
+        );
+        (model_area, exact_area)
     }
 
-    /// Near vertices the product over-covers, which matters only for small
-    /// triangles: measured on these seeds, the mean error over edge pixels
-    /// falls from 0.035 at 2 px to 0.003 at 48 px, and the excess area from
-    /// a median of +45% at 2 px to at most +0.9% from 24 px. The bounds
-    /// below sit above those with some margin: 0.05 per edge pixel at every
-    /// size, the top of the 0.02–0.05 the pilot measured against
-    /// tiny-skia's anti-aliasing, and from 24 px 0.006 and 1.5% of the
-    /// area.
+    /// Random triangles from 2 to 48 px are covered by their exact area in
+    /// every pixel, those around their vertices included. (The product of
+    /// the edges' half-planes, which the model used before, over-covered
+    /// near acute vertices: a mean error of 0.035 per edge pixel and a
+    /// median excess area of +45% at 2 px.)
     #[test]
     fn coverage_matches_the_exact_pixel_area_of_the_triangle() {
         let mut rng = ChaCha8Rng::seed_from_u64(7);
         for size in [2.0, 6.0, 12.0, 24.0, 48.0_f64] {
-            let (mut error_sum, mut edge_pixels) = (0.0, 0);
             for _ in 0..20 {
                 let centre = 32.0;
                 let v: [f64; 6] = loop {
@@ -1897,29 +2189,16 @@ pub(super) mod tests {
                         break v;
                     }
                 };
-                let (model_area, exact_area, errors, pixels) =
-                    compare_coverage(&Layer::triangle(v, 255.0, [255.0; 3]));
-                if size >= 24.0 {
-                    let relative = model_area / exact_area - 1.0;
-                    assert!(relative.abs() < 0.015, "{v:?}: area {relative:+.4}");
-                }
-                error_sum += errors;
-                edge_pixels += pixels;
+                compare_coverage(&Layer::triangle(v, 255.0, [255.0; 3]));
             }
-            let mean = error_sum / f64::from(edge_pixels);
-            let bound = if size >= 24.0 { 0.006 } else { 0.05 };
-            assert!(mean < bound, "size {size}: mean edge error {mean}");
         }
     }
 
-    /// The same for convex quadrilaterals, whose angles are wider, so the
-    /// product over-covers less near their vertices: the bounds of the
-    /// triangles hold.
+    /// The same for convex quadrilaterals.
     #[test]
     fn coverage_matches_the_exact_pixel_area_of_a_convex_polygon() {
         let mut rng = ChaCha8Rng::seed_from_u64(8);
         for size in [2.0, 6.0, 12.0, 24.0, 48.0_f64] {
-            let (mut error_sum, mut edge_pixels) = (0.0, 0);
             for _ in 0..20 {
                 let layer = Layer {
                     outline: Outline::Quad,
@@ -1927,17 +2206,8 @@ pub(super) mod tests {
                     alpha: 255.0,
                     color: [255.0; 3],
                 };
-                let (model_area, exact_area, errors, pixels) = compare_coverage(&layer);
-                if size >= 24.0 {
-                    let relative = model_area / exact_area - 1.0;
-                    assert!(relative.abs() < 0.015, "{layer:?}: area {relative:+.4}");
-                }
-                error_sum += errors;
-                edge_pixels += pixels;
+                compare_coverage(&layer);
             }
-            let mean = error_sum / f64::from(edge_pixels);
-            let bound = if size >= 24.0 { 0.006 } else { 0.05 };
-            assert!(mean < bound, "size {size}: mean edge error {mean}");
         }
     }
 
@@ -1985,34 +2255,23 @@ pub(super) mod tests {
         assert!(partial > 5000, "{partial} partly covered pixels");
     }
 
-    /// Rotated rectangles have the convex quadrilaterals' bounds, with
-    /// right angles at every corner.
+    /// The same for rotated rectangles, whose exact area is `4 |u| h`.
     #[test]
     fn coverage_matches_the_exact_pixel_area_of_a_rotated_rectangle() {
         let mut rng = ChaCha8Rng::seed_from_u64(11);
         for size in [2.0, 6.0, 12.0, 24.0, 48.0_f64] {
-            let (mut error_sum, mut edge_pixels) = (0.0, 0);
             for mut layer in random_rotated(&mut rng, 20, size) {
                 // Centred within a pixel of the canvas's centre, inside it.
                 layer.params[0] = 31.0 + 2.0 * layer.params[0] / size;
                 layer.params[1] = 31.0 + 2.0 * layer.params[1] / size;
-                let (model_area, exact_area, errors, pixels) = compare_coverage(&layer);
+                let (_, exact_area) = compare_coverage(&layer);
                 let [_, _, ux, uy, h, ..] = layer.params;
                 let area = 4.0 * ux.hypot(uy) * h;
                 assert!(
                     (exact_area - area).abs() < 1e-9 * area.max(1.0),
                     "{layer:?}"
                 );
-                if size >= 24.0 {
-                    let relative = model_area / exact_area - 1.0;
-                    assert!(relative.abs() < 0.015, "{layer:?}: area {relative:+.4}");
-                }
-                error_sum += errors;
-                edge_pixels += pixels;
             }
-            let mean = error_sum / f64::from(edge_pixels);
-            let bound = if size >= 24.0 { 0.006 } else { 0.05 };
-            assert!(mean < bound, "size {size}: mean edge error {mean}");
         }
     }
 

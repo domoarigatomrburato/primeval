@@ -157,6 +157,11 @@
 //!   model adopted, over those that ran, as `kept/ran`; empty for a
 //!   schedule without joint passes. Their time is in `search_s` and
 //!   `refine_s`, as every pass's during the search.
+//! - `final_joint`, with `--refine final` or `joint:R`: `kept` when the
+//!   checkpoint's final stage returned the joint optimisation's result,
+//!   `input` when the guard kept the refitted drawing because the joint
+//!   result exported no closer to the target (`lab::Chosen`); empty for a
+//!   kind without the joint optimisation and for the other `--refine`.
 //! - `violations`, in the per-kind summary only: the drawing's shapes that
 //!   break the legibility rules, checked independently with `acos` angles:
 //!   triangles with an angle of 15° or less; quadrilaterals (polygons
@@ -190,7 +195,7 @@ mod common;
 use common::{ALL_SHAPES, BoxError, SEED, rgb_rmse};
 use image::{ImageFormat, RgbImage, imageops};
 use primeval_core::{Drawing, Geometry, Model, ModelOptions};
-use primeval_render::lab::{During, Guard, Pass, Pipeline, Refits};
+use primeval_render::lab::{Chosen, During, Guard, Pass, Pipeline, Refits};
 use primeval_render::{OutputFormat, RenderOptions, ShapeKind, lab};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -427,6 +432,7 @@ struct Row {
     svg_bytes: usize,
     violations: usize,
     adopted: Option<(u32, u32)>,
+    final_joint: Option<Chosen>,
 }
 
 fn main() -> Result<(), BoxError> {
@@ -459,6 +465,7 @@ fn main() -> Result<(), BoxError> {
                     svg_bytes: checkpoint.svg_bytes,
                     violations: checkpoint.violations,
                     adopted: checkpoint.adopted,
+                    final_joint: checkpoint.final_joint,
                 });
             }
         }
@@ -476,10 +483,11 @@ fn main() -> Result<(), BoxError> {
     };
     println!(
         "| image | shape | steps | search_s |{refine_head} score | rmse256 | gap | ssim128 | \
-         ssim1024 | svg_bytes | adopted |"
+         ssim1024 | svg_bytes | adopted | final_joint |"
     );
     println!(
-        "| --- | --- | ---: | ---: |{refine_rule} ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+        "| --- | --- | ---: | ---: |{refine_rule} ---: | ---: | ---: | ---: | ---: | ---: | ---: | \
+         --- |"
     );
     for row in &rows {
         let refine = if refined {
@@ -490,8 +498,14 @@ fn main() -> Result<(), BoxError> {
         let adopted = row
             .adopted
             .map_or_else(String::new, |(kept, ran)| format!("{kept}/{ran}"));
+        let final_joint = match row.final_joint {
+            Some(Chosen::Joint) => "kept",
+            Some(Chosen::Input) => "input",
+            Some(Chosen::Refitted) | None => "",
+        };
         println!(
-            "| {} | {} | {} | {:.3} |{refine} {:.6} | {:.6} | {:+.4} | {:.6} | {:.6} | {} | {adopted} |",
+            "| {} | {} | {} | {:.3} |{refine} {:.6} | {:.6} | {:+.4} | {:.6} | {:.6} | {} | {adopted} | \
+             {final_joint} |",
             row.image,
             row.shape,
             row.steps,
@@ -630,6 +644,9 @@ struct Checkpoint {
     /// The joint passes during the search so far, kept and run, if the
     /// schedule has any.
     adopted: Option<(u32, u32)>,
+    /// Which drawing the final stage returned, with `--refine final` or
+    /// `joint:R`.
+    final_joint: Option<Chosen>,
 }
 
 /// Runs one search of `shape` to the last of the checkpoints (sorted,
@@ -690,6 +707,7 @@ fn search(input: &[u8], shape: ShapeKind, config: &Config) -> Result<Vec<Checkpo
         if next.next_if_eq(&step).is_none() {
             continue;
         }
+        let mut final_joint = None;
         let (drawing, score, search, refined) = match refine {
             Refine::End(passes) => {
                 let mut clone = model.clone();
@@ -708,8 +726,10 @@ fn search(input: &[u8], shape: ShapeKind, config: &Config) -> Result<Vec<Checkpo
             Refine::Final | Refine::Joint(_) => {
                 let mut clone = model.clone();
                 let start = Instant::now();
-                let (drawing, score) = lab::final_stage(&mut clone, &render, pipeline, iterations);
+                let (drawing, score, chosen) =
+                    lab::final_stage(&mut clone, &render, pipeline, iterations);
                 let elapsed = start.elapsed();
+                final_joint = Some(chosen);
                 (drawing, score, search + elapsed, refined + elapsed)
             }
             Refine::None | Refine::Every(_) => {
@@ -736,6 +756,7 @@ fn search(input: &[u8], shape: ShapeKind, config: &Config) -> Result<Vec<Checkpo
             svg_bytes,
             violations: violations(&drawing, render.shape),
             adopted,
+            final_joint,
         });
     }
     Ok(recorded)

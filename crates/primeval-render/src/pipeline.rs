@@ -318,19 +318,32 @@ fn joint_pass(
     Some(kept)
 }
 
+/// Which drawing [`final_stage`] returned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Chosen {
+    /// The refitted model's: the pipeline has no joint optimisation.
+    Refitted,
+    /// The joint optimisation's result, which exports closer to the target
+    /// than its input.
+    Joint,
+    /// The refitted model's, the joint optimisation's input: its result
+    /// exports no closer to the target ([`better_export`]).
+    Input,
+}
+
 /// The final stage of `pipeline` on `model`, after its last step: the
 /// refit passes, which change `model`, then the joint optimisation, which
 /// does not, with `iterations`, if set, in place of its scaled default.
 /// The joint result is kept only if it exports closer to the target than
 /// the refitted model's drawing ([`better_export`]). Returns the drawing to
-/// encode, or `None` once `cancelled` returns true.
+/// encode and which it is, or `None` once `cancelled` returns true.
 pub(crate) fn final_stage(
     model: &mut Model,
     pipeline: Pipeline,
     alpha: Alpha,
     iterations: Option<u32>,
     mut cancelled: impl FnMut() -> bool,
-) -> Option<Drawing> {
+) -> Option<(Drawing, Chosen)> {
     match pipeline.refits {
         Refits::Passes(passes) => {
             for _ in 0..passes {
@@ -349,7 +362,7 @@ pub(crate) fn final_stage(
         }
     }
     let Some(scale) = pipeline.joint else {
-        return Some(model.drawing());
+        return Some((model.drawing(), Chosen::Refitted));
     };
     let mut settings = joint::Settings::default();
     settings.iterations = Some(iterations.unwrap_or_else(|| {
@@ -361,16 +374,17 @@ pub(crate) fn final_stage(
 
 /// `joint` if its PNG export at the working size is strictly closer to
 /// `target` than `input`'s ([`raster::squared_error`]), otherwise `input`:
-/// a tie, or a drawing that cannot be rendered, keeps `input`.
+/// a tie, or a drawing that cannot be rendered, keeps `input`. Returns the
+/// drawing and which it is.
 ///
 /// The joint optimisation lowers its own objective, a smooth model of the
-/// anti-aliased export, but that model can disagree with the export: the
-/// product of half-planes it takes as a polygon's coverage squares where
-/// two near-collinear edges cross the same pixels, and the snap to its
-/// lattice moves every vertex after the last iteration. On finely fitted
-/// stacks the export can then be much worse than the joint optimisation's
-/// input while its objective reports a gain, so the guard measures the
-/// export itself.
+/// anti-aliased export whose coverage is each shape's exact area in every
+/// pixel, but that model can still disagree with the export: the snap to
+/// its lattice moves every vertex after the last iteration, and it
+/// composites in `f32` where the export renders the drawing itself. On
+/// finely fitted stacks the export can then be much worse than the joint
+/// optimisation's input while its objective reports a gain, so the guard
+/// measures the export itself.
 ///
 /// The comparison is exact integer arithmetic over the PNG writer's
 /// raster, in one thread, so it does not depend on the number of threads.
@@ -380,11 +394,11 @@ pub(crate) fn final_stage(
 /// path, so native and WebAssembly builds agree; the one platform
 /// function it calls is the `sin` and `cos` of a rotated ellipse's angle,
 /// which only `any` can draw and which the export itself depends on too.
-fn better_export(target: &Buffer, input: Drawing, joint: Drawing) -> Drawing {
+fn better_export(target: &Buffer, input: Drawing, joint: Drawing) -> (Drawing, Chosen) {
     if exports_closer(target, &input, &joint) {
-        joint
+        (joint, Chosen::Joint)
     } else {
-        input
+        (input, Chosen::Input)
     }
 }
 
@@ -599,9 +613,10 @@ mod tests {
     }
 
     /// On a finely fitted stack of polygons the joint optimisation's
-    /// coverage model disagrees with the exported image, and its result
-    /// is far worse once rendered; the final stage then returns its input,
-    /// the drawing after the refit passes.
+    /// result is far worse than its input once rendered (its first steps
+    /// and the snap move the small shapes, whatever its coverage model);
+    /// the final stage then returns its input, the drawing after the refit
+    /// passes.
     #[test]
     fn the_final_stage_keeps_its_input_when_the_joint_result_exports_worse() {
         let target = hard_shapes(24);
@@ -619,7 +634,7 @@ mod tests {
             None,
             || false,
         );
-        assert_eq!(kept, Some(input));
+        assert_eq!(kept, Some((input, Chosen::Input)));
     }
 
     /// Where the joint result exports closer to the target, the final
@@ -641,7 +656,7 @@ mod tests {
             None,
             || false,
         );
-        assert_eq!(kept, Some(joint));
+        assert_eq!(kept, Some((joint, Chosen::Joint)));
     }
 
     /// Two drawings that export to the same pixels tie, and a tie keeps
@@ -664,8 +679,14 @@ mod tests {
             }],
         };
         let (input, joint) = (drawing(0.0), drawing(2.0));
-        assert_eq!(better_export(&target, input.clone(), joint.clone()), input);
-        assert_eq!(better_export(&target, joint.clone(), input), joint);
+        assert_eq!(
+            better_export(&target, input.clone(), joint.clone()),
+            (input.clone(), Chosen::Input)
+        );
+        assert_eq!(
+            better_export(&target, joint.clone(), input),
+            (joint, Chosen::Input)
+        );
     }
 
     /// `Until` runs passes until the first whose relative gain in the
@@ -703,6 +724,7 @@ mod tests {
                 || false,
             );
             assert_eq!(until, passes, "min_gain {min_gain}");
+            assert_eq!(until.map(|(_, chosen)| chosen), Some(Chosen::Refitted));
         }
         counts.dedup();
         assert!(counts.len() >= 3, "the thresholds stop alike: {counts:?}");

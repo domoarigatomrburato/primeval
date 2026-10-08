@@ -265,3 +265,24 @@ $E --shapes $K --refine final --during joint-export:20:5:20 > bdur-20-5-i20-x.md
 Each run took 104–135 s.
 
 Triangles moved to this schedule in `approximate` at `8e77bb2` (`During::Joint`, `Guard::Canvas`, `Model::adopt`; the rotated-rectangle conversion and the export guard stay lab-only). Regenerated on the same machine with the README's runners: the quality runner's triangle rows at 200 steps went from 1.21 s to 0.89 s (American Gothic) and from 0.95 s to 0.81 s (Mona Lisa), with the export's RMSE 0.7% and 0.2% lower; `versus_go` (alpha 128, not auto) has triangles at 3.96× Go's speed at 200 steps (was 3.4×) and 4.01× at 1000 (was 3.6×), with the RMSE against the resized original 12.30 (was 12.32) and 9.53 (was 9.45): at 1000 shapes with a fixed alpha the quality is 0.8% worse for 10% less time, a regime the engine runner, which stops at 500 shapes with alpha auto, did not cover. The geometric-mean speedup over Go moves from 3.26× / 3.75× to 3.30× / 3.78×, the RMSE ratio stays at 0.811 / 0.742, and every other kind's row is unchanged to the last digit, as the pipeline change is confined to triangles.
+
+## 11. Follow-up: exact pixel coverage at B's vertices (2026-10-08)
+
+The third item of section 8's list, done before the second at the user's choice, since item 1 left polygons waiting on it. B's forward model (`joint/diff.rs`) covered a pixel by the product of its edges' box-filtered half-planes, which is the exact area only where one edge cuts the pixel; near a vertex it gave about half the true area at an angle near 180° and far more than it at an acute one (+45% of a 2 px triangle's area). The model now takes the exact area of the polygon inside the pixel wherever two or more edges cut it, by clipping the pixel square to the cutting edges, with the exact gradient from the first variation of the area; single-edge pixels, the vast majority, keep their formula and their bits. Axis-aligned rectangles were exact already and are bit-identical. The clip runs on 1–6% of the edge pixels.
+
+Measured on the same corpus with the previous binary (`b1f82a4`) against the new one, `--refine final`, five kinds, and with `--during joint:20:5:20` for the four kinds that did not move to it in section 10. Rectangles are identical to the last digit. Change of the median rmse256 and time ratio at 50 / 100 / 200 / 500 shapes:
+
+| kind | Δ median rmse256 | time |
+| --- | --- | --- |
+| any | −0.1 / −0.1 / −0.3 / −0.7% | 0.98–1.00× |
+| triangle | +0.6 / 0.0 / −0.3 / −0.2% | 1.02–1.04× |
+| rotated-rectangle | 0.0 / −0.1 / +0.3 / +0.7% | 0.92–0.96× |
+| polygon | +0.1 / +0.3 / −0.6 / −2.2% | 0.98–0.99× |
+
+On the paintings polygons gain 0.5–2.2% from 200 shapes and `any` is within ±1%; the gains of `any` on synthetic-shapes (−2 to −8%) and the triangle losses there (+10% and +5% at 50 and 100 shapes, on a median rmse256 of 0.007–0.010, −3% and −1% from 200) are the hard-edged image moving with the model. The runner's new `final_joint` column says what the guard did: with the exact model it keeps B's result on every painting row and rejects it only on synthetic-shapes for polygons (every count) and rectangles (500), and once on synthetic-texture for `any` (500).
+
+**What the guard still rejects is not the coverage.** On the 24 × 24 hard-edged stack of the guard's own test, B's result exports 3.6 times worse than its input with the exact model (4.0 with the product), and already 1.7 times worse with zero Adam iterations, that is after the projection, the snap to the quarter-pixel lattice and the colour refit alone; the first Adam iteration, a 1 px step, is worse still before the later ones recover. The rejections on synthetic-shapes come from the snap and the first steps on finely fitted small shapes, not from the model's disagreement with the export. Consistently, polygons with B during the search (`bdur4-new` against `bdur4-old`) gain 0.4–1.9% on the paintings but keep the synthetic-shapes regression of section 10 (+3 to +4% against the refit passes' schedule at 200 and 500, after the +33–41% that schedule already loses there), so **polygons stay on the refit passes**. A snap that checks each vertex against the loss, or a first step scaled to the shape's size, is the next lever for B on hard edges; it is a small runner experiment.
+
+Verdict: the exact coverage stays. It is the correct model, costs nothing, gains a little at high counts, and the tests now hold the model to the exact pixel area within `1e-9` at every size instead of the product's 5% bounds.
+
+Reproduction: `target/abl/run_exact.sh` (the previous binary kept as `target/abl/engine-b1f82a4`), `analyse_exact.py`.
