@@ -9,7 +9,7 @@ use crate::{ShapeKind, raster};
 use primeval_core::{Alpha, Buffer, Drawing, Model, joint};
 
 /// The stages around the greedy steps of one shape kind.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Pipeline {
     /// The passes of the model during the search: refit passes, or joint
     /// passes.
@@ -20,6 +20,9 @@ pub(crate) struct Pipeline {
     /// ([`joint::optimise`]) with this multiple of its default iteration
     /// count ([`joint::default_iterations`]), or `None` for none.
     pub(crate) joint: Option<u32>,
+    /// The step sizes of every joint optimisation, in the search and in the
+    /// final stage ([`joint::Settings::tuning`]).
+    pub(crate) tuning: joint::Tuning,
 }
 
 /// When the search runs a pass over the model itself after a step, and
@@ -250,15 +253,17 @@ pub(crate) fn pipeline(shape: ShapeKind) -> Pipeline {
         during,
         refits,
         joint,
+        tuning: joint::Tuning::default(),
     }
 }
 
 /// Runs the pass that `during` schedules after step `step` (from 1), if
-/// any, and returns what ran. Returns `None` once `cancelled` returns true,
+/// any, a joint pass with the step sizes of `tuning`, and returns what ran. Returns `None` once `cancelled` returns true,
 /// with the model as it was before the pass.
 pub(crate) fn after_step(
     model: &mut Model,
     during: During,
+    tuning: joint::Tuning,
     step: u32,
     alpha: Alpha,
     mut cancelled: impl FnMut() -> bool,
@@ -270,14 +275,15 @@ pub(crate) fn after_step(
         iterations, guard, ..
     } = during
     {
-        let kept = joint_pass(model, iterations, guard, alpha, cancelled)?;
+        let kept = joint_pass(model, iterations, tuning, guard, alpha, cancelled)?;
         return Some(Pass::Joint { kept });
     }
     model.refine_unless(alpha, &mut cancelled)?;
     Some(Pass::Refit)
 }
 
-/// A joint pass of `iterations` iterations on `model`, its result adopted
+/// A joint pass of `iterations` iterations with the step sizes of `tuning`
+/// on `model`, its result adopted
 /// if `guard` keeps it; returns whether it was kept. With
 /// [`Guard::Canvas`] the model's exact canvas decides ([`Model::adopt`]
 /// without `force`); with the lab's `Guard::Export` the result is adopted
@@ -291,12 +297,14 @@ pub(crate) fn after_step(
 fn joint_pass(
     model: &mut Model,
     iterations: u32,
+    tuning: joint::Tuning,
     guard: Guard,
     alpha: Alpha,
     mut cancelled: impl FnMut() -> bool,
 ) -> Option<bool> {
     let mut settings = joint::Settings::default();
     settings.iterations = Some(iterations);
+    settings.tuning = tuning;
     let optimised = joint::optimise(model, alpha, settings, &mut cancelled)?;
     if cancelled() {
         return None;
@@ -368,6 +376,7 @@ pub(crate) fn final_stage(
     settings.iterations = Some(iterations.unwrap_or_else(|| {
         joint::default_iterations(model.drawing().shapes.len()).saturating_mul(scale)
     }));
+    settings.tuning = pipeline.tuning;
     let optimised = joint::optimise(model, alpha, settings, cancelled)?;
     Some(better_export(model.target(), model.drawing(), optimised))
 }
@@ -477,8 +486,15 @@ mod tests {
         let mut model = Model::new(target, Color::new(128, 128, 128, 255), options);
         for step in 1..=steps {
             model.step(shape, Alpha::Auto);
-            after_step(&mut model, During::Every(5), step, Alpha::Auto, || false)
-                .expect("not cancelled");
+            after_step(
+                &mut model,
+                During::Every(5),
+                joint::Tuning::default(),
+                step,
+                Alpha::Auto,
+                || false,
+            )
+            .expect("not cancelled");
         }
         model
     }
@@ -520,6 +536,7 @@ mod tests {
             during: During::Never,
             refits,
             joint,
+            tuning: joint::Tuning::default(),
         }
     }
 
@@ -596,8 +613,15 @@ mod tests {
                     .expect("test thread pool");
                 pool.install(|| {
                     let mut model = sized_model(shape, 3, 24, 18);
-                    after_step(&mut model, During::Every(3), 3, Alpha::Auto, || false)
-                        .expect("not cancelled");
+                    after_step(
+                        &mut model,
+                        During::Every(3),
+                        joint::Tuning::default(),
+                        3,
+                        Alpha::Auto,
+                        || false,
+                    )
+                    .expect("not cancelled");
                     final_stage(&mut model, stages, Alpha::Auto, None, || false)
                         .expect("not cancelled")
                 })
@@ -613,27 +637,30 @@ mod tests {
     }
 
     /// On a finely fitted stack of polygons the joint optimisation's
-    /// result is far worse than its input once rendered (its first steps
-    /// and the snap move the small shapes, whatever its coverage model);
-    /// the final stage then returns its input, the drawing after the refit
-    /// passes.
+    /// result without a warm-up (`warmup: 0`, the steps before the default
+    /// warm-up of 5) is far worse than its input once rendered (its first
+    /// full steps and the snap move the small shapes, whatever its coverage
+    /// model); the final stage then returns its input, the drawing after
+    /// the refit passes. The default warm-up brings this case's ratio below
+    /// 1, so the test sets the pipeline's tuning to keep exercising the
+    /// guard.
     #[test]
     fn the_final_stage_keeps_its_input_when_the_joint_result_exports_worse() {
         let target = hard_shapes(24);
         let model = hard_shapes_model(ShapeKind::Polygon, 2, 25);
         let input = model.drawing();
-        let joint = joint_result(&model, 1);
+        let tuning = joint::Tuning {
+            warmup: 0,
+            ..joint::Tuning::default()
+        };
+        let joint = tuned_joint_result(&model, tuning);
         assert!(
             png_error(&joint, &target) > 2 * png_error(&input, &target),
             "the joint optimisation no longer worsens this case"
         );
-        let kept = final_stage(
-            &mut model.clone(),
-            stages(Refits::Passes(0), Some(1)),
-            Alpha::Auto,
-            None,
-            || false,
-        );
+        let mut pipeline = stages(Refits::Passes(0), Some(1));
+        pipeline.tuning = tuning;
+        let kept = final_stage(&mut model.clone(), pipeline, Alpha::Auto, None, || false);
         assert_eq!(kept, Some((input, Chosen::Input)));
     }
 
@@ -776,10 +803,17 @@ mod tests {
         let during = During::Every(10);
         let mut polls = 0;
         let mut refitted = greedy.clone();
-        let finished = after_step(&mut refitted, during, 10, Alpha::Auto, || {
-            polls += 1;
-            false
-        });
+        let finished = after_step(
+            &mut refitted,
+            during,
+            joint::Tuning::default(),
+            10,
+            Alpha::Auto,
+            || {
+                polls += 1;
+                false
+            },
+        );
         assert_eq!(finished, Some(Pass::Refit));
         assert_ne!(
             refitted.drawing(),
@@ -790,16 +824,30 @@ mod tests {
         for cancel_at in [1, polls / 2, polls] {
             let mut model = greedy.clone();
             let mut count = 0;
-            let stopped = after_step(&mut model, during, 10, Alpha::Auto, || {
-                count += 1;
-                count >= cancel_at
-            });
+            let stopped = after_step(
+                &mut model,
+                during,
+                joint::Tuning::default(),
+                10,
+                Alpha::Auto,
+                || {
+                    count += 1;
+                    count >= cancel_at
+                },
+            );
             assert_eq!(stopped, None, "cancelled at poll {cancel_at}");
             assert_eq!(model.drawing(), greedy.drawing());
         }
         let mut model = greedy.clone();
         assert_eq!(
-            after_step(&mut model, during, 9, Alpha::Auto, || panic!("polled")),
+            after_step(
+                &mut model,
+                during,
+                joint::Tuning::default(),
+                9,
+                Alpha::Auto,
+                || panic!("polled")
+            ),
             Some(Pass::Skipped)
         );
     }
@@ -907,7 +955,15 @@ mod tests {
         let passes = (1..=steps)
             .map(|step| {
                 model.step(shape, Alpha::Auto);
-                after_step(&mut model, during, step, Alpha::Auto, || false).expect("not cancelled")
+                after_step(
+                    &mut model,
+                    during,
+                    joint::Tuning::default(),
+                    step,
+                    Alpha::Auto,
+                    || false,
+                )
+                .expect("not cancelled")
             })
             .collect();
         (model, passes)
@@ -925,8 +981,15 @@ mod tests {
             for step in 1..=12 {
                 model.step(shape, Alpha::Auto);
                 let before = model.clone();
-                let pass = after_step(&mut model, during, step, Alpha::Auto, || false)
-                    .expect("not cancelled");
+                let pass = after_step(
+                    &mut model,
+                    during,
+                    joint::Tuning::default(),
+                    step,
+                    Alpha::Auto,
+                    || false,
+                )
+                .expect("not cancelled");
                 let context = format!("{shape:?}, step {step}");
                 match pass {
                     Pass::Joint { kept: true } => {
@@ -962,8 +1025,15 @@ mod tests {
             for step in 1..=12 {
                 model.step(shape, Alpha::Auto);
                 let before = model.clone();
-                let pass = after_step(&mut model, during, step, Alpha::Auto, || false)
-                    .expect("not cancelled");
+                let pass = after_step(
+                    &mut model,
+                    during,
+                    joint::Tuning::default(),
+                    step,
+                    Alpha::Auto,
+                    || false,
+                )
+                .expect("not cancelled");
                 let context = format!("{shape:?}, step {step}");
                 match pass {
                     Pass::Joint { kept: true } => {
@@ -993,10 +1063,17 @@ mod tests {
             let during = joint(10, 1, 5, guard);
             let mut polls = 0;
             let mut adopted = greedy.clone();
-            let finished = after_step(&mut adopted, during, 10, Alpha::Auto, || {
-                polls += 1;
-                false
-            });
+            let finished = after_step(
+                &mut adopted,
+                during,
+                joint::Tuning::default(),
+                10,
+                Alpha::Auto,
+                || {
+                    polls += 1;
+                    false
+                },
+            );
             assert_eq!(finished, Some(Pass::Joint { kept: true }), "{guard:?}");
             assert_ne!(adopted.drawing(), greedy.drawing(), "{guard:?}");
             // Five iterations, the snap and the adoption.
@@ -1004,10 +1081,17 @@ mod tests {
             for cancel_at in 1..=polls {
                 let mut model = greedy.clone();
                 let mut count = 0;
-                let stopped = after_step(&mut model, during, 10, Alpha::Auto, || {
-                    count += 1;
-                    count >= cancel_at
-                });
+                let stopped = after_step(
+                    &mut model,
+                    during,
+                    joint::Tuning::default(),
+                    10,
+                    Alpha::Auto,
+                    || {
+                        count += 1;
+                        count >= cancel_at
+                    },
+                );
                 assert_eq!(stopped, None, "{guard:?}: cancelled at poll {cancel_at}");
                 assert_eq!(model.drawing(), greedy.drawing(), "{guard:?}");
                 assert_eq!(model.score_f64(), greedy.score_f64(), "{guard:?}");
@@ -1042,8 +1126,15 @@ mod tests {
                         // Passes after steps 1, 2 and 4.
                         let during = joint(1, 1, 6, guard);
                         passes.push(
-                            after_step(&mut model, during, step, Alpha::Auto, || false)
-                                .expect("not cancelled"),
+                            after_step(
+                                &mut model,
+                                during,
+                                joint::Tuning::default(),
+                                step,
+                                Alpha::Auto,
+                                || false,
+                            )
+                            .expect("not cancelled"),
                         );
                     }
                     (model.drawing(), passes)
@@ -1083,5 +1174,121 @@ mod tests {
             }
             assert_eq!(model.drawing().shapes.len(), 10, "{shape:?}");
         }
+    }
+
+    /// The joint optimisation's own result for `model` with `tuning`, at
+    /// its default iterations, as the final stage runs it.
+    fn tuned_joint_result(model: &Model, tuning: joint::Tuning) -> Drawing {
+        let mut settings = joint::Settings::default();
+        settings.iterations = Some(joint::default_iterations(model.drawing().shapes.len()));
+        settings.tuning = tuning;
+        joint::optimise(model, Alpha::Auto, settings, || false).expect("not cancelled")
+    }
+
+    /// Every kind's pipeline has the default tuning, and a pipeline's
+    /// tuning reaches both the final stage's joint optimisation and the
+    /// joint passes of the search.
+    #[test]
+    fn the_pipeline_carries_its_tuning_to_both_joint_stages() {
+        for shape in KINDS {
+            assert_eq!(
+                pipeline(shape).tuning,
+                joint::Tuning::default(),
+                "{shape:?}"
+            );
+        }
+        let tuning = joint::Tuning {
+            warmup: 10,
+            ..joint::Tuning::default()
+        };
+        let hard = hard_shapes_model(ShapeKind::Triangle, 2, 20);
+        let tuned = tuned_joint_result(&hard, tuning);
+        assert_ne!(tuned, joint_result(&hard, 1));
+        let expected = better_export(hard.target(), hard.drawing(), tuned.clone());
+        let mut tuned_stages = stages(Refits::Passes(0), Some(1));
+        tuned_stages.tuning = tuning;
+        let kept = final_stage(&mut hard.clone(), tuned_stages, Alpha::Auto, None, || false);
+        assert_eq!(kept, Some(expected));
+
+        let model = model(ShapeKind::Triangle, 10);
+        let during = joint(5, 1, 10, Guard::Canvas);
+        let mut settings = joint::Settings::default();
+        settings.iterations = Some(10);
+        settings.tuning = tuning;
+        let mut expected = model.clone();
+        let optimised =
+            joint::optimise(&expected, Alpha::Auto, settings, || false).expect("not cancelled");
+        let adopted = expected.adopt(&optimised, false) == Some(true);
+        let mut passed = model.clone();
+        let pass = after_step(&mut passed, during, tuning, 5, Alpha::Auto, || false);
+        assert_eq!(pass, Some(Pass::Joint { kept: adopted }));
+        assert_eq!(passed.drawing(), expected.drawing());
+        let mut untuned = model.clone();
+        after_step(
+            &mut untuned,
+            during,
+            joint::Tuning::default(),
+            5,
+            Alpha::Auto,
+            || false,
+        )
+        .expect("not cancelled");
+        assert!(adopted, "the tuned pass is not kept, so it shows nothing");
+        assert_ne!(passed.drawing(), untuned.drawing());
+    }
+
+    /// B's first steps on the guard's case: the ratio of the joint result's
+    /// PNG error to its input's, with the default tuning (a warm-up of 5
+    /// iterations) and, each alone on the previous steps (no warm-up), with
+    /// a warm-up of 10, a relative step of 1/8 and a first step of 0.25 px.
+    /// The default lowers the ratio below the previous steps', and so does
+    /// at least one of the three.
+    #[test]
+    fn a_gentler_start_lowers_the_export_error_on_small_shapes() {
+        let target = hard_shapes(24);
+        let model = hard_shapes_model(ShapeKind::Polygon, 2, 25);
+        let input = png_error(&model.drawing(), &target) as f64;
+        let ratio = |tuning| png_error(&tuned_joint_result(&model, tuning), &target) as f64 / input;
+        let default = ratio(joint::Tuning::default());
+        let previous = joint::Tuning {
+            warmup: 0,
+            ..joint::Tuning::default()
+        };
+        let baseline = ratio(previous);
+        let variants = [
+            (
+                "warmup 10",
+                joint::Tuning {
+                    warmup: 10,
+                    ..previous
+                },
+            ),
+            (
+                "step-rel 0.125",
+                joint::Tuning {
+                    relative_step: Some(0.125),
+                    ..previous
+                },
+            ),
+            (
+                "step 0.25",
+                joint::Tuning {
+                    step: 0.25,
+                    ..previous
+                },
+            ),
+        ]
+        .map(|(name, tuning)| (name, ratio(tuning)));
+        let report =
+            format!("default (warm-up 5) {default:.3}, warm-up 0 {baseline:.3}, {variants:.3?}");
+        assert!(
+            default < baseline,
+            "the default does not lower the ratio: {report}"
+        );
+        assert!(
+            variants.iter().any(|&(_, r)| r < baseline),
+            "no tuning lowers the ratio: {report}"
+        );
+        eprintln!("export error ratios: {report}");
     }
 }

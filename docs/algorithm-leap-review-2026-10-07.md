@@ -286,3 +286,24 @@ On the paintings polygons gain 0.5–2.2% from 200 shapes and `any` is within ±
 Verdict: the exact coverage stays. It is the correct model, costs nothing, gains a little at high counts, and the tests now hold the model to the exact pixel area within `1e-9` at every size instead of the product's 5% bounds.
 
 Reproduction: `target/abl/run_exact.sh` (the previous binary kept as `target/abl/engine-b1f82a4`), `analyse_exact.py`.
+
+## 12. Follow-up: B's first steps (2026-10-08)
+
+Section 11 traced the guard's remaining rejections to the start of the optimisation: Adam's first update is a full step of `LR_VERTEX`, 1 px, on every coordinate whatever the gradient (the bias correction makes the first update `±1`), which wrecks a small, well-placed shape before the decayed iterations recover. Three lab knobs on `joint::Settings` (`Tuning`: a warm-up of the step factor, `min(1, (t + 1) / (warmup + 1))` times the decay; the first vertex step in px; a step relative to each shape's size, `min(step, f · √area)`) and the runner flags `--joint-warmup`, `--joint-step`, `--joint-step-rel` measured them, with the defaults bit-identical to before. On the guard test's 24 × 24 polygon stack the ratio of B's export error to its input's falls from 3.61 (default) to 0.79 with a warm-up of 10, 0.40 with a first step of 0.25 px and 3.16 with a relative step of 1/8.
+
+On the corpus, against `exact5` (same code, default tuning), `--refine final`, five kinds. Columns: mean of the 100/200 medians over all images, mean over the two paintings at 100–500 shapes, time ratio:
+
+| kind | warm-up 5 | warm-up 10 | warm-up 20 | step 0.5 px | step 0.25 px | relative 1/8 | relative 1/16 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| any | −0.1 / −0.5% · 1.00× | −0.2 / −0.7% · 1.01× | −0.1 / −0.6% · 1.02× | 0.0 / −0.3% · 1.02× | +0.2 / −0.4% · 1.02× | 0.0 / −0.1% · 1.00× | +0.1 / −0.1% · 1.01× |
+| triangle | −0.2 / −0.7% · 0.98× | +1.2 / −0.4% · 1.01× | +0.9 / 0.0% · 1.04× | +1.3 / +0.7% · 1.01× | +1.7 / +1.5% · 1.03× | +0.1 / −0.4% · 1.00× | −0.2 / +0.6% · 1.01× |
+| rectangle | +0.2 / −0.4% · 1.00× | +0.3 / −0.4% · 1.04× | +0.5 / −0.3% · 1.02× | +0.6 / −0.2% · 1.01× | +0.8 / +0.2% · 1.02× | −0.1 / 0.0% · 1.00× | +0.1 / +0.1% · 1.01× |
+| rotated-rectangle | −1.2 / −3.0% · 1.00× | −1.0 / −2.5% · 1.06× | −1.4 / −2.7% · 1.05× | −0.5 / −1.7% · 1.01× | −0.1 / −1.4% · 1.02× | −0.3 / −0.5% · 1.02× | −0.3 / −0.7% · 1.01× |
+| polygon | −0.4 / −0.9% · 1.00× | −0.3 / −1.0% · 1.03× | −0.2 / −0.8% · 1.02× | −0.1 / −0.4% · 1.02× | +0.2 / +0.1% · 1.02× | −0.1 / −0.1% · 1.00× | 0.0 / −0.1% · 1.02× |
+
+A warm-up of five iterations is the one tuning that never loses: on the paintings it gains on every kind, most on rotated rectangles (−4.2% and −2.4% at 200 shapes, −4.8% and −4.6% at 500) and on triangles at 500 (−2.7% and −1.2%), at no cost in time, and it cuts the hard-edged image's error by 20–37% for triangles and rotated rectangles at 50–100 shapes. Longer warm-ups gain the same on the paintings but lose on triangles over the whole corpus; a smaller absolute first step loses on triangles, whose large shapes need the full step; a relative step is neutral. **Warm-up 5 is now the default of every joint optimisation**, final stage and passes during the search alike (the lab knobs stay for later experiments). The guard still rejects B's result for polygons on synthetic-shapes at 100–500 shapes (and for rectangles at 500); with warm-up 20 only at 100 and 500. What remains there is the snap to the quarter-pixel lattice on finely fitted small shapes, which a smaller first step cannot undo.
+
+**Polygons with B during the search, re-measured with the warm-up** (`bdur4-wu5` against the refit schedule with the same warm-up): the paintings are within −1.4% to +1.9% and synthetic-shapes still loses 11–34% at 0.86–0.93× the time; rotated rectangles lose 1–3% on the paintings at 1.07–1.20×. Both kinds stay on the refit passes. Against B during the search without the warm-up, polygons gain 7–10% on synthetic-shapes and 1–3% on American Gothic at 200–500, so the warm-up helps the in-search passes too; it is not enough on hard edges.
+
+Reproduction: `target/abl/run_steps.sh` and `analyse_steps.py`, then
+`engine --shapes any,rectangle,rotated-rectangle,polygon --refine final --during joint:20:5:20 --joint-warmup 5`.

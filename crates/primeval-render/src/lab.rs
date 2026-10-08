@@ -40,7 +40,7 @@ pub fn working_image(input: &[u8], render: &RenderOptions) -> Result<RgbImage, A
 /// [`crate::approximate`] runs for a shape kind ([`pipeline`]), or a
 /// variant to measure. The same as the crate's own pipeline type, which is
 /// not public.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Pipeline {
     /// Refit passes of the model during the search.
     pub during: During,
@@ -50,6 +50,9 @@ pub struct Pipeline {
     /// its default iteration count ([`joint::default_iterations`]), or
     /// `None` for none.
     pub joint: Option<u32>,
+    /// The step sizes of every joint optimisation, in the search and in
+    /// the final stage.
+    pub tuning: joint::Tuning,
 }
 
 /// When the search runs a refit pass of the model itself, after a step.
@@ -173,6 +176,7 @@ impl From<crate::pipeline::Pipeline> for Pipeline {
                 R::Until { min_gain, cap } => Refits::Until { min_gain, cap },
             },
             joint: pipeline.joint,
+            tuning: pipeline.tuning,
         }
     }
 }
@@ -205,6 +209,7 @@ impl From<Pipeline> for crate::pipeline::Pipeline {
                 Refits::Until { min_gain, cap } => R::Until { min_gain, cap },
             },
             joint: pipeline.joint,
+            tuning: pipeline.tuning,
         }
     }
 }
@@ -219,8 +224,11 @@ pub fn pipeline(shape: ShapeKind) -> Pipeline {
 /// `model`, if any, exactly as [`crate::approximate`] runs it, and returns
 /// what ran.
 pub fn after_step(model: &mut Model, pipeline: Pipeline, step: u32, alpha: Alpha) -> Pass {
-    let during = crate::pipeline::Pipeline::from(pipeline).during;
-    let pass = crate::pipeline::after_step(model, during, step, alpha, || false)
+    let pipeline = crate::pipeline::Pipeline::from(pipeline);
+    let pass =
+        crate::pipeline::after_step(model, pipeline.during, pipeline.tuning, step, alpha, || {
+            false
+        })
         .expect("a pass that is never cancelled finishes");
     match pass {
         crate::pipeline::Pass::Skipped => Pass::Skipped,

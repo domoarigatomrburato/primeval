@@ -1274,6 +1274,7 @@ mod tests {
     fn snapped(model: &Model) -> Drawing {
         let settings = crate::joint::Settings {
             iterations: Some(0),
+            ..crate::joint::Settings::default()
         };
         crate::joint::optimise(model, Alpha::Auto, settings, || false).expect("not cancelled")
     }

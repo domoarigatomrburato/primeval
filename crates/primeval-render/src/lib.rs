@@ -518,9 +518,14 @@ pub fn approximate(
 
         // A refit pass the pipeline schedules after this step revises the
         // shapes already reported; it stops once cancelled.
-        pipeline::after_step(&mut model, pipeline.during, step + 1, render.alpha, || {
-            execution.is_cancelled()
-        })
+        pipeline::after_step(
+            &mut model,
+            pipeline.during,
+            pipeline.tuning,
+            step + 1,
+            render.alpha,
+            || execution.is_cancelled(),
+        )
         .ok_or(ApproximateError::Aborted)?;
     }
 

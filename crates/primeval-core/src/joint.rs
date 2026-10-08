@@ -8,7 +8,10 @@
 //! every rotated rectangle, and every opacity under [`Alpha::Auto`], at
 //! once: Adam on the gradient of the squared error between the composite
 //! and the target, through a smooth model of the export's anti-aliased
-//! rendering, with every colour refitted at each iteration. Its result is
+//! rendering, with every colour refitted at each iteration. The step sizes
+//! ramp up over the first iterations ([`Tuning::warmup`]), so that Adam's
+//! first updates, a full step on every coordinate whatever the gradient,
+//! do not wreck small, well-placed shapes. Its result is
 //! snapped to a quarter pixel (half a pixel for axis-aligned rectangles)
 //! and keeps the engine's rules: every angle of a triangle above 15°, every
 //! polygon strictly convex with every angle above 15°, and every rectangle
@@ -102,7 +105,7 @@ const TAN_PROJECTION: f64 = 0.277_324_544_059_838_4;
 ///
 /// Construct with [`Settings::default`] and set the fields you need.
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Settings {
     /// Adam iterations. Each costs a colour fit (about two renders of the
     /// drawing) and a gradient (a render, its replay and the reverse pass).
@@ -115,6 +118,58 @@ pub struct Settings {
     /// triangles; quality keeps improving up to 150 iterations, so the time
     /// budget decides.
     pub iterations: Option<u32>,
+    /// The step sizes of the Adam iterations. The default,
+    /// [`Tuning::default`], is the engine's: a warm-up of 5 iterations, a
+    /// first vertex step of 1 px and no step relative to the shapes' sizes.
+    pub tuning: Tuning,
+}
+
+/// The step sizes of [`optimise`]'s Adam iterations ([`Settings::tuning`]).
+///
+/// The default gives the engine's steps: a warm-up of 5 iterations, a
+/// first vertex step of 1 px, and no step relative to the shapes' sizes.
+///
+/// Adam's first update is a full step of [`Tuning::step`] on every
+/// coordinate whatever the gradient's size, which wrecks small, well-placed
+/// shapes before the later, decayed iterations partly recover them; the
+/// warm-up keeps them. Against no warm-up, a warm-up of 5 changes the mean
+/// of the 100- and 200-shape medians over all images, and the mean over the
+/// two paintings at 100 to 500 shapes, by −0.1% / −0.5% for any shape,
+/// −0.2% / −0.7% for triangles, +0.2% / −0.4% for rectangles, −1.2% /
+/// −3.0% for rotated rectangles and −0.4% / −0.9% for polygons, in the
+/// same time (0.98× to 1.00×). Warm-ups of 10 and 20 gain as much on the
+/// paintings but lose on triangles (+1.2% and +0.9% over all images); a
+/// smaller absolute step (0.5 or 0.25 px) loses on triangles; a step
+/// relative to the shape's size is neutral.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tuning {
+    /// Iterations over which the step sizes ramp up: at iteration `t`
+    /// (from 0) every step, the opacities' included, is scaled by
+    /// `min(1, (t + 1) / (warmup + 1))` on top of its decay. The default
+    /// is 5: the steps ramp from 1/6 of their size at the first iteration
+    /// to their full size at the sixth (see [`Tuning`] for why and the
+    /// measurements). 0 scales by the decay alone, the engine's previous
+    /// steps.
+    pub warmup: u32,
+    /// The vertices' step size at the first iteration, in pixels, positive.
+    /// The default is 1 px.
+    pub step: f64,
+    /// With `Some(f)`, `f` positive, each triangle's, polygon's or
+    /// rectangle's vertex step is at most `f` times its size, the square
+    /// root of its area at the start of the run: `min(step, f · size)`.
+    /// The opacities' step is not scaled. The default, `None`, gives every
+    /// shape [`Tuning::step`].
+    pub relative_step: Option<f64>,
+}
+
+impl Default for Tuning {
+    fn default() -> Self {
+        Self {
+            warmup: 5,
+            step: LR_VERTEX,
+            relative_step: None,
+        }
+    }
 }
 
 /// Optimises the shapes `model` has committed jointly against its target,
@@ -345,6 +400,7 @@ fn optimise_shapes(
         iterations,
         auto_alpha,
         TAN_PROJECTION,
+        settings.tuning,
         &mut cancelled,
     )?;
     if cancelled() {
@@ -422,6 +478,45 @@ fn decay(t: usize, iterations: usize) -> f64 {
     1.0 - p * p * (3.0 - 2.0 * p)
 }
 
+/// The step-size factor at iteration `t` of `iterations` with a warm-up
+/// of `warmup` iterations ([`Tuning::warmup`]): `min(1, (t + 1) /
+/// (warmup + 1))` times [`decay`]. With no warm-up the ramp is exactly 1,
+/// so the factor is the decay bit for bit.
+fn step_factor(t: usize, iterations: usize, warmup: u32) -> f64 {
+    let ramp = ((t + 1) as f64 / (f64::from(warmup) + 1.0)).min(1.0);
+    ramp * decay(t, iterations)
+}
+
+/// The vertex step size of `layer` under `tuning`, in pixels, or `None`
+/// for a fixed layer, which has no vertices to move: [`Tuning::step`],
+/// capped with [`Tuning::relative_step`] `Some(f)` at `f` times the square
+/// root of the layer's area. The area is a triangle's or a
+/// quadrilateral's by the shoelace formula, a rotated rectangle's
+/// `4 |u| h`, an axis-aligned rectangle's `(x1 − x0)(y1 − y0)`, with
+/// `+ − × ÷`, `abs` and `sqrt` alone.
+fn vertex_step(layer: &Layer, tuning: Tuning) -> Option<f64> {
+    let p = &layer.params;
+    let area = match layer.outline {
+        Outline::Fixed(_) => return None,
+        Outline::Triangle | Outline::Quad => {
+            let n = layer.outline.sides();
+            let twice: f64 = (0..n)
+                .map(|i| {
+                    let j = (i + 1) % n;
+                    p[2 * i] * p[2 * j + 1] - p[2 * j] * p[2 * i + 1]
+                })
+                .sum();
+            twice.abs() / 2.0
+        }
+        Outline::Rotated => 4.0 * (p[2] * p[2] + p[3] * p[3]).sqrt() * p[4].abs(),
+        Outline::Rect => ((p[2] - p[0]) * (p[3] - p[1])).abs(),
+    };
+    Some(match tuning.relative_step {
+        Some(fraction) => tuning.step.min(fraction * area.sqrt()),
+        None => tuning.step,
+    })
+}
+
 /// Projects `layer` onto its rule, with angles of at least `atan tan_tau`:
 /// a triangle by [`angle::project`], a polygon by [`convex::project`], a
 /// rectangle by [`rect::project_box`] and a rotated one by
@@ -466,17 +561,30 @@ fn project(layer: &mut Layer, tan_tau: f64) -> Option<[f64; COORDS]> {
 /// out of the set, and its second moments rise to keep every step within
 /// the step size ([`redirect_momentum`]): the momentum keeps sliding along
 /// the boundary but stops pressing into it.
+///
+/// `tuning` sets the step sizes: each layer's vertex step
+/// ([`vertex_step`]), computed once after the first projection, and the
+/// warm-up of every step ([`step_factor`]). A tuning with `warmup: 0` and
+/// the default step reproduces the engine's previous steps (before the
+/// default warm-up of 5) bit for bit: its factor is exactly `1.0` times
+/// the decay and its vertex step exactly [`LR_VERTEX`], so no rounding
+/// changes.
 fn run<F: Real>(
     scene: &Scene<F>,
     layers: &mut [Layer],
     iterations: usize,
     auto_alpha: bool,
     tan_tau: f64,
+    tuning: Tuning,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Option<()> {
     for layer in layers.iter_mut() {
         project(layer, tan_tau);
     }
+    let steps: Vec<f64> = layers
+        .iter()
+        .map(|layer| vertex_step(layer, tuning).unwrap_or(0.0))
+        .collect();
     let mut work = Workspace::default();
     let mut first = vec![[0.0; PARAMS]; layers.len()];
     let mut second = vec![[0.0; PARAMS]; layers.len()];
@@ -489,7 +597,7 @@ fn run<F: Real>(
         }
         diff::fit(scene, layers, &mut work);
         let gradients = diff::gradients(scene, layers, &mut work);
-        let decay = decay(t, iterations);
+        let factor = step_factor(t, iterations, tuning.warmup);
         power1 *= BETA1;
         power2 *= BETA2;
         let (correction1, correction2) = (1.0 - power1, 1.0 - power2);
@@ -504,9 +612,9 @@ fn run<F: Real>(
                 let update = adam_update(*m, *v, (correction1, correction2));
                 let (value, rate, (low, high)) = match k {
                     ALPHA => (&mut layer.alpha, LR_ALPHA, (1.0, 255.0)),
-                    k => (&mut layer.params[k], LR_VERTEX, bounds(layer.outline, k)),
+                    k => (&mut layer.params[k], steps[index], bounds(layer.outline, k)),
                 };
-                *value = (*value - rate * decay * update).clamp(low, high);
+                *value = (*value - rate * factor * update).clamp(low, high);
             }
             if let Some(displacement) = project(layer, tan_tau) {
                 redirect_momentum(
@@ -712,6 +820,7 @@ mod tests {
     fn settings(iterations: u32) -> Settings {
         Settings {
             iterations: Some(iterations),
+            ..Settings::default()
         }
     }
 
@@ -806,7 +915,16 @@ mod tests {
         }
         let background = Color::new(40, 120, 200, 255);
         let mut tris = start.clone();
-        run(&scene, &mut tris, 40, true, TAN_PROJECTION, &mut || false).expect("not cancelled");
+        run(
+            &scene,
+            &mut tris,
+            40,
+            true,
+            TAN_PROJECTION,
+            Tuning::default(),
+            &mut || false,
+        )
+        .expect("not cancelled");
         for v in vertices(&export(&scene, &tris, &[], background)) {
             assert!(acos_valid(&v), "{v:?}");
         }
@@ -1042,7 +1160,16 @@ mod tests {
             })
             .collect();
         assert!(layers.len() >= 10, "{}", layers.len());
-        run(&scene, &mut layers, 20, true, TAN_PROJECTION, &mut || false).expect("not cancelled");
+        run(
+            &scene,
+            &mut layers,
+            20,
+            true,
+            TAN_PROJECTION,
+            Tuning::default(),
+            &mut || false,
+        )
+        .expect("not cancelled");
         for v in quads(&export(&scene, &layers, &[], Color::new(0, 0, 0, 255))) {
             assert!(convex::tests::acos_valid(&v), "{v:?}");
         }
@@ -1120,7 +1247,16 @@ mod tests {
                 _ => {}
             }
         }
-        run(&scene, &mut layers, 20, true, TAN_PROJECTION, &mut || false).expect("not cancelled");
+        run(
+            &scene,
+            &mut layers,
+            20,
+            true,
+            TAN_PROJECTION,
+            Tuning::default(),
+            &mut || false,
+        )
+        .expect("not cancelled");
         let drawing = export(&scene, &layers, &[], Color::new(0, 0, 0, 255));
         let exported = rects(&drawing);
         assert_eq!(exported.len(), 30);
@@ -1359,5 +1495,116 @@ mod tests {
             .sum();
         let expected = (squares / (3.0 * 600.0)).sqrt() / 255.0;
         assert!((score(&model, &model.drawing()) - expected).abs() < 1e-12);
+    }
+
+    /// The warm-up scales the step from `1 / (warmup + 1)` at the first
+    /// iteration to 1 at iteration `warmup`, on top of the decay; the
+    /// default ramps over 5 iterations, and with no warm-up the factor is
+    /// the decay itself, bit for bit.
+    #[test]
+    fn the_warm_up_ramps_the_step_factor() {
+        assert_eq!(Tuning::default().warmup, 5);
+        let iterations = 80;
+        for t in 0..iterations {
+            assert_eq!(
+                step_factor(t, iterations, 0).to_bits(),
+                decay(t, iterations).to_bits(),
+                "t = {t}"
+            );
+        }
+        for t in 0..=5 {
+            let expected = (t + 1) as f64 / 6.0 * decay(t, iterations);
+            assert!(
+                (step_factor(t, iterations, 5) - expected).abs() < 1e-15,
+                "t = {t}"
+            );
+        }
+        for t in 5..iterations {
+            assert_eq!(step_factor(t, iterations, 5), decay(t, iterations));
+        }
+    }
+
+    /// A relative step caps each movable layer's vertex step at a fraction
+    /// of the square root of its area; fixed layers have no vertex step.
+    #[test]
+    fn the_relative_step_follows_each_layers_area() {
+        let layer = |outline, params: &[f64]| {
+            let mut p = [0.0; COORDS];
+            p[..params.len()].copy_from_slice(params);
+            Layer {
+                outline,
+                params: p,
+                alpha: 128.0,
+                color: [0.0; 3],
+            }
+        };
+        let relative = |f| Tuning {
+            relative_step: Some(f),
+            ..Tuning::default()
+        };
+        // Area 16 px², size 4 px.
+        let triangle = layer(Outline::Triangle, &[0.0, 0.0, 8.0, 0.0, 0.0, 4.0]);
+        assert_eq!(vertex_step(&triangle, Tuning::default()), Some(1.0));
+        assert_eq!(vertex_step(&triangle, relative(0.125)), Some(0.5));
+        assert_eq!(vertex_step(&triangle, relative(1.0)), Some(1.0));
+        let small = Tuning {
+            step: 0.25,
+            ..relative(1.0)
+        };
+        assert_eq!(vertex_step(&triangle, small), Some(0.25));
+        // A 4 × 4 square, area 16.
+        let quad = layer(Outline::Quad, &[1.0, 1.0, 5.0, 1.0, 5.0, 5.0, 1.0, 5.0]);
+        assert_eq!(vertex_step(&quad, relative(0.125)), Some(0.5));
+        // Area 4 |u| h = 4 · 2 · 2 = 16.
+        let rotated = layer(Outline::Rotated, &[10.0, 10.0, 0.0, 2.0, 2.0]);
+        assert_eq!(vertex_step(&rotated, relative(0.125)), Some(0.5));
+        // Area 4 · 9 = 36, size 6.
+        let rect = layer(Outline::Rect, &[2.0, 3.0, 6.0, 12.0]);
+        assert_eq!(vertex_step(&rect, relative(0.0625)), Some(0.375));
+        assert_eq!(vertex_step(&rect, Tuning::default()), Some(1.0));
+        let fixed = layer(Outline::Fixed(0), &[]);
+        assert_eq!(vertex_step(&fixed, relative(0.125)), None);
+        assert_eq!(vertex_step(&fixed, Tuning::default()), None);
+    }
+
+    /// The default tuning, implicit or explicit (a warm-up of 5), gives
+    /// the same drawing bit for bit; no warm-up, which reproduces the
+    /// engine's previous steps, a longer warm-up or a relative step changes
+    /// it on small shapes, here the late triangles of 60 on a 48 × 40
+    /// target.
+    #[test]
+    fn a_non_default_tuning_changes_the_result() {
+        let target = target(48, 40);
+        let model = greedy(&target, 60, Alpha::Auto);
+        let run = |tuning| {
+            let settings = Settings {
+                tuning,
+                ..settings(20)
+            };
+            optimise(&model, Alpha::Auto, settings, || false).expect("not cancelled")
+        };
+        let implicit =
+            optimise(&model, Alpha::Auto, settings(20), || false).expect("not cancelled");
+        let explicit = run(Tuning {
+            warmup: 5,
+            step: 1.0,
+            relative_step: None,
+        });
+        assert_eq!(implicit, explicit);
+        let previous = run(Tuning {
+            warmup: 0,
+            ..Tuning::default()
+        });
+        assert_ne!(previous, implicit);
+        let longer = run(Tuning {
+            warmup: 10,
+            ..Tuning::default()
+        });
+        assert_ne!(longer, implicit);
+        let relative = run(Tuning {
+            relative_step: Some(0.125),
+            ..Tuning::default()
+        });
+        assert_ne!(relative, implicit);
     }
 }

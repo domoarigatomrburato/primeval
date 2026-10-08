@@ -50,6 +50,14 @@
 //!                       optimisation's iterations as M times its default,
 //!                       0 for none (default: `approximate`'s, or 1 with
 //!                       `joint:R`)
+//!   --joint-warmup W    every joint optimisation's steps ramp up over W
+//!                       iterations (`joint::Tuning::warmup`, default 5;
+//!                       0 gives the steps before that default)
+//!   --joint-step X      every joint optimisation's first vertex step, in
+//!                       px, positive (`joint::Tuning::step`, default 1)
+//!   --joint-step-rel F  every joint optimisation's vertex step capped at F
+//!                       times the root of each shape's area, F positive
+//!                       (`joint::Tuning::relative_step`, default none)
 //!   --effort R:C:A      the greedy search's rounds per step, and the
 //!                       multiples of each round's random candidates and
 //!                       climb age (default: the model's for the kind, 16
@@ -194,7 +202,7 @@ mod common;
 
 use common::{ALL_SHAPES, BoxError, SEED, rgb_rmse};
 use image::{ImageFormat, RgbImage, imageops};
-use primeval_core::{Drawing, Geometry, Model, ModelOptions};
+use primeval_core::{Drawing, Geometry, Model, ModelOptions, joint};
 use primeval_render::lab::{Chosen, During, Guard, Pass, Pipeline, Refits};
 use primeval_render::{OutputFormat, RenderOptions, ShapeKind, lab};
 use std::path::PathBuf;
@@ -218,6 +226,9 @@ struct Config {
     during: Option<During>,
     final_refits: Option<Refits>,
     joint_scale: Option<u32>,
+    /// `--joint-warmup`, `--joint-step` and `--joint-step-rel`: the step
+    /// sizes of every joint optimisation, applied to the default tuning.
+    tuning: joint::Tuning,
     /// `--effort`: rounds, candidate and age multiples.
     effort: Option<(u64, usize, usize)>,
     /// `--refine-effort`: climbs per layer and climb age of every refit
@@ -249,6 +260,7 @@ impl Config {
         if let Some(scale) = self.joint_scale {
             pipeline.joint = (scale > 0).then_some(scale);
         }
+        pipeline.tuning = self.tuning;
         pipeline
     }
 }
@@ -334,6 +346,14 @@ fn parse_refine_effort(value: &str) -> Result<(u64, usize), BoxError> {
     Ok(effort)
 }
 
+/// A positive, finite value of `flag`.
+fn parse_positive(flag: &str, value: &str) -> Result<f64, BoxError> {
+    match value.parse::<f64>() {
+        Ok(number) if number.is_finite() && number > 0.0 => Ok(number),
+        _ => Err(format!("{flag}: expected a positive number, got {value}").into()),
+    }
+}
+
 fn describe_pipeline(pipeline: Pipeline) -> String {
     let during = match pipeline.during {
         During::Never => "none".to_owned(),
@@ -359,7 +379,18 @@ fn describe_pipeline(pipeline: Pipeline) -> String {
     let joint = pipeline
         .joint
         .map_or_else(|| "none".to_owned(), |scale| format!("x{scale}"));
-    format!("during {during}, final refits {refits}, joint {joint}")
+    let default = joint::Tuning::default();
+    let mut tuning = String::new();
+    if pipeline.tuning.warmup != default.warmup {
+        tuning += &format!(", warmup {}", pipeline.tuning.warmup);
+    }
+    if pipeline.tuning.step != default.step {
+        tuning += &format!(", step {}", pipeline.tuning.step);
+    }
+    if let Some(fraction) = pipeline.tuning.relative_step {
+        tuning += &format!(", step-rel {fraction}");
+    }
+    format!("during {during}, final refits {refits}, joint {joint}{tuning}")
 }
 
 /// When the search runs refit passes; see the doc comment.
@@ -548,6 +579,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
     let mut joint_scale = None;
     let mut effort = None;
     let mut refine_effort = None;
+    let mut tuning = joint::Tuning::default();
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{arg} needs a value"));
         match arg.as_str() {
@@ -575,6 +607,11 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
             "--during" => during = Some(parse_during(&value()?)?),
             "--final-refits" => final_refits = Some(parse_refits(&value()?)?),
             "--joint-scale" => joint_scale = Some(value()?.parse()?),
+            "--joint-warmup" => tuning.warmup = value()?.parse()?,
+            "--joint-step" => tuning.step = parse_positive(&arg, &value()?)?,
+            "--joint-step-rel" => {
+                tuning.relative_step = Some(parse_positive(&arg, &value()?)?);
+            }
             "--effort" => effort = Some(parse_effort(&value()?)?),
             "--refine-effort" => refine_effort = Some(parse_refine_effort(&value()?)?),
             other => return Err(format!("unknown argument {other}; see the doc comment").into()),
@@ -623,6 +660,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
         during,
         final_refits,
         joint_scale,
+        tuning,
         effort,
         refine_effort,
     })
