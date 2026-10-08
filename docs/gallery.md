@@ -43,7 +43,7 @@ The originals are in the public domain: [Sources and credits](readme/originals/S
         <img src="images/thumbs/americangothic/any-1000.jpg" alt="American Gothic approximated with mixed after 1000 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 104.1 KB</sub>
+      <sub>SVG 104.0 KB</sub>
     </td>
   </tr>
   <tr>
@@ -60,14 +60,14 @@ The originals are in the public domain: [Sources and credits](readme/originals/S
         <img src="images/thumbs/americangothic/triangle-200.jpg" alt="American Gothic approximated with triangle after 200 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 16.8 KB</sub>
+      <sub>SVG 16.7 KB</sub>
     </td>
     <td align="center">
       <a href="images/progression/americangothic/triangle-1000.svg">
         <img src="images/thumbs/americangothic/triangle-1000.jpg" alt="American Gothic approximated with triangle after 1000 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 84.9 KB</sub>
+      <sub>SVG 84.8 KB</sub>
     </td>
   </tr>
   <tr>
@@ -156,14 +156,14 @@ The originals are in the public domain: [Sources and credits](readme/originals/S
         <img src="images/thumbs/americangothic/rotated-rectangle-200.jpg" alt="American Gothic approximated with rotated rectangle after 200 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 21.5 KB</sub>
+      <sub>SVG 21.4 KB</sub>
     </td>
     <td align="center">
       <a href="images/progression/americangothic/rotated-rectangle-1000.svg">
         <img src="images/thumbs/americangothic/rotated-rectangle-1000.jpg" alt="American Gothic approximated with rotated rectangle after 1000 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 108.4 KB</sub>
+      <sub>SVG 107.9 KB</sub>
     </td>
   </tr>
   <tr>
@@ -221,7 +221,7 @@ The originals are in the public domain: [Sources and credits](readme/originals/S
         <img src="images/thumbs/americangothic/polygon-50.jpg" alt="American Gothic approximated with polygon after 50 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 4.9 KB</sub>
+      <sub>SVG 4.8 KB</sub>
     </td>
     <td align="center">
       <a href="images/progression/americangothic/polygon-200.svg">
@@ -268,14 +268,14 @@ The originals are in the public domain: [Sources and credits](readme/originals/S
         <img src="images/thumbs/downy-woodpecker/any-200.jpg" alt="Downy Woodpecker approximated with mixed after 200 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 21.7 KB</sub>
+      <sub>SVG 21.5 KB</sub>
     </td>
     <td align="center">
       <a href="images/progression/downy-woodpecker/any-1000.svg">
         <img src="images/thumbs/downy-woodpecker/any-1000.jpg" alt="Downy Woodpecker approximated with mixed after 1000 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 106.4 KB</sub>
+      <sub>SVG 106.7 KB</sub>
     </td>
   </tr>
   <tr>
@@ -292,14 +292,14 @@ The originals are in the public domain: [Sources and credits](readme/originals/S
         <img src="images/thumbs/downy-woodpecker/triangle-200.jpg" alt="Downy Woodpecker approximated with triangle after 200 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 16.9 KB</sub>
+      <sub>SVG 17.3 KB</sub>
     </td>
     <td align="center">
       <a href="images/progression/downy-woodpecker/triangle-1000.svg">
         <img src="images/thumbs/downy-woodpecker/triangle-1000.jpg" alt="Downy Woodpecker approximated with triangle after 1000 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 86.6 KB</sub>
+      <sub>SVG 86.1 KB</sub>
     </td>
   </tr>
   <tr>
@@ -381,21 +381,21 @@ The originals are in the public domain: [Sources and credits](readme/originals/S
         <img src="images/thumbs/downy-woodpecker/rotated-rectangle-50.jpg" alt="Downy Woodpecker approximated with rotated rectangle after 50 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 5.7 KB</sub>
+      <sub>SVG 5.6 KB</sub>
     </td>
     <td align="center">
       <a href="images/progression/downy-woodpecker/rotated-rectangle-200.svg">
         <img src="images/thumbs/downy-woodpecker/rotated-rectangle-200.jpg" alt="Downy Woodpecker approximated with rotated rectangle after 200 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 22.2 KB</sub>
+      <sub>SVG 22.4 KB</sub>
     </td>
     <td align="center">
       <a href="images/progression/downy-woodpecker/rotated-rectangle-1000.svg">
         <img src="images/thumbs/downy-woodpecker/rotated-rectangle-1000.jpg" alt="Downy Woodpecker approximated with rotated rectangle after 1000 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 111.3 KB</sub>
+      <sub>SVG 111.0 KB</sub>
     </td>
   </tr>
   <tr>
@@ -460,7 +460,7 @@ The originals are in the public domain: [Sources and credits](readme/originals/S
         <img src="images/thumbs/downy-woodpecker/polygon-200.jpg" alt="Downy Woodpecker approximated with polygon after 200 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 19.4 KB</sub>
+      <sub>SVG 19.6 KB</sub>
     </td>
     <td align="center">
       <a href="images/progression/downy-woodpecker/polygon-1000.svg">
@@ -500,14 +500,14 @@ The originals are in the public domain: [Sources and credits](readme/originals/S
         <img src="images/thumbs/grand-prismatic-spring/any-200.jpg" alt="Grand Prismatic Spring approximated with mixed after 200 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 20.2 KB</sub>
+      <sub>SVG 20.3 KB</sub>
     </td>
     <td align="center">
       <a href="images/progression/grand-prismatic-spring/any-1000.svg">
         <img src="images/thumbs/grand-prismatic-spring/any-1000.jpg" alt="Grand Prismatic Spring approximated with mixed after 1000 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 109.1 KB</sub>
+      <sub>SVG 108.9 KB</sub>
     </td>
   </tr>
   <tr>
@@ -524,14 +524,14 @@ The originals are in the public domain: [Sources and credits](readme/originals/S
         <img src="images/thumbs/grand-prismatic-spring/triangle-200.jpg" alt="Grand Prismatic Spring approximated with triangle after 200 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 16.8 KB</sub>
+      <sub>SVG 17.0 KB</sub>
     </td>
     <td align="center">
       <a href="images/progression/grand-prismatic-spring/triangle-1000.svg">
         <img src="images/thumbs/grand-prismatic-spring/triangle-1000.jpg" alt="Grand Prismatic Spring approximated with triangle after 1000 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 84.7 KB</sub>
+      <sub>SVG 84.6 KB</sub>
     </td>
   </tr>
   <tr>
@@ -613,21 +613,21 @@ The originals are in the public domain: [Sources and credits](readme/originals/S
         <img src="images/thumbs/grand-prismatic-spring/rotated-rectangle-50.jpg" alt="Grand Prismatic Spring approximated with rotated rectangle after 50 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 5.6 KB</sub>
+      <sub>SVG 5.5 KB</sub>
     </td>
     <td align="center">
       <a href="images/progression/grand-prismatic-spring/rotated-rectangle-200.svg">
         <img src="images/thumbs/grand-prismatic-spring/rotated-rectangle-200.jpg" alt="Grand Prismatic Spring approximated with rotated rectangle after 200 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 22.0 KB</sub>
+      <sub>SVG 21.9 KB</sub>
     </td>
     <td align="center">
       <a href="images/progression/grand-prismatic-spring/rotated-rectangle-1000.svg">
         <img src="images/thumbs/grand-prismatic-spring/rotated-rectangle-1000.jpg" alt="Grand Prismatic Spring approximated with rotated rectangle after 1000 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 108.9 KB</sub>
+      <sub>SVG 109.0 KB</sub>
     </td>
   </tr>
   <tr>
@@ -685,7 +685,7 @@ The originals are in the public domain: [Sources and credits](readme/originals/S
         <img src="images/thumbs/grand-prismatic-spring/polygon-50.jpg" alt="Grand Prismatic Spring approximated with polygon after 50 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 5.0 KB</sub>
+      <sub>SVG 4.9 KB</sub>
     </td>
     <td align="center">
       <a href="images/progression/grand-prismatic-spring/polygon-200.svg">
@@ -699,7 +699,7 @@ The originals are in the public domain: [Sources and credits](readme/originals/S
         <img src="images/thumbs/grand-prismatic-spring/polygon-1000.jpg" alt="Grand Prismatic Spring approximated with polygon after 1000 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 95.6 KB</sub>
+      <sub>SVG 95.7 KB</sub>
     </td>
   </tr>
 </table>
@@ -732,14 +732,14 @@ The originals are in the public domain: [Sources and credits](readme/originals/S
         <img src="images/thumbs/mae-jemison/any-200.jpg" alt="Mae Jemison approximated with mixed after 200 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 20.7 KB</sub>
+      <sub>SVG 20.6 KB</sub>
     </td>
     <td align="center">
       <a href="images/progression/mae-jemison/any-1000.svg">
         <img src="images/thumbs/mae-jemison/any-1000.jpg" alt="Mae Jemison approximated with mixed after 1000 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 108.2 KB</sub>
+      <sub>SVG 108.1 KB</sub>
     </td>
   </tr>
   <tr>
@@ -749,21 +749,21 @@ The originals are in the public domain: [Sources and credits](readme/originals/S
         <img src="images/thumbs/mae-jemison/triangle-50.jpg" alt="Mae Jemison approximated with triangle after 50 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 4.3 KB</sub>
+      <sub>SVG 4.2 KB</sub>
     </td>
     <td align="center">
       <a href="images/progression/mae-jemison/triangle-200.svg">
         <img src="images/thumbs/mae-jemison/triangle-200.jpg" alt="Mae Jemison approximated with triangle after 200 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 17.0 KB</sub>
+      <sub>SVG 16.8 KB</sub>
     </td>
     <td align="center">
       <a href="images/progression/mae-jemison/triangle-1000.svg">
         <img src="images/thumbs/mae-jemison/triangle-1000.jpg" alt="Mae Jemison approximated with triangle after 1000 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 85.3 KB</sub>
+      <sub>SVG 85.4 KB</sub>
     </td>
   </tr>
   <tr>
@@ -852,14 +852,14 @@ The originals are in the public domain: [Sources and credits](readme/originals/S
         <img src="images/thumbs/mae-jemison/rotated-rectangle-200.jpg" alt="Mae Jemison approximated with rotated rectangle after 200 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 22.2 KB</sub>
+      <sub>SVG 22.1 KB</sub>
     </td>
     <td align="center">
       <a href="images/progression/mae-jemison/rotated-rectangle-1000.svg">
         <img src="images/thumbs/mae-jemison/rotated-rectangle-1000.jpg" alt="Mae Jemison approximated with rotated rectangle after 1000 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 110.3 KB</sub>
+      <sub>SVG 109.9 KB</sub>
     </td>
   </tr>
   <tr>
@@ -924,14 +924,14 @@ The originals are in the public domain: [Sources and credits](readme/originals/S
         <img src="images/thumbs/mae-jemison/polygon-200.jpg" alt="Mae Jemison approximated with polygon after 200 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 19.6 KB</sub>
+      <sub>SVG 19.5 KB</sub>
     </td>
     <td align="center">
       <a href="images/progression/mae-jemison/polygon-1000.svg">
         <img src="images/thumbs/mae-jemison/polygon-1000.jpg" alt="Mae Jemison approximated with polygon after 1000 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 97.0 KB</sub>
+      <sub>SVG 97.1 KB</sub>
     </td>
   </tr>
 </table>
@@ -981,14 +981,14 @@ The originals are in the public domain: [Sources and credits](readme/originals/S
         <img src="images/thumbs/monalisa/triangle-50.jpg" alt="Mona Lisa approximated with triangle after 50 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 4.4 KB</sub>
+      <sub>SVG 4.3 KB</sub>
     </td>
     <td align="center">
       <a href="images/progression/monalisa/triangle-200.svg">
         <img src="images/thumbs/monalisa/triangle-200.jpg" alt="Mona Lisa approximated with triangle after 200 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 17.2 KB</sub>
+      <sub>SVG 17.1 KB</sub>
     </td>
     <td align="center">
       <a href="images/progression/monalisa/triangle-1000.svg">
@@ -1091,7 +1091,7 @@ The originals are in the public domain: [Sources and credits](readme/originals/S
         <img src="images/thumbs/monalisa/rotated-rectangle-1000.jpg" alt="Mona Lisa approximated with rotated rectangle after 1000 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 109.3 KB</sub>
+      <sub>SVG 109.6 KB</sub>
     </td>
   </tr>
   <tr>
@@ -1156,14 +1156,14 @@ The originals are in the public domain: [Sources and credits](readme/originals/S
         <img src="images/thumbs/monalisa/polygon-200.jpg" alt="Mona Lisa approximated with polygon after 200 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 19.4 KB</sub>
+      <sub>SVG 19.3 KB</sub>
     </td>
     <td align="center">
       <a href="images/progression/monalisa/polygon-1000.svg">
         <img src="images/thumbs/monalisa/polygon-1000.jpg" alt="Mona Lisa approximated with polygon after 1000 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 96.1 KB</sub>
+      <sub>SVG 95.8 KB</sub>
     </td>
   </tr>
 </table>

@@ -409,17 +409,17 @@ Wall time per call and final score for 200 steps of each shape mode on the two p
 
 | Shape | American Gothic time | American Gothic score | Mona Lisa time | Mona Lisa score |
 | --- | ---: | ---: | ---: | ---: |
-| Mixed | 2.03 s | 0.0349 | 1.91 s | 0.0292 |
-| Triangle | 0.89 s | 0.0360 | 0.81 s | 0.0296 |
-| Rectangle | 0.78 s | 0.0460 | 0.65 s | 0.0384 |
+| Mixed | 2.03 s | 0.0349 | 1.90 s | 0.0292 |
+| Triangle | 0.92 s | 0.0360 | 0.80 s | 0.0296 |
+| Rectangle | 0.77 s | 0.0460 | 0.64 s | 0.0384 |
 | Ellipse | 1.01 s | 0.0448 | 0.85 s | 0.0372 |
-| Circle | 1.05 s | 0.0545 | 0.83 s | 0.0414 |
-| Rotated rectangle | 1.03 s | 0.0443 | 0.96 s | 0.0356 |
-| Quadratic | 6.65 s | 0.0882 | 4.87 s | 0.0663 |
-| Rotated ellipse | 2.97 s | 0.0359 | 2.70 s | 0.0302 |
-| Polygon | 3.44 s | 0.0315 | 3.23 s | 0.0275 |
+| Circle | 1.04 s | 0.0545 | 0.83 s | 0.0414 |
+| Rotated rectangle | 0.99 s | 0.0443 | 0.92 s | 0.0356 |
+| Quadratic | 6.60 s | 0.0882 | 4.77 s | 0.0663 |
+| Rotated ellipse | 2.99 s | 0.0359 | 2.69 s | 0.0302 |
+| Polygon | 3.43 s | 0.0315 | 3.21 s | 0.0275 |
 
-Measured at commit `8e77bb2` on an Apple M2 Pro (10 cores: 6 performance, 4 efficiency) under macOS, from a single run of:
+Measured at commit `0298d9c` on an Apple M2 Pro (10 cores: 6 performance, 4 efficiency) under macOS, from a single run of:
 
 ```bash
 cargo run --release -p primeval-render --example quality -- --no-synthetic --steps 200
@@ -433,19 +433,19 @@ The same two paintings, *American Gothic* and *Mona Lisa*, through the original 
 
 | Shape | 200 steps speedup | Go RMSE | primeval RMSE | 1000 steps speedup | Go RMSE | primeval RMSE |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Mixed | 3.0× | 14.89 | 12.13 | 3.6× | 12.64 | 9.69 |
-| Triangle | 4.0× | 15.72 | 12.30 | 4.0× | 13.66 | 9.53 |
-| Rectangle | 3.7× | 15.90 | 14.09 | 4.1× | 13.54 | 11.02 |
-| Ellipse | 5.6× | 14.80 | 13.83 | 6.9× | 11.54 | 10.89 |
-| Circle | 6.6× | 16.25 | 15.17 | 8.4× | 12.46 | 11.73 |
-| Rotated rectangle | 3.2× | 15.40 | 12.92 | 3.6× | 12.85 | 10.08 |
-| Quadratic | 1.2× | 45.42 | 25.53 | 1.5× | 26.39 | 11.18 |
-| Rotated ellipse | 4.0× | 15.27 | 12.57 | 4.7× | 12.92 | 9.61 |
-| Polygon | 1.8× | 14.68 | 11.64 | 1.8× | 12.91 | 9.40 |
+| Mixed | 2.9× | 14.86 | 12.11 | 3.6× | 12.61 | 9.70 |
+| Triangle | 3.9× | 15.78 | 12.34 | 3.9× | 13.66 | 9.46 |
+| Rectangle | 3.7× | 15.91 | 14.09 | 4.1× | 13.54 | 11.02 |
+| Ellipse | 5.6× | 14.77 | 13.83 | 6.9× | 11.53 | 10.89 |
+| Circle | 6.7× | 16.22 | 15.17 | 8.4× | 12.45 | 11.73 |
+| Rotated rectangle | 3.3× | 15.44 | 12.97 | 3.7× | 12.84 | 10.06 |
+| Quadratic | 1.2× | 45.37 | 25.53 | 1.5× | 26.43 | 11.18 |
+| Rotated ellipse | 4.0× | 15.23 | 12.57 | 4.7× | 12.92 | 9.61 |
+| Polygon | 1.8× | 14.69 | 11.60 | 1.8× | 12.93 | 9.30 |
 
-In total, 200 steps took 101 s with Go and 36 s with primeval (2.8×), and 1000 steps 431 s and 133 s (3.2×). primeval's RMSE was lower in all 18 image and shape configurations at both step counts, by 19% (200 steps) and 26% (1000 steps) in geometric mean. The search runs refit passes along the way (for triangles, the joint optimisation of every shape instead) and ends with refit passes and, for triangles, polygons, rectangles and rotated rectangles, a joint optimisation of every shape, which is where the extra time against the previous engine goes. At 1000 steps the SVG is 11–31% smaller than Go's for six of the nine kinds, the same size for rectangles, 2% smaller for ellipses and 10% larger for triangles.
+In total, 200 steps took 100 s with Go and 36 s with primeval (2.8×), and 1000 steps 435 s and 134 s (3.2×). primeval's RMSE was lower in all 18 image and shape configurations at both step counts, by 19% (200 steps) and 26% (1000 steps) in geometric mean. The search runs refit passes along the way (for triangles, the joint optimisation of every shape instead) and ends with refit passes and, for triangles, polygons, rectangles and rotated rectangles, a joint optimisation of every shape, which is where the extra time against the previous engine goes. At 1000 steps the SVG is 11–31% smaller than Go's for six of the nine kinds, the same size for rectangles, 2% smaller for ellipses and 10% larger for triangles.
 
-Go is timed as a process (decode, search, render, writing PNG and SVG); primeval is timed in-process (decode, search, PNG encode), and the Node CLI adds about 0.1 s of startup on top. Go seeds itself from the clock, so each Go figure is from 3 runs (median time, mean RMSE); primeval used seed 42, with the median of 3 runs as its time. Measured at commit `8e77bb2` against `primitive` `v0.0.0-20200504002142-0373c216458b` (Go 1.27.1) on the same Apple M2 Pro, from:
+Go is timed as a process (decode, search, render, writing PNG and SVG); primeval is timed in-process (decode, search, PNG encode), and the Node CLI adds about 0.1 s of startup on top. Go seeds itself from the clock, so each Go figure is from 3 runs (median time, mean RMSE); primeval used seed 42, with the median of 3 runs as its time. Measured at commit `0298d9c` against `primitive` `v0.0.0-20200504002142-0373c216458b` (Go 1.27.1) on the same Apple M2 Pro, from:
 
 ```bash
 cargo run --release -p primeval-render --example versus_go -- --steps 200,1000 --reps 3
