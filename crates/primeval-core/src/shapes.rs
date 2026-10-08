@@ -417,7 +417,13 @@ impl Shape {
     /// arithmetic rule of [`crate::joint`], so native and WebAssembly
     /// builds convert alike. A rotated rectangle converts only in the lab
     /// build, through `atan2` and `hypot`, which that rule forbids; in the
-    /// production build it is `None`, by the last arm.
+    /// production build it is `None`, by the last arm. An ellipse, a circle
+    /// or a rotated ellipse that moved converts only in the lab build too:
+    /// an ellipse or a circle rounds to its integer centre and radii, a
+    /// rotated ellipse takes the continuous ones and the rotation, which
+    /// the joint optimisation's export computes by a trig-free `atan2`; a
+    /// radius under 1 is `None`. The production build takes them only
+    /// unmoved, as the fixed shapes they are there.
     pub(crate) fn adopted(&self, geometry: &Geometry) -> Option<Self> {
         match (self, geometry) {
             (Self::Triangle(_), Geometry::Polygon(points)) if points.len() == 3 => {
@@ -453,6 +459,62 @@ impl Shape {
             (Self::RotatedRectangle(_), Geometry::Polygon(points)) if points.len() == 4 => {
                 RotatedRectangle::from_corners(points).map(Self::RotatedRectangle)
             }
+            // The integer centre is a pixel centre, 0.5 below the
+            // geometry's ([`ellipse_geometry`]).
+            #[cfg(feature = "lab")]
+            (
+                Self::Ellipse(_),
+                &Geometry::Ellipse {
+                    cx,
+                    cy,
+                    rx,
+                    ry,
+                    rotation,
+                },
+            ) if rotation == 0.0 => {
+                let ellipse = Ellipse {
+                    x: lattice(cx - 0.5)?,
+                    y: lattice(cy - 0.5)?,
+                    rx: lattice(rx)?,
+                    ry: lattice(ry)?,
+                };
+                (ellipse.rx >= 1 && ellipse.ry >= 1).then_some(Self::Ellipse(ellipse))
+            }
+            #[cfg(feature = "lab")]
+            (
+                Self::Circle(_),
+                &Geometry::Ellipse {
+                    cx,
+                    cy,
+                    rx,
+                    ry,
+                    rotation,
+                },
+            ) if rotation == 0.0 && rx == ry => {
+                let circle = Circle {
+                    x: lattice(cx - 0.5)?,
+                    y: lattice(cy - 0.5)?,
+                    r: lattice(rx)?,
+                };
+                (circle.r >= 1).then_some(Self::Circle(circle))
+            }
+            #[cfg(feature = "lab")]
+            (
+                Self::RotatedEllipse(_),
+                &Geometry::Ellipse {
+                    cx,
+                    cy,
+                    rx,
+                    ry,
+                    rotation,
+                },
+            ) => (rx >= 1.0 && ry >= 1.0).then_some(Self::RotatedEllipse(RotatedEllipse {
+                x: cx,
+                y: cy,
+                rx,
+                ry,
+                angle: rotation,
+            })),
             (
                 Self::Ellipse(_) | Self::Circle(_) | Self::Quadratic(_) | Self::RotatedEllipse(_),
                 geometry,

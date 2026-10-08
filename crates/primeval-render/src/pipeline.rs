@@ -23,6 +23,10 @@ pub(crate) struct Pipeline {
     /// The step sizes of every joint optimisation, in the search and in the
     /// final stage ([`joint::Settings::tuning`]).
     pub(crate) tuning: joint::Tuning,
+    /// Whether every joint optimisation, in the search and in the final
+    /// stage, moves the ellipses, circles and rotated ellipses too
+    /// ([`joint::Settings::curved`]); `true` in every kind's pipeline.
+    pub(crate) curved: bool,
 }
 
 /// When the search runs a pass over the model itself after a step, and
@@ -157,10 +161,11 @@ pub(crate) enum Refits {
 ///   equal time to the greedy search with more shapes, while the joint
 ///   optimisation, at 10–15% of the time for most kinds that run it, is
 ///   the most efficient stage.
-/// - Triangles, polygons, rectangles and rotated rectangles end with the
-///   joint optimisation of every shape, rotated rectangles with twice its
-///   default iterations; refit passes before it, or more iterations for
-///   the other three kinds, gained less than 0.5%. Rotated rectangles
+/// - Triangles, polygons, rectangles, rotated rectangles, ellipses and
+///   circles end with the joint optimisation of every shape, rotated
+///   rectangles with twice its default iterations; for the first four
+///   kinds, refit passes before it, or more iterations for the other
+///   three, gained less than 0.5%. Rotated rectangles
 ///   refit after steps 20 and 40, then each half the step number: with
 ///   the doubled iterations, 2.2% below no passes during the search and
 ///   the default iterations; the doubled iterations alone gained 0.4%,
@@ -187,12 +192,15 @@ pub(crate) enum Refits {
 ///   at 100–500 shapes, about as with no passes; rectangles and rotated
 ///   rectangles because rounding the joint result to their integer
 ///   parameters gives back most of its gain; `any` because the joint
-///   optimisation moves only its triangles, polygons and rectangles,
-///   while the refit passes also serve its curved layers.
+///   optimisation does not move its quadratics, while the refit passes
+///   serve every layer.
 /// - [`ShapeKind::Any`] refits on the rectangles' schedule and ends with
-///   one refit pass, then the joint optimisation of its triangles,
-///   polygons and rectangles, every other shape fixed in geometry: 3.2%
-///   below the refit pass alone. With 16 search rounds the whole pipeline
+///   one refit pass, then the joint optimisation of every shape but the
+///   quadratics, which keep their geometry: with its triangles, polygons
+///   and rectangles moving, 3.2% below the refit pass alone; moving its
+///   ellipses, circles and rotated ellipses too lowered the median RMSE
+///   by a further 0.7–1.1% (the paintings by 1.8–5.7%) at 1.03–1.06
+///   times the time. With 16 search rounds the whole pipeline
 ///   is 6.9% below the previous `approximate` at 1.57 times its time;
 ///   with 32 rounds and `Spaced(5, 10)` it was 10.8% below at 2.78 times.
 ///   At equal time and 200 shapes it is now neutral against the previous
@@ -206,15 +214,29 @@ pub(crate) enum Refits {
 ///   most four; with 16 search rounds instead of 32 that lowers the
 ///   median RMSE by 1.8–10.5% at 50–500 shapes against one pass after the
 ///   greedy search alone, at about 1.4–1.6 times its evaluations.
-/// - Ellipses, circles and rotated ellipses end with one refit pass:
-///   after the passes during the search, passes until one gained less
-///   than 1%, 0.5% or 0.2% gained less than 0.5%.
-/// - Ellipses, as circles and rotated ellipses, refit every 10 steps up
-///   to step 100, then each tenth of the step number: 5.1% below the
+/// - Ellipses and circles refit every 20 steps up to step 100, then each
+///   fifth of the step number (`Spaced(20, 5)`), and end with the joint
+///   optimisation, its curved outlines moving them, and no refit pass.
+///   Against their previous pipeline, `Spaced(10, 10)` and one final
+///   refit pass, the median RMSE falls by 3.9 / 6.0 / 8.4 / 14.4% for
+///   ellipses and 11.3 / 4.0 / 8.5 / 13.1% for circles at 50 / 100 / 200
+///   / 500 shapes, with every painting row better (American Gothic by
+///   11.7% and 20.4% with ellipses at 200 and 500), synthetic-shapes by
+///   37–55% and the texture within +1.9 / −3.0%. `Spaced(10, 10)` with
+///   the joint optimisation gained 1–2 points more at 1.13–1.22 times the
+///   time; the joint optimisation alone, with no passes during the
+///   search, 1–3 points less at 0.57–0.66 times; `Spaced(20, 5)` is the
+///   middle, at about the previous time.
+/// - Rotated ellipses refit every 10 steps up to step 100, then each
+///   tenth of the step number, and end with one refit pass, the pipeline
+///   ellipses and circles had before: on ellipses, 5.1% below the
 ///   previous `approximate` at 2.15 times its time, against 7.2% at 3.11
 ///   times with `Spaced(5, 20)` and 3.3% at 1.60 times with
-///   `Spaced(20, 5)`. The gain is roughly linear in the passes, so this
-///   is a choice of time against quality, not a measured optimum.
+///   `Spaced(20, 5)` (without the joint optimisation); after the passes
+///   during the search, passes until one gained less than 1%, 0.5% or
+///   0.2% gained less than 0.5%. The joint optimisation gains them only
+///   2–3%, and its guard rejects it on most images, on their thin
+///   ellipses, so it is not yet theirs.
 ///
 /// Against the first selection, with the model's search effort retuned
 /// alongside, this gives back 2–4 points on `any`, triangles, ellipses
@@ -234,9 +256,8 @@ pub(crate) fn pipeline(shape: ShapeKind) -> Pipeline {
         ShapeKind::Triangle => (joint(20, 5, 20), none, Some(1)),
         ShapeKind::Rectangle | ShapeKind::Polygon => (spaced(20, 5), none, Some(1)),
         ShapeKind::RotatedRectangle => (spaced(20, 2), none, Some(2)),
-        ShapeKind::Ellipse | ShapeKind::Circle | ShapeKind::RotatedEllipse => {
-            (spaced(10, 10), one, None)
-        }
+        ShapeKind::Ellipse | ShapeKind::Circle => (spaced(20, 5), none, Some(1)),
+        ShapeKind::RotatedEllipse => (spaced(10, 10), one, None),
         ShapeKind::Quadratic => (
             spaced(20, 5),
             Refits::Until {
@@ -254,16 +275,19 @@ pub(crate) fn pipeline(shape: ShapeKind) -> Pipeline {
         refits,
         joint,
         tuning: joint::Tuning::default(),
+        curved: true,
     }
 }
 
 /// Runs the pass that `during` schedules after step `step` (from 1), if
-/// any, a joint pass with the step sizes of `tuning`, and returns what ran. Returns `None` once `cancelled` returns true,
-/// with the model as it was before the pass.
+/// any, a joint pass with the step sizes of `tuning` and the curved shapes
+/// moving with `curved`, and returns what ran. Returns `None` once
+/// `cancelled` returns true, with the model as it was before the pass.
 pub(crate) fn after_step(
     model: &mut Model,
     during: During,
     tuning: joint::Tuning,
+    curved: bool,
     step: u32,
     alpha: Alpha,
     mut cancelled: impl FnMut() -> bool,
@@ -275,15 +299,16 @@ pub(crate) fn after_step(
         iterations, guard, ..
     } = during
     {
-        let kept = joint_pass(model, iterations, tuning, guard, alpha, cancelled)?;
+        let kept = joint_pass(model, iterations, tuning, curved, guard, alpha, cancelled)?;
         return Some(Pass::Joint { kept });
     }
     model.refine_unless(alpha, &mut cancelled)?;
     Some(Pass::Refit)
 }
 
-/// A joint pass of `iterations` iterations with the step sizes of `tuning`
-/// on `model`, its result adopted
+/// A joint pass of `iterations` iterations with the step sizes of `tuning`,
+/// and the curved shapes moving with `curved`, on `model`, its result
+/// adopted
 /// if `guard` keeps it; returns whether it was kept. With
 /// [`Guard::Canvas`] the model's exact canvas decides ([`Model::adopt`]
 /// without `force`); with the lab's `Guard::Export` the result is adopted
@@ -298,6 +323,7 @@ fn joint_pass(
     model: &mut Model,
     iterations: u32,
     tuning: joint::Tuning,
+    curved: bool,
     guard: Guard,
     alpha: Alpha,
     mut cancelled: impl FnMut() -> bool,
@@ -305,6 +331,7 @@ fn joint_pass(
     let mut settings = joint::Settings::default();
     settings.iterations = Some(iterations);
     settings.tuning = tuning;
+    settings.curved = curved;
     let optimised = joint::optimise(model, alpha, settings, &mut cancelled)?;
     if cancelled() {
         return None;
@@ -377,6 +404,7 @@ pub(crate) fn final_stage(
         joint::default_iterations(model.drawing().shapes.len()).saturating_mul(scale)
     }));
     settings.tuning = pipeline.tuning;
+    settings.curved = pipeline.curved;
     let optimised = joint::optimise(model, alpha, settings, cancelled)?;
     Some(better_export(model.target(), model.drawing(), optimised))
 }
@@ -490,6 +518,7 @@ mod tests {
                 &mut model,
                 During::Every(5),
                 joint::Tuning::default(),
+                false,
                 step,
                 Alpha::Auto,
                 || false,
@@ -537,6 +566,7 @@ mod tests {
             refits,
             joint,
             tuning: joint::Tuning::default(),
+            curved: true,
         }
     }
 
@@ -617,6 +647,7 @@ mod tests {
                         &mut model,
                         During::Every(3),
                         joint::Tuning::default(),
+                        false,
                         3,
                         Alpha::Auto,
                         || false,
@@ -807,6 +838,7 @@ mod tests {
             &mut refitted,
             during,
             joint::Tuning::default(),
+            false,
             10,
             Alpha::Auto,
             || {
@@ -828,6 +860,7 @@ mod tests {
                 &mut model,
                 during,
                 joint::Tuning::default(),
+                false,
                 10,
                 Alpha::Auto,
                 || {
@@ -844,6 +877,7 @@ mod tests {
                 &mut model,
                 during,
                 joint::Tuning::default(),
+                false,
                 9,
                 Alpha::Auto,
                 || panic!("polled")
@@ -948,6 +982,39 @@ mod tests {
         }
     }
 
+    /// Ellipses and circles refit every 20 steps up to step 100, then each
+    /// fifth of the step number, and end with the joint optimisation and no
+    /// refit pass; rotated ellipses keep their refit passes, and they and
+    /// quadratics end without it.
+    #[test]
+    fn ellipses_and_circles_end_with_the_joint_optimisation() {
+        for shape in [ShapeKind::Ellipse, ShapeKind::Circle] {
+            let stages = pipeline(shape);
+            assert_eq!(
+                stages.during,
+                During::Spaced {
+                    interval: 20,
+                    divisor: 5
+                },
+                "{shape:?}"
+            );
+            assert_eq!(stages.refits, Refits::Passes(0), "{shape:?}");
+            assert_eq!(stages.joint, Some(1), "{shape:?}");
+        }
+        let rotated = pipeline(ShapeKind::RotatedEllipse);
+        assert_eq!(
+            rotated.during,
+            During::Spaced {
+                interval: 10,
+                divisor: 10
+            }
+        );
+        assert_eq!(rotated.refits, Refits::Passes(1));
+        for shape in [ShapeKind::RotatedEllipse, ShapeKind::Quadratic] {
+            assert_eq!(pipeline(shape).joint, None, "{shape:?}");
+        }
+    }
+
     /// A model of `shape` after `steps` greedy steps, each followed by the
     /// pass `during` schedules, and what each pass did.
     fn joint_model(shape: ShapeKind, during: During, steps: u32) -> (Model, Vec<Pass>) {
@@ -959,6 +1026,7 @@ mod tests {
                     &mut model,
                     during,
                     joint::Tuning::default(),
+                    false,
                     step,
                     Alpha::Auto,
                     || false,
@@ -985,6 +1053,7 @@ mod tests {
                     &mut model,
                     during,
                     joint::Tuning::default(),
+                    false,
                     step,
                     Alpha::Auto,
                     || false,
@@ -1029,6 +1098,7 @@ mod tests {
                     &mut model,
                     during,
                     joint::Tuning::default(),
+                    false,
                     step,
                     Alpha::Auto,
                     || false,
@@ -1067,6 +1137,7 @@ mod tests {
                 &mut adopted,
                 during,
                 joint::Tuning::default(),
+                false,
                 10,
                 Alpha::Auto,
                 || {
@@ -1085,6 +1156,7 @@ mod tests {
                     &mut model,
                     during,
                     joint::Tuning::default(),
+                    false,
                     10,
                     Alpha::Auto,
                     || {
@@ -1130,6 +1202,7 @@ mod tests {
                                 &mut model,
                                 during,
                                 joint::Tuning::default(),
+                                false,
                                 step,
                                 Alpha::Auto,
                                 || false,
@@ -1220,7 +1293,7 @@ mod tests {
             joint::optimise(&expected, Alpha::Auto, settings, || false).expect("not cancelled");
         let adopted = expected.adopt(&optimised, false) == Some(true);
         let mut passed = model.clone();
-        let pass = after_step(&mut passed, during, tuning, 5, Alpha::Auto, || false);
+        let pass = after_step(&mut passed, during, tuning, false, 5, Alpha::Auto, || false);
         assert_eq!(pass, Some(Pass::Joint { kept: adopted }));
         assert_eq!(passed.drawing(), expected.drawing());
         let mut untuned = model.clone();
@@ -1228,6 +1301,7 @@ mod tests {
             &mut untuned,
             during,
             joint::Tuning::default(),
+            false,
             5,
             Alpha::Auto,
             || false,
@@ -1235,6 +1309,77 @@ mod tests {
         .expect("not cancelled");
         assert!(adopted, "the tuned pass is not kept, so it shows nothing");
         assert_ne!(passed.drawing(), untuned.drawing());
+    }
+
+    /// Every kind's pipeline moves the curved shapes, and a pipeline's
+    /// switch, on or off, reaches both the final stage's joint
+    /// optimisation and the joint passes of the search.
+    #[test]
+    fn the_pipeline_carries_its_curved_switch_to_both_joint_stages() {
+        for shape in KINDS {
+            assert!(pipeline(shape).curved, "{shape:?}");
+        }
+        let curved = |iterations| {
+            let mut settings = joint::Settings::default();
+            settings.iterations = Some(iterations);
+            settings.curved = true;
+            settings
+        };
+        let hard = hard_shapes_model(ShapeKind::Ellipse, 2, 20);
+        let iterations = joint::default_iterations(hard.drawing().shapes.len());
+        let moved = joint::optimise(&hard, Alpha::Auto, curved(iterations), || false)
+            .expect("not cancelled");
+        let mut off = curved(iterations);
+        off.curved = false;
+        let fixed = joint::optimise(&hard, Alpha::Auto, off, || false).expect("not cancelled");
+        assert_ne!(moved, fixed);
+        for (switch, optimised) in [(true, moved), (false, fixed)] {
+            let expected = better_export(hard.target(), hard.drawing(), optimised);
+            let mut switched_stages = stages(Refits::Passes(0), Some(1));
+            switched_stages.curved = switch;
+            let kept = final_stage(
+                &mut hard.clone(),
+                switched_stages,
+                Alpha::Auto,
+                None,
+                || false,
+            );
+            assert_eq!(kept, Some(expected), "curved: {switch}");
+        }
+
+        let model = model(ShapeKind::Circle, 10);
+        let during = joint(5, 1, 10, Guard::Canvas);
+        let mut expected = model.clone();
+        let optimised =
+            joint::optimise(&expected, Alpha::Auto, curved(10), || false).expect("not cancelled");
+        let adopted = expected.adopt(&optimised, false) == Some(true);
+        let mut passed = model.clone();
+        let pass = after_step(
+            &mut passed,
+            during,
+            joint::Tuning::default(),
+            true,
+            5,
+            Alpha::Auto,
+            || false,
+        );
+        assert_eq!(pass, Some(Pass::Joint { kept: adopted }));
+        assert_eq!(passed.drawing(), expected.drawing());
+        let mut fixed = model.clone();
+        let fixed_pass = after_step(
+            &mut fixed,
+            during,
+            joint::Tuning::default(),
+            false,
+            5,
+            Alpha::Auto,
+            || false,
+        );
+        assert_ne!(
+            (pass, passed.drawing()),
+            (fixed_pass, fixed.drawing()),
+            "the switch changed nothing"
+        );
     }
 
     /// B's first steps on the guard's case: the ratio of the joint result's

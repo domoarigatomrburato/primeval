@@ -93,17 +93,19 @@ export type ProgressInfo = {
    * which re-optimises one shape at a time, can move, resize and recolour
    * any shape so far, and after the last step a final stage can revise
    * every shape, so the result's shape lines can differ from the preview.
-   * For triangles, polygons, rectangles and rotated rectangles the final
-   * stage is a joint gradient optimisation of every shape at once, whose
-   * coordinates are multiples of a quarter of a `viewBox` unit, half a unit
-   * for rectangles, while a rotated rectangle's corners are computed from
+   * For triangles, polygons, rectangles, rotated rectangles, ellipses and
+   * circles the final stage is a joint gradient optimisation of every shape
+   * at once, whose coordinates are multiples of a quarter of a `viewBox`
+   * unit, half a unit for rectangles, as are an ellipse's or a circle's
+   * centre and radii, while a rotated rectangle's corners are computed from
    * such values, so they can be fractional. For `any` it is one refit pass,
-   * then the same optimisation of those shapes, the others keeping their
-   * geometry. The optimisation's result is kept only if the PNG output at
+   * then the same optimisation of every shape but the quadratics, which
+   * keep their geometry, a rotated ellipse's larger radius and rotation
+   * being computed from its optimised axis, so not on that grid. The optimisation's result is kept only if the PNG output at
    * the working size is closer to the resized input than with the shapes
    * before it; otherwise the stage keeps those, with coordinates not
    * rounded to that grid. For quadratics it is refit passes until one
-   * improves the fit by less than 1%, at most four; for the other shapes
+   * improves the fit by less than 1%, at most four; for rotated ellipses
    * it is one refit pass. The passes and
    * the stage keep the shapes' number, their order and each shape's kind,
    * though an ellipse can turn into a `<circle>` or back when its radii

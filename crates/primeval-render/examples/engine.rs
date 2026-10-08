@@ -18,9 +18,10 @@
 //!                       `final` runs `approximate`'s pipeline: its refit
 //!                       passes during the search and its final stage at
 //!                       each checkpoint, `joint:R` (lab only) R refit passes
-//!                       then the joint optimisation of the triangles,
-//!                       polygons and rectangles, rotated or not, every
-//!                       other shape fixed in geometry, at
+//!                       then the joint optimisation of every shape but
+//!                       the quadratics, which keep their geometry (the
+//!                       ellipses, circles and rotated ellipses too with
+//!                       `--joint-curved off`), at
 //!                       each checkpoint, whatever `approximate` runs for
 //!                       the kind
 //!   --iterations K      with `--refine final` or `joint:R`: the joint
@@ -58,6 +59,12 @@
 //!   --joint-step-rel F  every joint optimisation's vertex step capped at F
 //!                       times the root of each shape's area, F positive
 //!                       (`joint::Tuning::relative_step`, default none)
+//!   --joint-curved on|off  whether every joint optimisation, in the search
+//!                       and in the final stage, moves the ellipses,
+//!                       circles and rotated ellipses too
+//!                       (`joint::Settings::curved`, default on; `off`
+//!                       keeps their geometry, the behaviour before they
+//!                       moved), for every kind
 //!   --effort R:C:A      the greedy search's rounds per step, and the
 //!                       multiples of each round's random candidates and
 //!                       climb age (default: the model's for the kind, 16
@@ -229,6 +236,9 @@ struct Config {
     /// `--joint-warmup`, `--joint-step` and `--joint-step-rel`: the step
     /// sizes of every joint optimisation, applied to the default tuning.
     tuning: joint::Tuning,
+    /// `--joint-curved`: whether every joint optimisation moves the curved
+    /// shapes.
+    curved: bool,
     /// `--effort`: rounds, candidate and age multiples.
     effort: Option<(u64, usize, usize)>,
     /// `--refine-effort`: climbs per layer and climb age of every refit
@@ -261,6 +271,7 @@ impl Config {
             pipeline.joint = (scale > 0).then_some(scale);
         }
         pipeline.tuning = self.tuning;
+        pipeline.curved = self.curved;
         pipeline
     }
 }
@@ -389,6 +400,9 @@ fn describe_pipeline(pipeline: Pipeline) -> String {
     }
     if let Some(fraction) = pipeline.tuning.relative_step {
         tuning += &format!(", step-rel {fraction}");
+    }
+    if !pipeline.curved {
+        tuning += ", fixed curved";
     }
     format!("during {during}, final refits {refits}, joint {joint}{tuning}")
 }
@@ -580,6 +594,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
     let mut effort = None;
     let mut refine_effort = None;
     let mut tuning = joint::Tuning::default();
+    let mut curved = true;
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{arg} needs a value"));
         match arg.as_str() {
@@ -611,6 +626,15 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
             "--joint-step" => tuning.step = parse_positive(&arg, &value()?)?,
             "--joint-step-rel" => {
                 tuning.relative_step = Some(parse_positive(&arg, &value()?)?);
+            }
+            "--joint-curved" => {
+                curved = match value()?.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    other => {
+                        return Err(format!("--joint-curved takes on or off, not {other}").into());
+                    }
+                };
             }
             "--effort" => effort = Some(parse_effort(&value()?)?),
             "--refine-effort" => refine_effort = Some(parse_refine_effort(&value()?)?),
@@ -661,6 +685,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
         final_refits,
         joint_scale,
         tuning,
+        curved,
         effort,
         refine_effort,
     })

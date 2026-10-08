@@ -1,6 +1,6 @@
-//! Joint gradient optimisation of a drawing's triangles, convex polygons
-//! and rectangles, rotated or not, with every other layer fixed in
-//! geometry.
+//! Joint gradient optimisation of a drawing's triangles, convex polygons,
+//! rectangles, rotated or not, ellipses, circles and rotated ellipses, with
+//! every other layer (the quadratics) fixed in geometry.
 //!
 //! The greedy search places one shape at a time with the others fixed.
 //! [`optimise`] then moves every vertex of every triangle and polygon, every
@@ -17,17 +17,25 @@
 //! polygon strictly convex with every angle above 15°, and every rectangle
 //! with sides of at least 1 px, the long one at most 8 times the short one.
 //!
-//! The other layers (ellipses, circles, rotated ellipses and quadratics)
-//! keep their geometry. Their opacity and colour are optimised with the
-//! others', through a coverage mask of the engine's own rasterization of
-//! the shape, computed once.
+//! With [`Settings::curved`], on by default, ellipses, circles and rotated
+//! ellipses move too: the centre and radii of each, and a rotated
+//! ellipse's semi-axis vector, which carries its angle. A circle stays a
+//! circle and an axis-aligned ellipse axis-aligned, since they have no
+//! parameter to become anything else; their results are snapped to a
+//! quarter pixel with radii of at least 1 px, the greedy search's bound.
+//! Every other layer (the quadratics, and with `curved` off the curved
+//! shapes too) keeps its geometry. Its opacity and colour are optimised
+//! with the others', through a coverage mask of the engine's own
+//! rasterization of the shape, computed once.
 //!
 //! The forward model (`diff.rs`) covers each pixel of a triangle, a
 //! polygon or a rotated rectangle by its exact area in the pixel square:
 //! one edge's half-plane area where only that edge cuts the square, the
 //! square clipped to the inside of the cutting edges near a vertex; and of
 //! an axis-aligned rectangle by the product of its sides', which is its
-//! exact area there; it composites in `f32`. A rotated rectangle is parametrised without
+//! exact area there; and of a curved layer by the box-filtered half-plane
+//! of its boundary taken as locally straight in the pixel; it composites
+//! in `f32`. A rotated rectangle is parametrised without
 //! trigonometry, by its centre `c`, a half-side vector `u` and its
 //! half-width `h`, its corners `c ± u ± (h / |u|) · (−u_y, u_x)` computed
 //! with `sqrt` alone. Reverse-mode gradients replay the layer
@@ -38,7 +46,8 @@
 //! colours are refitted together, each by a step towards its closed-form
 //! fit that can only lower the loss. The rules are kept by a projection
 //! after every step and by the snap (`angle.rs` for triangles, `convex.rs`
-//! for polygons, `rect.rs` for rectangles).
+//! for polygons, `rect.rs` for rectangles, `ellipse.rs` for the curved
+//! layers).
 //!
 //! # Arithmetic
 //!
@@ -61,11 +70,16 @@
 //! angle: they come from a Taylor polynomial in `+ − × ÷`
 //! (`rect::sin_cos_degrees`), not from the platform's `sin_cos`, so B's
 //! input is the same on every platform even where the platforms' `sin_cos`
-//! differ in the last bit.
+//! differ in the last bit; so does a rotated ellipse's starting semi-axis
+//! vector, from its continuous angle, and its exported rotation, the angle
+//! of that vector, comes from `rect::atan2_degrees`, a polynomial in
+//! `+ − × ÷` too. The exported rotated ellipse is then drawn with the
+//! platform's `sin_cos`, as the greedy search's are.
 
 mod angle;
 mod convex;
 mod diff;
+mod ellipse;
 mod rect;
 
 use crate::model::CommittedShape;
@@ -103,9 +117,10 @@ const TAN_PROJECTION: f64 = 0.277_324_544_059_838_4;
 
 /// Settings of [`optimise`].
 ///
-/// Construct with [`Settings::default`] and set the fields you need.
+/// Construct with [`Settings::default`] and set the fields you need. The
+/// default moves the curved shapes too ([`Settings::curved`]).
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Settings {
     /// Adam iterations. Each costs a colour fit (about two renders of the
     /// drawing) and a gradient (a render, its replay and the reverse pass).
@@ -122,6 +137,28 @@ pub struct Settings {
     /// [`Tuning::default`], is the engine's: a warm-up of 5 iterations, a
     /// first vertex step of 1 px and no step relative to the shapes' sizes.
     pub tuning: Tuning,
+    /// Whether the ellipses, circles and rotated ellipses move too: with
+    /// `true`, each is a layer of the forward model whose centre and radii
+    /// (and a rotated ellipse's angle) are optimised with the other
+    /// shapes', its boundary locally straight in each pixel, and its
+    /// result stays a shape of its kind; with `false` each keeps its
+    /// geometry, as quadratics always do, and only its opacity and colour
+    /// are optimised, through the mask of the engine's own rasterization.
+    ///
+    /// `true` is the default: with B ending the ellipses' and circles'
+    /// pipelines, the median RMSE falls by 4–14% for ellipses and 4–13%
+    /// for circles at 50 to 500 shapes, and by about 1% for any shape.
+    pub curved: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            iterations: None,
+            tuning: Tuning::default(),
+            curved: true,
+        }
+    }
 }
 
 /// The step sizes of [`optimise`]'s Adam iterations ([`Settings::tuning`]).
@@ -179,7 +216,8 @@ impl Default for Tuning {
 /// See the module documentation for the method.
 /// [`Settings::iterations`] Adam iterations, by default a number that
 /// grows with the number of shapes, move the triangles, polygons and
-/// rectangles, rotated or not, and every opacity when `alpha` is
+/// rectangles, rotated or not, with [`Settings::curved`] (the default) the
+/// ellipses, circles and rotated ellipses, and every opacity when `alpha` is
 /// [`Alpha::Auto`]; with [`Alpha::Fixed`] every opacity stays at the fixed
 /// value. Every colour is refitted at each iteration. Every other shape
 /// keeps its geometry exactly.
@@ -191,7 +229,11 @@ impl Default for Tuning {
 /// are multiples of 0.5 px. Every angle of every triangle is above 15°,
 /// every polygon is strictly convex with every angle above 15°, every
 /// rectangle has sides of at least 1 px and its long side at most 8 times
-/// its short one, and the opacities and colours are integers.
+/// its short one, and the opacities and colours are integers. A moved
+/// ellipse, circle or rotated ellipse has its centre and radii on the
+/// quarter-pixel lattice, and a rotated ellipse its semi-axis vector, from
+/// which its larger radius and its rotation are computed; every radius is
+/// at least 1 px.
 ///
 /// `cancelled` is polled before every iteration and before the snap. The
 /// result does not depend on the number of threads of the current rayon
@@ -212,12 +254,17 @@ pub fn optimise(
 /// the RGB channels divided by 255, as [`Model::score_f64`] measures the
 /// engine's canvas. Its triangles, polygons and rectangles, rotated or not,
 /// are taken from `drawing`, and the coverage of every other shape from
-/// `model`'s.
+/// `model`'s. If `drawing` moved an ellipse, a circle or a rotated ellipse,
+/// as [`optimise`] does with [`Settings::curved`], every one of them is
+/// taken from `drawing` too and covered as [`optimise`] covers them then;
+/// otherwise they are covered by the masks of the engine's rasterization,
+/// as [`optimise`] covers them without it.
 ///
 /// # Panics
 ///
 /// If `drawing` does not have `model`'s shapes, kinds, background and size,
-/// with the geometry of every other shape unchanged.
+/// with the geometry of every other shape unchanged, a circle's radii
+/// equal and an axis-aligned ellipse's rotation zero.
 #[must_use]
 pub fn score(model: &Model, drawing: &Drawing) -> f64 {
     let (target, background, history) = model.joint_parts();
@@ -229,8 +276,8 @@ pub fn score(model: &Model, drawing: &Drawing) -> f64 {
     score_shapes(target, background, history, drawing)
 }
 
-/// The lattice the exported vertices, and rotated rectangles' parameters,
-/// snap to, in pixels.
+/// The lattice the exported vertices, and rotated rectangles' and curved
+/// layers' parameters, snap to, in pixels.
 const QUANTUM: f64 = 0.25;
 /// The lattice the exported axis-aligned rectangles snap to, in pixels.
 ///
@@ -264,9 +311,15 @@ struct Parts<F> {
 
 /// The [`Parts`] of the committed shapes `history` on `target` and
 /// `background`: triangles, quadrilaterals and rectangles, rotated or not,
-/// become layers with their parameters in engine coordinates, every other
-/// shape a fixed layer with the mask of the engine's rasterization.
-fn parts<F: Real>(target: &Buffer, background: Color, history: &[CommittedShape]) -> Parts<F> {
+/// and with `curved` ellipses, circles and rotated ellipses, become layers
+/// with their parameters in engine coordinates, every other shape a fixed
+/// layer with the mask of the engine's rasterization.
+fn parts<F: Real>(
+    target: &Buffer,
+    background: Color,
+    history: &[CommittedShape],
+    curved: bool,
+) -> Parts<F> {
     let (width, height) = (target.width() as usize, target.height() as usize);
     let mut masks = Vec::new();
     let mut fixed = Vec::new();
@@ -324,7 +377,7 @@ fn parts<F: Real>(target: &Buffer, background: Color, history: &[CommittedShape]
                 }
                 // The centre is continuous; `u` runs along the side `sx`.
                 Shape::RotatedRectangle(rectangle) => {
-                    let (sin, cos) = rect::sin_cos_degrees(rectangle.angle);
+                    let (sin, cos) = rect::sin_cos_degrees(f64::from(rectangle.angle));
                     let half = f64::from(rectangle.sx) / 2.0;
                     let mut params = [0.0; COORDS];
                     params[..5].copy_from_slice(&[
@@ -336,6 +389,49 @@ fn parts<F: Real>(target: &Buffer, background: Color, history: &[CommittedShape]
                     ]);
                     Layer {
                         outline: Outline::Rotated,
+                        params,
+                        alpha,
+                        color: rgb,
+                    }
+                }
+                // The engine's integer centre is a pixel centre, as a
+                // triangle's vertices.
+                &Shape::Ellipse(ellipse) if curved => {
+                    let mut params = [0.0; COORDS];
+                    params[..4].copy_from_slice(
+                        &[ellipse.x, ellipse.y, ellipse.rx, ellipse.ry].map(f64::from),
+                    );
+                    Layer {
+                        outline: Outline::Ellipse,
+                        params,
+                        alpha,
+                        color: rgb,
+                    }
+                }
+                &Shape::Circle(circle) if curved => {
+                    let mut params = [0.0; COORDS];
+                    params[..3].copy_from_slice(&[circle.x, circle.y, circle.r].map(f64::from));
+                    Layer {
+                        outline: Outline::Circle,
+                        params,
+                        alpha,
+                        color: rgb,
+                    }
+                }
+                // The centre is continuous; `a` runs along the radius `rx`,
+                // at the angle `angle` in degrees.
+                &Shape::RotatedEllipse(ellipse) if curved => {
+                    let (sin, cos) = rect::sin_cos_degrees(ellipse.angle);
+                    let mut params = [0.0; COORDS];
+                    params[..5].copy_from_slice(&[
+                        ellipse.x - 0.5,
+                        ellipse.y - 0.5,
+                        ellipse.rx * cos,
+                        ellipse.rx * sin,
+                        ellipse.ry,
+                    ]);
+                    Layer {
+                        outline: Outline::RotatedEllipse,
                         params,
                         alpha,
                         color: rgb,
@@ -389,7 +485,7 @@ fn optimise_shapes(
         scene,
         mut layers,
         fixed,
-    } = parts::<f32>(target, background, history);
+    } = parts::<f32>(target, background, history, settings.curved);
     let auto_alpha = alpha == Alpha::Auto;
     let iterations = settings
         .iterations
@@ -416,11 +512,22 @@ fn score_shapes(
     history: &[CommittedShape],
     drawing: &Drawing,
 ) -> f64 {
+    // The drawing moved a curved shape only if it came from the curved
+    // outlines, whose model then covers every curved shape.
+    let curved = history
+        .iter()
+        .zip(&drawing.shapes)
+        .any(|(committed, shape)| {
+            matches!(
+                committed.shape,
+                Shape::Ellipse(_) | Shape::Circle(_) | Shape::RotatedEllipse(_)
+            ) && committed.shape.geometry() != shape.geometry
+        });
     let Parts {
         scene,
         mut layers,
         fixed,
-    } = parts::<f32>(target, background, history);
+    } = parts::<f32>(target, background, history, curved);
     assert_eq!(
         drawing.shapes.len(),
         layers.len(),
@@ -450,8 +557,38 @@ fn score_shapes(
                     y + height - 0.5,
                 ]);
             }
+            (
+                outline @ (Outline::Circle | Outline::Ellipse | Outline::RotatedEllipse),
+                &Geometry::Ellipse {
+                    cx,
+                    cy,
+                    rx,
+                    ry,
+                    rotation,
+                },
+            ) => {
+                let centre = [cx - 0.5, cy - 0.5];
+                layer.params[..2].copy_from_slice(&centre);
+                match outline {
+                    Outline::Circle => {
+                        assert!(rx == ry && rotation == 0.0, "not a circle: {rx} {ry}");
+                        layer.params[2] = rx;
+                    }
+                    Outline::Ellipse => {
+                        assert!(rotation == 0.0, "not axis-aligned: {rotation}");
+                        layer.params[2] = rx;
+                        layer.params[3] = ry;
+                    }
+                    _ => {
+                        let (sin, cos) = rect::sin_cos_degrees(rotation);
+                        layer.params[2..5].copy_from_slice(&[rx * cos, rx * sin, ry]);
+                    }
+                }
+            }
             (outline, Geometry::Polygon(points))
-                if points.len() == outline.sides() && outline != Outline::Rect =>
+                if points.len() == outline.sides()
+                    && outline.sides() > 0
+                    && outline != Outline::Rect =>
             {
                 // A rotated rectangle's coverage is its corners' as a
                 // quadrilateral's.
@@ -492,8 +629,8 @@ fn step_factor(t: usize, iterations: usize, warmup: u32) -> f64 {
 /// capped with [`Tuning::relative_step`] `Some(f)` at `f` times the square
 /// root of the layer's area. The area is a triangle's or a
 /// quadrilateral's by the shoelace formula, a rotated rectangle's
-/// `4 |u| h`, an axis-aligned rectangle's `(x1 − x0)(y1 − y0)`, with
-/// `+ − × ÷`, `abs` and `sqrt` alone.
+/// `4 |u| h`, an axis-aligned rectangle's `(x1 − x0)(y1 − y0)`, a curved
+/// layer's `π |a| b`, with `+ − × ÷`, `abs` and `sqrt` alone.
 fn vertex_step(layer: &Layer, tuning: Tuning) -> Option<f64> {
     let p = &layer.params;
     let area = match layer.outline {
@@ -510,6 +647,10 @@ fn vertex_step(layer: &Layer, tuning: Tuning) -> Option<f64> {
         }
         Outline::Rotated => 4.0 * (p[2] * p[2] + p[3] * p[3]).sqrt() * p[4].abs(),
         Outline::Rect => ((p[2] - p[0]) * (p[3] - p[1])).abs(),
+        Outline::Circle | Outline::Ellipse | Outline::RotatedEllipse => {
+            let [_, _, ax, ay, b] = layer.conic();
+            std::f64::consts::PI * (ax * ax + ay * ay).sqrt() * b.abs()
+        }
     };
     Some(match tuning.relative_step {
         Some(fraction) => tuning.step.min(fraction * area.sqrt()),
@@ -520,7 +661,8 @@ fn vertex_step(layer: &Layer, tuning: Tuning) -> Option<f64> {
 /// Projects `layer` onto its rule, with angles of at least `atan tan_tau`:
 /// a triangle by [`angle::project`], a polygon by [`convex::project`], a
 /// rectangle by [`rect::project_box`] and a rotated one by
-/// [`rect::project_rotated`]; a fixed layer has no parameters. Returns the
+/// [`rect::project_rotated`], a curved layer by [`ellipse::project`]; a
+/// fixed layer has no parameters. Returns the
 /// displacement of the parameters, or `None` if the layer was already
 /// inside.
 fn project(layer: &mut Layer, tan_tau: f64) -> Option<[f64; COORDS]> {
@@ -535,6 +677,9 @@ fn project(layer: &mut Layer, tan_tau: f64) -> Option<[f64; COORDS]> {
         Outline::Quad => convex::project(&mut layer.params, tan_tau),
         Outline::Rect => rect::project_box(&mut layer.params),
         Outline::Rotated => rect::project_rotated(&mut layer.params),
+        outline @ (Outline::Circle | Outline::Ellipse | Outline::RotatedEllipse) => {
+            ellipse::project(outline, &mut layer.params)
+        }
         Outline::Fixed(_) => return None,
     };
     match projected {
@@ -551,8 +696,9 @@ fn project(layer: &mut Layer, tan_tau: f64) -> Option<[f64; COORDS]> {
 /// of every colour; then one more fit refits the colours of the final
 /// geometry. `cancelled` is polled before every step; `None` once it
 /// returns true. Positions stay within [`MARGIN`] of the canvas, and a
-/// rotated rectangle's `u` and `h` within the canvas's longer side plus
-/// twice the margin, unless a projection moves them out ([`bounds`]).
+/// rotated rectangle's `u` and `h`, and a curved layer's radii and
+/// semi-axis vector, within the canvas's longer side plus twice the
+/// margin, unless a projection moves them out ([`bounds`]).
 ///
 /// Every layer that is not fixed is projected onto its rule ([`project`])
 /// before the first step and after every step, after the clamp to the
@@ -632,13 +778,16 @@ fn run<F: Real>(
 
 /// The range Adam's steps keep parameter `k` of an outline in, on a canvas
 /// `width × height`: positions within [`MARGIN`] of the canvas, and a
-/// rotated rectangle's `ux`, `uy` and `h` within the canvas's longer side
-/// plus twice the margin, of either sign.
+/// rotated rectangle's `ux`, `uy` and `h`, and a curved layer's radii and
+/// semi-axis vector, within the canvas's longer side plus twice the
+/// margin, of either sign.
 fn bounds(width: usize, height: usize) -> impl Fn(Outline, usize) -> (f64, f64) {
     let (max_x, max_y) = ((width - 1) as f64 + MARGIN, (height - 1) as f64 + MARGIN);
     let size = width.max(height) as f64 + 2.0 * MARGIN;
     move |outline, k| match (outline, k) {
-        (Outline::Rotated, 2..) => (-size, size),
+        (Outline::Rotated | Outline::Circle | Outline::Ellipse | Outline::RotatedEllipse, 2..) => {
+            (-size, size)
+        }
         (_, k) if k % 2 == 0 => (-MARGIN, max_x),
         _ => (-MARGIN, max_y),
     }
@@ -684,13 +833,17 @@ fn redirect_momentum(
 }
 
 /// `layers` as a drawing on `background`: triangle and polygon vertices
-/// and rotated rectangle parameters snapped to [`QUANTUM`], and rectangle
-/// parameters to [`RECT_QUANTUM`], keeping their rules ([`angle::snap`],
-/// [`convex::snap`], [`rect::snap_rotated`], [`rect::snap_box`]),
-/// opacities rounded, colours refitted once to the snapped geometry and
-/// rounded. A rectangle becomes a [`Geometry::Rect`], a rotated rectangle
-/// the polygon of its corners ([`Layer::corners`]). A fixed layer keeps its
-/// geometry, from `fixed`.
+/// and rotated rectangle and curved layer parameters snapped to
+/// [`QUANTUM`], and rectangle parameters to [`RECT_QUANTUM`], keeping
+/// their rules ([`angle::snap`], [`convex::snap`], [`rect::snap_rotated`],
+/// [`rect::snap_box`], [`ellipse::snap`]), opacities rounded, colours
+/// refitted once to the snapped geometry and rounded. A rectangle becomes
+/// a [`Geometry::Rect`], a rotated rectangle the polygon of its corners
+/// ([`Layer::corners`]), a curved layer a [`Geometry::Ellipse`]: a circle's
+/// radii both `r`, an axis-aligned ellipse's `rx` and `ry`, both with no
+/// rotation, and a rotated ellipse's `|a|` and `b`, rotated by the angle of
+/// `a` in degrees ([`rect::atan2_degrees`]), not rounded further. A fixed
+/// layer keeps its geometry, from `fixed`.
 fn export<F: Real>(
     scene: &Scene<F>,
     layers: &[Layer],
@@ -709,6 +862,9 @@ fn export<F: Real>(
                 Outline::Quad => params = convex::snap(&params, QUANTUM).0,
                 Outline::Rect => params = rect::snap_box(&params, RECT_QUANTUM).0,
                 Outline::Rotated => params = rect::snap_rotated(&params, QUANTUM).0,
+                outline @ (Outline::Circle | Outline::Ellipse | Outline::RotatedEllipse) => {
+                    params = ellipse::snap(outline, &params, QUANTUM);
+                }
                 Outline::Fixed(_) => {}
             }
             Layer {
@@ -735,6 +891,20 @@ fn export<F: Real>(
                             y: y0 + 0.5,
                             width: x1 - x0,
                             height: y1 - y0,
+                        }
+                    }
+                    Outline::Circle | Outline::Ellipse | Outline::RotatedEllipse => {
+                        let [cx, cy, ax, ay, b] = layer.conic();
+                        Geometry::Ellipse {
+                            cx: cx + 0.5,
+                            cy: cy + 0.5,
+                            rx: (ax * ax + ay * ay).sqrt(),
+                            ry: b,
+                            rotation: if layer.outline == Outline::RotatedEllipse {
+                                rect::atan2_degrees(ay, ax)
+                            } else {
+                                0.0
+                            },
                         }
                     }
                     outline => {
@@ -1268,17 +1438,20 @@ mod tests {
         }
     }
 
-    /// In a drawing of every kind, the triangles, polygons and rectangles,
-    /// rotated or not, move and every other shape keeps its geometry
-    /// exactly, while the colours and opacities of all of them are
-    /// optimised.
+    /// In a drawing of every kind with the curved outlines switched off,
+    /// the triangles, polygons and rectangles, rotated or not, move and
+    /// every other shape keeps its geometry exactly, while the colours and
+    /// opacities of all of them are optimised.
     #[test]
     fn fixed_shapes_keep_their_geometry() {
         let target = target(64, 48);
         let model = greedy_kind(&target, 40, ShapeKind::Any, Alpha::Auto);
         let start = model.drawing();
-        let optimised =
-            optimise(&model, Alpha::Auto, settings(20), || false).expect("not cancelled");
+        let off = Settings {
+            curved: false,
+            ..settings(20)
+        };
+        let optimised = optimise(&model, Alpha::Auto, off, || false).expect("not cancelled");
         assert_eq!(optimised.shapes.len(), start.shapes.len());
         let (_, _, history) = model.joint_parts();
         let (mut fixed, mut recoloured, mut moved) = (0, 0, 0);
@@ -1472,6 +1645,316 @@ mod tests {
             assert_eq!(result, None, "cancelled at poll {cancel_at}");
         }
         assert_eq!(model.drawing(), copy);
+    }
+
+    /// [`Settings`] with `iterations` and the curved outlines switched on.
+    fn curved(iterations: u32) -> Settings {
+        Settings {
+            curved: true,
+            ..settings(iterations)
+        }
+    }
+
+    /// A curved layer of `outline` with the parameters `params`.
+    fn curved_layer(outline: Outline, params: &[f64]) -> Layer {
+        let mut p = [0.0; COORDS];
+        p[..params.len()].copy_from_slice(params);
+        Layer {
+            outline,
+            params: p,
+            alpha: 128.0,
+            color: [128.0; 3],
+        }
+    }
+
+    /// The projection raises every radius below 1 px to 1, a rotated
+    /// ellipse's semi-axis vector along its direction (the `x` axis if it
+    /// is zero), and leaves valid layers alone; Adam's steps keep the
+    /// centre within the margin of the canvas.
+    #[test]
+    fn curved_projection_raises_the_radii_and_keeps_the_centre_near_the_canvas() {
+        for (outline, before, after) in [
+            (Outline::Circle, vec![3.0, 4.0, 0.25], vec![3.0, 4.0, 1.0]),
+            (
+                Outline::Ellipse,
+                vec![3.0, 4.0, 0.5, 6.0],
+                vec![3.0, 4.0, 1.0, 6.0],
+            ),
+            (
+                Outline::Ellipse,
+                vec![3.0, 4.0, 6.0, -2.0],
+                vec![3.0, 4.0, 6.0, 1.0],
+            ),
+            (
+                Outline::RotatedEllipse,
+                vec![3.0, 4.0, 0.3, -0.4, 0.5],
+                vec![3.0, 4.0, 0.6, -0.8, 1.0],
+            ),
+            (
+                Outline::RotatedEllipse,
+                vec![3.0, 4.0, 0.0, 0.0, 7.0],
+                vec![3.0, 4.0, 1.0, 0.0, 7.0],
+            ),
+        ] {
+            let mut layer = curved_layer(outline, &before);
+            let displacement = project(&mut layer, TAN_PROJECTION).expect("projected");
+            let (start, expected) = (
+                curved_layer(outline, &before),
+                curved_layer(outline, &after),
+            );
+            for (k, moved) in displacement.into_iter().enumerate() {
+                assert!(
+                    (layer.params[k] - expected.params[k]).abs() < 1e-15,
+                    "{before:?}: {:?}",
+                    layer.params
+                );
+                assert_eq!(moved, layer.params[k] - start.params[k]);
+            }
+            assert_eq!(project(&mut layer, TAN_PROJECTION), None, "{after:?}");
+        }
+        for (outline, params) in [
+            (Outline::Circle, vec![-40.0, 90.0, 0.5]),
+            (Outline::Ellipse, vec![80.0, -30.0, 0.5, 0.5]),
+            (Outline::RotatedEllipse, vec![-50.0, -50.0, 0.25, 0.25, 0.5]),
+        ] {
+            let mut rng = ChaCha8Rng::seed_from_u64(80);
+            let scene = diff::tests::random_scene::<f32>(&mut rng, 40, 32);
+            let mut layers = vec![curved_layer(outline, &params)];
+            run(
+                &scene,
+                &mut layers,
+                1,
+                true,
+                TAN_PROJECTION,
+                Tuning::default(),
+                &mut || false,
+            )
+            .expect("not cancelled");
+            let p = layers[0].params;
+            assert!((-MARGIN..=39.0 + MARGIN).contains(&p[0]), "{p:?}");
+            assert!((-MARGIN..=31.0 + MARGIN).contains(&p[1]), "{p:?}");
+            let [_, _, ax, ay, b] = layers[0].conic();
+            assert!(ax.hypot(ay) >= 1.0 - 1e-12 && b >= 1.0, "{p:?}");
+        }
+    }
+
+    /// The parameters of an exported ellipse: its centre in engine
+    /// coordinates, its radii and its rotation in degrees.
+    fn ellipse_parameters(geometry: &Geometry) -> [f64; 5] {
+        let &Geometry::Ellipse {
+            cx,
+            cy,
+            rx,
+            ry,
+            rotation,
+        } = geometry
+        else {
+            panic!("not an ellipse: {geometry:?}");
+        };
+        [cx - 0.5, cy - 0.5, rx, ry, rotation]
+    }
+
+    /// Checks an exported curved shape of `outline`: its centre and radii
+    /// on the quarter-pixel lattice and at least 1 px, a circle's radii
+    /// equal and an axis-aligned ellipse's rotation zero; a rotated
+    /// ellipse's semi-axis vector, recovered with the platform's `sin` and
+    /// `cos`, on the lattice, and its rotation the platform's `atan2` of
+    /// that vector within `1e-6°`.
+    fn check_curved(outline: Outline, geometry: &Geometry) {
+        let [x, y, rx, ry, rotation] = ellipse_parameters(geometry);
+        let on_lattice = |value: f64, tolerance: f64| {
+            let steps = value / QUANTUM;
+            (steps - steps.round()).abs() <= tolerance
+        };
+        for value in [x, y, ry] {
+            assert!(on_lattice(value, 0.0), "{geometry:?}");
+        }
+        assert!(rx >= 1.0 && ry >= 1.0, "{geometry:?}");
+        match outline {
+            Outline::Circle => assert!(rx == ry && rotation == 0.0, "{geometry:?}"),
+            Outline::Ellipse => assert!(on_lattice(rx, 0.0) && rotation == 0.0, "{geometry:?}"),
+            _ => {
+                let (sin, cos) = rotation.to_radians().sin_cos();
+                let (ax, ay) = (rx * cos, rx * sin);
+                assert!(on_lattice(ax, 1e-9) && on_lattice(ay, 1e-9), "{geometry:?}");
+                let (ax, ay) = (
+                    (ax / QUANTUM).round() * QUANTUM,
+                    (ay / QUANTUM).round() * QUANTUM,
+                );
+                let expected = ay.atan2(ax).to_degrees();
+                let turn = (rotation - expected).rem_euclid(360.0);
+                assert!(turn.min(360.0 - turn) <= 1e-6, "{geometry:?}: {expected}");
+                assert!((ax.hypot(ay) - rx).abs() <= 1e-12 * rx, "{geometry:?}");
+            }
+        }
+    }
+
+    /// Exported curved shapes, run from random ones and from ones at the
+    /// least radius, sit on the quarter-pixel lattice with radii of at
+    /// least 1 px ([`check_curved`]); a rotated ellipse's semi-axis vector
+    /// that rounds shorter than 1 px is lengthened on the lattice.
+    #[test]
+    fn exported_curved_shapes_keep_the_rule() {
+        let mut rng = ChaCha8Rng::seed_from_u64(81);
+        let scene = diff::tests::random_scene::<f32>(&mut rng, 40, 32);
+        let mut layers = diff::tests::random_conics(&mut rng, 20, 40.0, 1.0..12.0);
+        for (index, layer) in layers.iter_mut().enumerate() {
+            if index % 3 == 0 {
+                let p = &mut layer.params;
+                match layer.outline {
+                    Outline::Circle => p[2] = 1.0,
+                    Outline::Ellipse => p[3] = 1.0,
+                    // `|a| = 1` at an angle that rounds shorter.
+                    _ => (p[2], p[3]) = (0.6, -0.8),
+                }
+            }
+        }
+        let mut snapped = layers.clone();
+        for layer in &mut snapped {
+            project(layer, TAN_PROJECTION);
+        }
+        let short = snapped
+            .iter()
+            .filter(|layer| layer.outline == Outline::RotatedEllipse)
+            .filter(|layer| {
+                let round = |v: f64| (v / QUANTUM).round() * QUANTUM;
+                round(layer.params[2]).hypot(round(layer.params[3])) < 1.0
+            })
+            .count();
+        assert!(
+            short >= 5,
+            "{short} rotated ellipses round shorter than 1 px"
+        );
+        let drawing = export(&scene, &snapped, &[], Color::new(0, 0, 0, 255));
+        for (layer, shape) in snapped.iter().zip(&drawing.shapes) {
+            check_curved(layer.outline, &shape.geometry);
+        }
+        run(
+            &scene,
+            &mut layers,
+            20,
+            true,
+            TAN_PROJECTION,
+            Tuning::default(),
+            &mut || false,
+        )
+        .expect("not cancelled");
+        let drawing = export(&scene, &layers, &[], Color::new(0, 0, 0, 255));
+        for (layer, shape) in layers.iter().zip(&drawing.shapes) {
+            check_curved(layer.outline, &shape.geometry);
+        }
+    }
+
+    /// By default B moves the greedy search's ellipses, circles and rotated
+    /// ellipses, keeps each a shape of its kind ([`check_curved`]: a circle
+    /// stays a circle and an axis-aligned ellipse axis-aligned), and lowers
+    /// its model's error; [`score`] takes the moved shapes back. With the
+    /// curved outlines switched off, the behaviour before they were the
+    /// default, every shape keeps its geometry bit for bit.
+    #[test]
+    fn curved_shapes_move_only_with_the_switch() {
+        let target = target(48, 40);
+        assert!(Settings::default().curved);
+        let off = Settings {
+            curved: false,
+            ..settings(20)
+        };
+        for (kind, outline) in [
+            (ShapeKind::Ellipse, Outline::Ellipse),
+            (ShapeKind::Circle, Outline::Circle),
+            (ShapeKind::RotatedEllipse, Outline::RotatedEllipse),
+        ] {
+            let model = greedy_kind(&target, 12, kind, Alpha::Auto);
+            let start = model.drawing();
+            let moved =
+                optimise(&model, Alpha::Auto, settings(20), || false).expect("not cancelled");
+            assert_eq!(
+                optimise(&model, Alpha::Auto, curved(20), || false).expect("not cancelled"),
+                moved
+            );
+            assert_eq!(moved.shapes.len(), start.shapes.len());
+            let changed = start
+                .shapes
+                .iter()
+                .zip(&moved.shapes)
+                .filter(|(before, after)| before.geometry != after.geometry)
+                .count();
+            assert!(changed >= 6, "{kind:?}: {changed} moved");
+            for shape in &moved.shapes {
+                check_curved(outline, &shape.geometry);
+            }
+            let (before, after) = (score(&model, &start), score(&model, &moved));
+            assert!(before.is_finite() && after.is_finite());
+            assert!(after < before, "{kind:?}: {before} -> {after}");
+
+            let fixed = optimise(&model, Alpha::Auto, off, || false).expect("not cancelled");
+            for (before, after) in start.shapes.iter().zip(&fixed.shapes) {
+                assert_eq!(before.geometry, after.geometry, "{kind:?}");
+            }
+            assert!(score(&model, &fixed).is_finite());
+        }
+    }
+
+    /// A drawing of every kind with the curved outlines switched on gives
+    /// the same result at 1, 2, 4 and 8 threads, and moves its curved
+    /// shapes; quadratics keep their geometry.
+    #[test]
+    fn a_curved_result_does_not_depend_on_the_thread_count() {
+        let target = target(120, 100);
+        let model = greedy_kind(&target, 16, ShapeKind::Any, Alpha::Auto);
+        let (_, background, history) = model.joint_parts();
+        let mut history = history.to_vec();
+        history[0].shape = Shape::Ellipse(crate::shapes::Ellipse {
+            x: 60,
+            y: 50,
+            rx: 70,
+            ry: 45,
+        });
+        history[1].shape = Shape::RotatedEllipse(crate::shapes::RotatedEllipse {
+            x: 50.5,
+            y: 40.25,
+            rx: 60.0,
+            ry: 20.0,
+            angle: 70.3,
+        });
+        history[2].shape = Shape::Circle(crate::shapes::Circle {
+            x: 30,
+            y: 70,
+            r: 55,
+        });
+        let run = |threads: usize| {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("pool");
+            pool.install(|| {
+                optimise_shapes(
+                    &target,
+                    background,
+                    &history,
+                    Alpha::Auto,
+                    curved(8),
+                    || false,
+                )
+            })
+            .expect("not cancelled")
+        };
+        let one = run(1);
+        for threads in [2, 4, 8] {
+            assert_eq!(run(threads), one, "{threads} threads");
+        }
+        let start = model.drawing();
+        for (index, committed) in history.iter().enumerate() {
+            let (before, after) = (&committed.shape.geometry(), &one.shapes[index].geometry);
+            match committed.shape {
+                Shape::Quadratic(_) => assert_eq!(before, after),
+                Shape::Ellipse(_) | Shape::Circle(_) | Shape::RotatedEllipse(_) if index < 3 => {
+                    assert_ne!(before, after, "layer {index}");
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(start.shapes.len(), one.shapes.len());
     }
 
     /// Without shapes, the score is the background's RMSE against the

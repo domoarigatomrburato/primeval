@@ -304,6 +304,12 @@ impl Model {
     ///   integer centre, sides and angle from the corners takes `atan2` and
     ///   `hypot`, which the arithmetic rule of [`crate::joint`] forbids.
     ///   Only the lab build recovers them, rounded, and lossy too;
+    /// - an ellipse, a circle or a rotated ellipse that moved (the joint
+    ///   optimisation's curved outlines, [`crate::joint::Settings::curved`])
+    ///   converts only in the lab build: an ellipse or a circle rounds to
+    ///   its integer centre and radii, lossy, a rotated ellipse takes the
+    ///   drawing's centre, radii and rotation exactly; a radius under 1 does
+    ///   not convert. The production build refuses it (`None`);
     /// - every other shape keeps its geometry, which the drawing must not
     ///   have moved.
     ///
@@ -1269,11 +1275,13 @@ mod tests {
             })
     }
 
-    /// The joint optimisation of `model` with no iterations: it only
-    /// projects, snaps and refits the colours.
+    /// The joint optimisation of `model` with the curved outlines switched
+    /// off and no iterations: it only projects, snaps and refits the
+    /// colours, and the curved shapes keep their geometry.
     fn snapped(model: &Model) -> Drawing {
         let settings = crate::joint::Settings {
             iterations: Some(0),
+            curved: false,
             ..crate::joint::Settings::default()
         };
         crate::joint::optimise(model, Alpha::Auto, settings, || false).expect("not cancelled")
@@ -1382,6 +1390,78 @@ mod tests {
         }
     }
 
+    /// The joint optimisation of `model` with the curved outlines switched
+    /// on and no iterations: it only projects, snaps and refits the
+    /// colours.
+    fn snapped_curved(model: &Model) -> Drawing {
+        let settings = crate::joint::Settings {
+            iterations: Some(0),
+            curved: true,
+            ..crate::joint::Settings::default()
+        };
+        crate::joint::optimise(model, Alpha::Auto, settings, || false).expect("not cancelled")
+    }
+
+    /// A joint result of ellipses, circles or rotated ellipses with the
+    /// curved outlines and no iterations adopts, in the lab build, as the
+    /// joint result's geometry: ellipses and circles keep their integer
+    /// centre and radii, which the quarter-pixel snap keeps, and rotated
+    /// ellipses take the joint result's continuous centre, radii and
+    /// angle. Each shape moved by a pixel adopts as moved. The canvas is
+    /// the exact replay of the adopted shapes. In the production build, a
+    /// drawing whose curved shapes moved is refused, and the model left as
+    /// it was.
+    #[test]
+    fn adopt_round_trips_a_curved_joint_result() {
+        use crate::Geometry;
+
+        let kinds = [
+            ShapeKind::Ellipse,
+            ShapeKind::Circle,
+            ShapeKind::RotatedEllipse,
+        ];
+        for (index, kind) in kinds.into_iter().enumerate() {
+            for size in [SMALL, (41, 33)] {
+                let context = format!("{kind:?} on {size:?}");
+                let original = stepped_model(index as u64, size, kind, 6);
+                let before = original.drawing();
+                let joint = snapped_curved(&original);
+                let mut moved = joint.clone();
+                for shape in &mut moved.shapes {
+                    let Geometry::Ellipse { cx, .. } = &mut shape.geometry else {
+                        panic!("{context}: not an ellipse: {shape:?}");
+                    };
+                    *cx += 1.0;
+                }
+                if !cfg!(feature = "lab") {
+                    let mut model = original.clone();
+                    assert_eq!(model.adopt(&moved, true), None, "{context}");
+                    assert_unchanged(&model, &original, &context);
+                    continue;
+                }
+                for (drawing, label) in [(&joint, "snapped"), (&moved, "moved")] {
+                    let context = format!("{context}, {label}");
+                    let mut model = original.clone();
+                    assert_eq!(model.adopt(drawing, true), Some(true), "{context}");
+                    let after = model.drawing();
+                    assert_eq!(after.shapes.len(), before.shapes.len(), "{context}");
+                    for (layer, adopted) in after.shapes.iter().enumerate() {
+                        let expected = &drawing.shapes[layer];
+                        assert_eq!(adopted, expected, "{context}: layer {layer}");
+                        if label == "snapped" && kind != ShapeKind::RotatedEllipse {
+                            assert_eq!(
+                                adopted.geometry, before.shapes[layer].geometry,
+                                "{context}: layer {layer}"
+                            );
+                        }
+                    }
+                    assert!(every_shape_is_valid(&model), "{context}");
+                    assert_consistent(&model, &context);
+                }
+            }
+        }
+    }
+
     /// Without `force`, a drawing that repaints further from the target is
     /// not kept, and the model is left exactly as it was.
     #[test]
@@ -1470,12 +1550,29 @@ mod tests {
         refused(&rotated, &thin, "a rotated side that rounds to 0");
 
         let ellipses = stepped_model(2, SMALL, ShapeKind::Ellipse, 4);
-        let mut moved = snapped(&ellipses);
-        let Geometry::Ellipse { cx, .. } = &mut moved.shapes[2].geometry else {
-            panic!("not an ellipse");
-        };
-        *cx += 1.0;
-        refused(&ellipses, &moved, "a fixed shape that moved");
+        // The lab build converts a moved ellipse
+        // (`adopt_round_trips_a_curved_joint_result`).
+        if !cfg!(feature = "lab") {
+            let mut moved = snapped(&ellipses);
+            let Geometry::Ellipse { cx, .. } = &mut moved.shapes[2].geometry else {
+                panic!("not an ellipse");
+            };
+            *cx += 1.0;
+            refused(&ellipses, &moved, "a fixed shape that moved");
+        }
+        for kind in [
+            ShapeKind::Ellipse,
+            ShapeKind::Circle,
+            ShapeKind::RotatedEllipse,
+        ] {
+            let model = stepped_model(2, SMALL, kind, 4);
+            let mut thin = snapped(&model);
+            let Geometry::Ellipse { rx, ry, .. } = &mut thin.shapes[1].geometry else {
+                panic!("not an ellipse");
+            };
+            (*rx, *ry) = (0.4, 0.4);
+            refused(&model, &thin, &format!("{kind:?}: a radius under 1"));
+        }
     }
 
     /// Adopting leaves the refit pass index alone: the next pass draws the

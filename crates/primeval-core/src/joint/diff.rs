@@ -8,8 +8,10 @@
 //! square clipped to the inside of its cutting edges where two or more do,
 //! near a vertex; an axis-aligned rectangle, covered by the product of its
 //! four sides' box-filtered half-planes, which for an axis-aligned box is
-//! its exact pixel area; or a fixed layer, covered by a [`Mask`] that does
-//! not move.
+//! its exact pixel area; a circle or an ellipse, rotated or not, covered
+//! by the box-filtered half-plane of its boundary taken as locally
+//! straight at each pixel ([`Prepared::conic_coverage_grad`]); or a fixed
+//! layer, covered by a [`Mask`] that does not move.
 //!
 //! Coordinates are the engine's: the centre of pixel `(i, j)` is `(i, j)`,
 //! so a vertex `v` is the drawing's `v + 0.5`.
@@ -36,6 +38,9 @@ pub(super) trait Real:
 {
     fn of(value: f64) -> Self;
     fn get(self) -> f64;
+    /// The square root, which IEEE 754 rounds exactly.
+    fn sqrt(self) -> Self;
+    fn abs(self) -> Self;
 }
 
 impl Real for f32 {
@@ -47,6 +52,14 @@ impl Real for f32 {
     fn get(self) -> f64 {
         f64::from(self)
     }
+    #[inline]
+    fn sqrt(self) -> Self {
+        f32::sqrt(self)
+    }
+    #[inline]
+    fn abs(self) -> Self {
+        f32::abs(self)
+    }
 }
 
 impl Real for f64 {
@@ -57,6 +70,14 @@ impl Real for f64 {
     #[inline]
     fn get(self) -> f64 {
         self
+    }
+    #[inline]
+    fn sqrt(self) -> Self {
+        f64::sqrt(self)
+    }
+    #[inline]
+    fn abs(self) -> Self {
+        f64::abs(self)
     }
 }
 
@@ -90,19 +111,33 @@ pub(super) enum Outline {
     /// along `u`'s perpendicular, parameters `cx, cy, ux, uy, h`: its
     /// corners are `c ± u ± (h / |u|) · (−u_y, u_x)` ([`Layer::corners`]).
     Rotated,
+    /// A circle of centre `c` and radius `r`, parameters `cx, cy, r`.
+    Circle,
+    /// An axis-aligned ellipse of centre `c` and radii `rx` along `x` and
+    /// `ry` along `y`, parameters `cx, cy, rx, ry`.
+    Ellipse,
+    /// An ellipse of centre `c`, semi-axis vector `a` and other semi-axis
+    /// `b` along `a`'s perpendicular, parameters `cx, cy, ax, ay, b`: no
+    /// angle, so no trigonometry, as a rotated rectangle's `c, u, h`.
+    RotatedEllipse,
     /// A fixed shape: the [`Scene::masks`] entry of this index, which does
     /// not move; only its opacity and colour are optimised.
     Fixed(usize),
 }
 
 impl Outline {
-    /// The number of edges, `0` for a fixed layer.
+    /// The number of edges, `0` for a curved or a fixed layer.
     pub(super) fn sides(self) -> usize {
         match self {
             Self::Triangle => 3,
             Self::Quad | Self::Rect | Self::Rotated => 4,
-            Self::Fixed(_) => 0,
+            Self::Circle | Self::Ellipse | Self::RotatedEllipse | Self::Fixed(_) => 0,
         }
+    }
+
+    /// Whether the outline is a circle or an ellipse, rotated or not.
+    pub(super) fn curved(self) -> bool {
+        matches!(self, Self::Circle | Self::Ellipse | Self::RotatedEllipse)
     }
 
     /// The number of geometric parameters, `0` for a fixed layer.
@@ -110,8 +145,9 @@ impl Outline {
         match self {
             Self::Triangle => 6,
             Self::Quad => 8,
-            Self::Rect => 4,
-            Self::Rotated => 5,
+            Self::Rect | Self::Ellipse => 4,
+            Self::Rotated | Self::RotatedEllipse => 5,
+            Self::Circle => 3,
             Self::Fixed(_) => 0,
         }
     }
@@ -147,12 +183,18 @@ impl Layer {
     /// quadrilateral's parameters; a rectangle's corners `(x0, y0)`,
     /// `(x1, y0)`, `(x1, y1)`, `(x0, y1)`; a rotated rectangle's
     /// `c − u − n`, `c + u − n`, `c + u + n` and `c − u + n`, with
-    /// `n = (h / |u|) · (−u_y, u_x)`, by `sqrt` alone. All zero for a fixed
-    /// layer.
+    /// `n = (h / |u|) · (−u_y, u_x)`, by `sqrt` alone. The parameters
+    /// themselves for a curved layer, which has no corners, and all zero
+    /// for a fixed layer.
     pub(super) fn corners(&self) -> [f64; COORDS] {
         let p = self.params;
         match self.outline {
-            Outline::Triangle | Outline::Quad | Outline::Fixed(_) => p,
+            Outline::Triangle
+            | Outline::Quad
+            | Outline::Circle
+            | Outline::Ellipse
+            | Outline::RotatedEllipse
+            | Outline::Fixed(_) => p,
             Outline::Rect => [p[0], p[1], p[2], p[1], p[2], p[3], p[0], p[3]],
             Outline::Rotated => {
                 let [cx, cy, ux, uy, h, ..] = p;
@@ -172,6 +214,19 @@ impl Layer {
         }
     }
 
+    /// A curved layer's centre `cx, cy`, semi-axis vector `ax, ay` and other
+    /// semi-axis `b`: a circle's `a` is `(r, 0)` and its `b` is `r`, an
+    /// axis-aligned ellipse's `a` is `(rx, 0)` and its `b` is `ry`.
+    pub(super) fn conic(&self) -> [f64; 5] {
+        let p = self.params;
+        match self.outline {
+            Outline::Circle => [p[0], p[1], p[2], 0.0, p[2]],
+            Outline::Ellipse => [p[0], p[1], p[2], 0.0, p[3]],
+            Outline::RotatedEllipse => [p[0], p[1], p[2], p[3], p[4]],
+            outline => panic!("not a curved outline: {outline:?}"),
+        }
+    }
+
     /// The gradient with respect to the parameters, from `grad`, with
     /// respect to the [`Self::corners`] (and the opacity, which passes
     /// through). The same for every outline but a rotated rectangle's,
@@ -179,7 +234,38 @@ impl Layer {
     /// `∂n/∂h = (−u_y, u_x) / |u|` and
     /// `∂n/∂u = (h / |u|³) · [[u_x u_y, −u_x²], [u_y², −u_x u_y]]`
     /// (rows `n_x`, `n_y`; columns `u_x`, `u_y`).
+    ///
+    /// A curved layer's coverage has its gradient with respect to the
+    /// centre, the length `ra = |a|` of its semi-axis vector, the angle `φ`
+    /// of that vector and the other semi-axis `b` ([`Layer::conic`],
+    /// [`Prepared::conic_coverage_grad`]): a circle's radius is both `ra`
+    /// and `b`, an axis-aligned ellipse's `rx` is `ra` and its `ry` is `b`,
+    /// and a rotated ellipse's `a` moves `ra` along `â = a / ra` and `φ`
+    /// along `â⊥ / ra`, with `â⊥ = (−â_y, â_x)`.
     fn chain(&self, grad: [f64; PARAMS]) -> [f64; PARAMS] {
+        if self.outline.curved() {
+            let mut out = [0.0; PARAMS];
+            let [centre_x, centre_y, along, turn, across, ..] = grad;
+            out[0] = centre_x;
+            out[1] = centre_y;
+            match self.outline {
+                Outline::Circle => out[2] = along + across,
+                Outline::Ellipse => {
+                    out[2] = sign(self.params[2]) * along;
+                    out[3] = across;
+                }
+                _ => {
+                    let [_, _, ax, ay, ..] = self.params;
+                    let ra = (ax * ax + ay * ay).sqrt().max(1e-9);
+                    let (ux, uy) = (ax / ra, ay / ra);
+                    out[2] = ux * along - uy * turn / ra;
+                    out[3] = uy * along + ux * turn / ra;
+                    out[4] = across;
+                }
+            }
+            out[ALPHA] = grad[ALPHA];
+            return out;
+        }
         if self.outline != Outline::Rotated {
             return grad;
         }
@@ -325,19 +411,43 @@ enum Kind {
     Quad,
     /// An axis-aligned rectangle's four sides.
     Box,
+    /// A circle or an ellipse, rotated or not.
+    Curved,
 }
 
 impl Kind {
     /// The number of gradient entries its coverage has: the vertex
-    /// coordinates of the edges, or a rectangle's four parameters.
+    /// coordinates of the edges, a rectangle's four parameters, or a
+    /// curved layer's centre, `ra`, `φ` and `b` ([`Layer::chain`]).
     fn coords(self) -> usize {
         match self {
             Self::Masked => 0,
             Self::Triangle => 6,
             Self::Quad => 8,
             Self::Box => 4,
+            Self::Curved => 5,
         }
     }
+}
+
+/// A curved layer ready to cover pixels ([`Prepared::conic_coverage`]):
+/// its centre, the unit vector `â = a / ra` along its semi-axis vector,
+/// the inverses of its semi-axes `ra` and `b`, the shorter of the two, the
+/// square of the radius of the disc about the centre that covers whole
+/// pixels (negative if none does), and the filter width and its reach,
+/// `filter · 0.7072`.
+#[derive(Clone, Copy, Default)]
+struct Conic<F> {
+    cx: F,
+    cy: F,
+    ux: F,
+    uy: F,
+    inv_ra: F,
+    inv_b: F,
+    shorter: F,
+    inner2: F,
+    filter: F,
+    reach: F,
 }
 
 /// A layer ready to composite: the edges of a triangle or a quadrilateral
@@ -352,6 +462,8 @@ pub(super) struct Prepared<'a, F> {
     /// An axis-aligned rectangle's `x0, y0, x1, y1`, then `1 / filter`;
     /// zero for the others.
     rect: [F; 5],
+    /// A curved layer's ellipse; zero for the others.
+    conic: Conic<F>,
     /// A fixed layer's coverage over the bounding box, row-major; empty
     /// for the others.
     mask: &'a [F],
@@ -388,6 +500,29 @@ struct Clipped<F> {
 }
 
 impl<F: Real> Edge<F> {
+    /// An edge that holds only its ramp, [`Self::cdf`] and
+    /// [`Self::cdf_grad`], for the filter square projected on a normal
+    /// whose widths are `wide ≥ narrow`, as [`Prepared::new`] computes an
+    /// edge's: a `narrow` below `1e-6` counts as `0`.
+    #[inline]
+    fn ramp(wide: F, narrow: F) -> Self {
+        let (zero, one, half) = (F::of(0.0), F::of(1.0), F::of(0.5));
+        let narrow = if narrow < F::of(1e-6) { zero } else { narrow };
+        let (inv_2ab, inv_narrow) = if narrow > zero {
+            (half / (wide * narrow), one / narrow)
+        } else {
+            (zero, zero)
+        };
+        Self {
+            half_sum: (wide + narrow) * half,
+            half_diff: (wide - narrow) * half,
+            inv_wide: one / wide,
+            inv_2ab,
+            inv_narrow,
+            ..Self::default()
+        }
+    }
+
     #[inline]
     fn distance(&self, x: F, y: F) -> F {
         self.nx * x + self.ny * y + self.c
@@ -503,12 +638,16 @@ impl<'a, F: Real> Prepared<'a, F> {
             Outline::Triangle => Kind::Triangle,
             Outline::Quad | Outline::Rotated => Kind::Quad,
             Outline::Rect => Kind::Box,
+            Outline::Circle | Outline::Ellipse | Outline::RotatedEllipse => {
+                return Self::curved(layer, scene, opacity, color);
+            }
             Outline::Fixed(index) => {
                 let mask = &scene.masks[index];
                 return Self {
                     kind: Kind::Masked,
                     edges: [Edge::default(); 4],
                     rect: [F::of(0.0); 5],
+                    conic: Conic::default(),
                     mask: &mask.coverage,
                     half: F::of(0.0),
                     inv_area: F::of(0.0),
@@ -537,6 +676,7 @@ impl<'a, F: Real> Prepared<'a, F> {
                 kind,
                 edges: [Edge::default(); 4],
                 rect: [p[0], p[1], p[2], p[3], 1.0 / filter].map(F::of),
+                conic: Conic::default(),
                 mask: &[],
                 half: F::of(0.0),
                 inv_area: F::of(0.0),
@@ -645,9 +785,69 @@ impl<'a, F: Real> Prepared<'a, F> {
             kind,
             edges,
             rect: [F::of(0.0); 5],
+            conic: Conic::default(),
             mask: &[],
             half: F::of(filter / 2.0),
             inv_area: F::of(1.0 / (filter * filter)),
+            x0,
+            x1,
+            y0,
+            y1,
+            opacity,
+            color,
+        }
+    }
+
+    /// A curved layer, ready to composite: its [`Conic`], and its bounding
+    /// box, the ellipse's expanded by the reach `filter · 0.7072` beyond
+    /// which a pixel centre's filter square cannot meet it, as for the
+    /// edges. The ellipse of centre `c`, semi-axis vector `a` and other
+    /// semi-axis `b` has half-extents `√(a_x² + (b a_y / |a|)²)` along `x`
+    /// and `√(a_y² + (b a_x / |a|)²)` along `y`. A layer with a semi-axis
+    /// of `1e-9` or less covers nothing.
+    fn curved(layer: &Layer, scene: &'a Scene<F>, opacity: F, color: [F; 3]) -> Self {
+        let filter = scene.filter;
+        let reach = filter * 0.707_2;
+        let [cx, cy, ax, ay, b] = layer.conic();
+        let ra = (ax * ax + ay * ay).sqrt();
+        let visible = ra > 1e-9 && b > 1e-9;
+        let (ra, b) = (ra.max(1e-9), b.max(1e-9));
+        let (ux, uy) = (ax / ra, ay / ra);
+        let half_x = (ax * ax + (b * uy) * (b * uy)).sqrt();
+        let half_y = (ay * ay + (b * ux) * (b * ux)).sqrt();
+        let span = |centre: f64, half: f64, size: usize| {
+            let start = (centre - half - reach).ceil().max(0.0);
+            let end = ((centre + half + reach).floor() + 1.0).min(size as f64);
+            (start < end).then_some((start as usize, end as usize))
+        };
+        let (x0, x1, y0, y1) = match (
+            span(cx, half_x, scene.width),
+            span(cy, half_y, scene.height),
+        ) {
+            (Some((x0, x1)), Some((y0, y1))) if visible => (x0, x1, y0, y1),
+            _ => (0, 0, 0, 0),
+        };
+        let shorter = ra.min(b);
+        let inner = shorter - reach;
+        Self {
+            kind: Kind::Curved,
+            edges: [Edge::default(); 4],
+            rect: [F::of(0.0); 5],
+            conic: Conic {
+                cx: F::of(cx),
+                cy: F::of(cy),
+                ux: F::of(ux),
+                uy: F::of(uy),
+                inv_ra: F::of(1.0 / ra),
+                inv_b: F::of(1.0 / b),
+                shorter: F::of(shorter),
+                inner2: F::of(if inner > 0.0 { inner * inner } else { -1.0 }),
+                filter: F::of(filter),
+                reach: F::of(reach),
+            },
+            mask: &[],
+            half: F::of(0.0),
+            inv_area: F::of(0.0),
             x0,
             x1,
             y0,
@@ -671,6 +871,7 @@ impl<'a, F: Real> Prepared<'a, F> {
             Kind::Triangle => Edges::<3>::cover(self, x, y, fy),
             Kind::Quad => Edges::<4>::cover(self, x, y, fy),
             Kind::Box => Boxed::cover(self, x, y, fy),
+            Kind::Curved => Curved::cover(self, x, y, fy),
         }
     }
 
@@ -682,6 +883,7 @@ impl<'a, F: Real> Prepared<'a, F> {
             Kind::Triangle => self.edge_coverage::<3>(x, y),
             Kind::Quad => self.edge_coverage::<4>(x, y),
             Kind::Box => self.box_coverage(x, y),
+            Kind::Curved => self.conic_coverage(x, y),
             Kind::Masked => panic!("a mask has no edges"),
         }
     }
@@ -769,6 +971,159 @@ impl<'a, F: Real> Prepared<'a, F> {
             1 => self.edges[last].cdf(d[last]),
             _ => self.clip(&d).coverage(self.inv_area),
         }
+    }
+
+    /// The coverage of the pixel centred at `(x, y)` by a curved layer, as
+    /// [`Self::conic_coverage_grad`] computes it.
+    #[inline]
+    fn conic_coverage(&self, x: F, y: F) -> F {
+        let c = &self.conic;
+        let (zero, one) = (F::of(0.0), F::of(1.0));
+        let (dx, dy) = (x - c.cx, y - c.cy);
+        if dx * dx + dy * dy <= c.inner2 {
+            return one;
+        }
+        let (p1, p2) = (dx * c.ux + dy * c.uy, dy * c.ux - dx * c.uy);
+        let (q1, q2) = (p1 * c.inv_ra, p2 * c.inv_b);
+        let a = q1 * q1 + q2 * q2;
+        let r = a.sqrt();
+        if r < F::of(1e-9) {
+            return Edge::ramp(c.filter, zero).cdf(c.shorter);
+        }
+        let (alpha, beta) = (q1 * c.inv_ra, q2 * c.inv_b);
+        let g = (alpha * alpha + beta * beta).sqrt();
+        let d = (r - a) / g;
+        if d <= -c.reach {
+            return zero;
+        }
+        if d >= c.reach {
+            return one;
+        }
+        let inv_g = one / g;
+        let (mx, my) = (alpha * c.ux - beta * c.uy, alpha * c.uy + beta * c.ux);
+        let (u, w) = (c.filter * mx.abs() * inv_g, c.filter * my.abs() * inv_g);
+        let edge = if u >= w {
+            Edge::ramp(u, w)
+        } else {
+            Edge::ramp(w, u)
+        };
+        edge.cdf(d)
+    }
+
+    /// The coverage of the pixel centred at `p = (x, y)` by a curved layer
+    /// and its gradient with respect to the centre `c`, the length `ra` of
+    /// the semi-axis vector `a`, its angle `φ` and the other semi-axis `b`
+    /// (entries `0..5`; [`Layer::chain`] turns them into the outline's
+    /// parameters), or `None` where the coverage is zero.
+    ///
+    /// In the ellipse's frame, `p − c` has the coordinates
+    /// `p₁ = (p − c) · â` and `p₂ = (p − c) · â⊥`, with `â = a / ra` and
+    /// `â⊥ = (−â_y, â_x)`, and the ellipse is `r ≤ 1` with `q = (p₁ / ra,
+    /// p₂ / b)` and `r = |q|`. Its boundary is taken as locally straight:
+    /// the signed distance, positive inside, is `d = (1 − r) / |∇r|`, with
+    /// `∇r = (α â + β â⊥) / r`, `α = q₁ / ra`, `β = q₂ / b`, so
+    /// `|∇r| = G / r` with `G = √(α² + β²)` and `d = (r − r²) / G`, exact
+    /// for a circle; the normal is `n = (α â + β â⊥) / G`. The coverage is
+    /// the edge ramp `F(d)` ([`Edge::cdf`]) of the filter square projected
+    /// on `n`, of widths `filter · |n_x|` and `filter · |n_y|`. At the
+    /// centre (`r < 1e-9`), `d` is the shorter semi-axis and `n` is `x`.
+    /// Pixels within the shorter semi-axis less the reach `filter · 0.7072`
+    /// of the centre are covered whole, with no gradient.
+    ///
+    /// The gradient is the exact derivative of that coverage,
+    /// `∂F/∂d · ∂d + ∂F/∂wide · ∂wide + ∂F/∂narrow · ∂narrow`
+    /// ([`Edge::cdf_grad`]), through `p₁`, `p₂` (`∂p₁/∂(p − c) = â`,
+    /// `∂p₂/∂(p − c) = â⊥`, `∂p₁/∂φ = p₂`, `∂p₂/∂φ = −p₁`, neither moves
+    /// with `ra`), `q`, `α`, `β` and `â`, `â⊥` (`∂â/∂φ = â⊥`,
+    /// `∂â⊥/∂φ = −â`), into `d` and the widths through `n`.
+    #[inline]
+    fn conic_coverage_grad(&self, x: F, y: F) -> Option<(F, [F; COORDS])> {
+        let c = &self.conic;
+        let (zero, one, two) = (F::of(0.0), F::of(1.0), F::of(2.0));
+        let mut grad = [zero; COORDS];
+        let (dx, dy) = (x - c.cx, y - c.cy);
+        if dx * dx + dy * dy <= c.inner2 {
+            return Some((one, grad));
+        }
+        let (ux, uy) = (c.ux, c.uy);
+        let (p1, p2) = (dx * ux + dy * uy, dy * ux - dx * uy);
+        let (ira, ib) = (c.inv_ra, c.inv_b);
+        let (q1, q2) = (p1 * ira, p2 * ib);
+        let a = q1 * q1 + q2 * q2;
+        let r = a.sqrt();
+        if r < F::of(1e-9) {
+            // `d` is the shorter semi-axis, `n` is `x`: the widths do not
+            // move.
+            let value = Edge::ramp(c.filter, zero).cdf_grad(c.shorter);
+            if value.f <= zero {
+                return None;
+            }
+            let shorter = if ira >= ib { 2 } else { 4 };
+            grad[shorter] = value.fd;
+            return Some((value.f, grad));
+        }
+        let (alpha, beta) = (q1 * ira, q2 * ib);
+        let g = (alpha * alpha + beta * beta).sqrt();
+        let d = (r - a) / g;
+        if d <= -c.reach {
+            return None;
+        }
+        if d >= c.reach {
+            return Some((one, grad));
+        }
+        let inv_g = one / g;
+        let (mx, my) = (alpha * ux - beta * uy, alpha * uy + beta * ux);
+        let (u, w) = (c.filter * mx.abs() * inv_g, c.filter * my.abs() * inv_g);
+        let edge = if u >= w {
+            Edge::ramp(u, w)
+        } else {
+            Edge::ramp(w, u)
+        };
+        if d <= -edge.half_sum {
+            return None;
+        }
+        if d >= edge.half_sum {
+            return Some((one, grad));
+        }
+        let value = edge.cdf_grad(d);
+        // The partials of `q₁`, `q₂`, `α` and `β` with respect to
+        // `p − c`, `ra`, `φ` and `b`, in that order.
+        let (ira2, ib2) = (ira * ira, ib * ib);
+        let dq1 = [ux * ira, uy * ira, -q1 * ira, p2 * ira, zero];
+        let dq2 = [-uy * ib, ux * ib, zero, -p1 * ib, -q2 * ib];
+        let dalpha = [ux * ira2, uy * ira2, -two * alpha * ira, p2 * ira2, zero];
+        let dbeta = [-uy * ib2, ux * ib2, zero, -p1 * ib2, -two * beta * ib];
+        // `∂d = (1/r − 2) / G · (q₁ ∂q₁ + q₂ ∂q₂) − d / G² · (α ∂α + β ∂β)`.
+        let (k_r, k_g) = ((one / r - two) * inv_g, d * inv_g * inv_g);
+        // `∂n = (∂m |m|² − m (m · ∂m)) / |m|³` for `m = (mx, my)`, `|m| = G`.
+        let inv_g3 = inv_g * inv_g * inv_g;
+        let sign = |v: F| if v < zero { -c.filter } else { c.filter };
+        let (sx, sy) = (sign(mx), sign(my));
+        let wide_is_u = u >= w;
+        let narrow_counts = edge.inv_narrow > zero;
+        for k in 0..5 {
+            let dd =
+                k_r * (q1 * dq1[k] + q2 * dq2[k]) - k_g * (alpha * dalpha[k] + beta * dbeta[k]);
+            let (mut dmx, mut dmy) = (
+                dalpha[k] * ux - dbeta[k] * uy,
+                dalpha[k] * uy + dbeta[k] * ux,
+            );
+            if k == 3 {
+                dmx += -alpha * uy - beta * ux;
+                dmy += alpha * ux - beta * uy;
+            }
+            let du = sx * (my * my * dmx - mx * my * dmy) * inv_g3;
+            let dw = sy * (mx * mx * dmy - mx * my * dmx) * inv_g3;
+            let (dwide, dnarrow) = if wide_is_u { (du, dw) } else { (dw, du) };
+            let mut total = value.fd * dd + value.fa * dwide;
+            if narrow_counts {
+                total += value.fb * dnarrow;
+            }
+            grad[k] = total;
+        }
+        grad[0] = -grad[0];
+        grad[1] = -grad[1];
+        Some((value.f, grad))
     }
 
     /// The number of the first `N` edges whose reach holds the filter
@@ -1006,6 +1361,29 @@ impl Cover for Boxed {
 /// The exact area of a polygon of `N` edges in the filter square.
 struct Edges<const N: usize>;
 
+/// A circle or an ellipse, rotated or not, its boundary locally straight
+/// ([`Prepared::conic_coverage_grad`]).
+struct Curved;
+
+impl Cover for Curved {
+    #[inline]
+    fn cover<F: Real>(layer: &Prepared<'_, F>, x: usize, _y: usize, fy: F) -> F {
+        layer.conic_coverage(F::of(x as f64), fy)
+    }
+
+    #[inline]
+    fn cover_grad<F: Real>(
+        layer: &Prepared<'_, F>,
+        x: usize,
+        _y: usize,
+        fy: F,
+    ) -> Option<(F, Option<[F; COORDS]>)> {
+        layer
+            .conic_coverage_grad(F::of(x as f64), fy)
+            .map(|(cov, grad)| (cov, Some(grad)))
+    }
+}
+
 impl Cover for Masked {
     #[inline]
     fn cover<F: Real>(layer: &Prepared<'_, F>, x: usize, y: usize, _fy: F) -> F {
@@ -1062,6 +1440,10 @@ macro_rules! by_cover {
             }
             Kind::Box => {
                 type $cover = Boxed;
+                $call
+            }
+            Kind::Curved => {
+                type $cover = Curved;
                 $call
             }
         }
@@ -1473,7 +1855,8 @@ fn run<F: Real>(
 /// respect to its parameters ([`Outline`]) and its opacity, the colours
 /// held constant: zero for the parameters a layer does not use, every one
 /// of a fixed layer's among them. A rotated rectangle's comes from its
-/// corners' ([`Layer::chain`]).
+/// corners', a curved layer's from its centre, `ra`, `φ` and `b`
+/// ([`Layer::chain`]).
 pub(super) fn gradients<F: Real>(
     scene: &Scene<F>,
     layers: &[Layer],
@@ -1774,6 +2157,32 @@ pub(super) mod tests {
             .collect()
     }
 
+    /// Random circles, axis-aligned and rotated ellipses in a canvas of
+    /// `size`, `count` of each, with radii in `radii`, either the longer,
+    /// at random angles.
+    pub(in crate::joint) fn random_conics(
+        rng: &mut ChaCha8Rng,
+        count: usize,
+        size: f64,
+        radii: std::ops::Range<f64>,
+    ) -> Vec<Layer> {
+        let mut layers = Vec::new();
+        for outline in [Outline::Circle, Outline::Ellipse, Outline::RotatedEllipse] {
+            for _ in 0..count {
+                let centre = (rng.random_range(0.0..size), rng.random_range(0.0..size));
+                let r = (
+                    rng.random_range(radii.clone()),
+                    rng.random_range(radii.clone()),
+                );
+                let mut layer = tests::conic(outline, centre, r, rng.random_range(-180.0..180.0));
+                layer.alpha = rng.random_range(40.0..250.0);
+                layer.color = std::array::from_fn(|_| rng.random_range(0.0..255.0));
+                layers.push(layer);
+            }
+        }
+        layers
+    }
+
     /// A random mask on a `width × height` canvas: a box partly off the
     /// canvas clipped to it, with pixels uncovered, covered and partly
     /// covered.
@@ -1961,6 +2370,32 @@ pub(super) mod tests {
             let aligned = gradients(&scene, &layers, &mut Workspace::default())[2];
             assert!(aligned[..4].iter().all(|&g| g != 0.0), "{aligned:?}");
             assert!(checked >= count * 6, "seed {seed}: {checked} checked");
+            assert!(worst < 1e-3, "seed {seed}: worst {worst}");
+            assert!(overall < 1e-4, "seed {seed}: overall {overall}");
+        }
+    }
+
+    /// The same with circles, axis-aligned and rotated ellipses of radii
+    /// from 2 to 20 px, either the longer, at random angles: the gradient
+    /// is the exact derivative of the local-straight coverage
+    /// ([`Prepared::conic_coverage_grad`]), the widths' terms included.
+    /// Measured: a worst relative error of 2.8e-7 and an overall one of
+    /// 7.4e-9; without the widths' terms, 1.2% and 0.3%.
+    #[test]
+    fn analytic_gradients_of_curved_outlines_match_finite_differences() {
+        for (seed, count, filter) in [
+            (41, 2, 1.0),
+            (42, 3, 1.0),
+            (43, 4, 1.0),
+            (44, 3, 1.6),
+            (45, 4, 2.0),
+        ] {
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
+            let mut scene = random_scene::<f64>(&mut rng, 32, 32);
+            scene.filter = filter;
+            let layers = random_conics(&mut rng, count, 32.0, 2.0..20.0);
+            let (worst, overall, checked) = gradient_check(&scene, &layers);
+            assert!(checked >= count * 9, "seed {seed}: {checked} checked");
             assert!(worst < 1e-3, "seed {seed}: worst {worst}");
             assert!(overall < 1e-4, "seed {seed}: overall {overall}");
         }
@@ -2275,6 +2710,233 @@ pub(super) mod tests {
         }
     }
 
+    /// A circle, an axis-aligned ellipse or a rotated ellipse (`outline`)
+    /// of centre `centre` and radii `rx` along the direction at `degrees`
+    /// and `ry` across it, built with the platform's trigonometry; a
+    /// circle takes `rx`, an axis-aligned ellipse ignores `degrees`.
+    pub(in crate::joint) fn conic(
+        outline: Outline,
+        centre: (f64, f64),
+        (rx, ry): (f64, f64),
+        degrees: f64,
+    ) -> Layer {
+        let mut params = [0.0; COORDS];
+        params[0] = centre.0;
+        params[1] = centre.1;
+        match outline {
+            Outline::Circle => params[2] = rx,
+            Outline::Ellipse => {
+                params[2] = rx;
+                params[3] = ry;
+            }
+            Outline::RotatedEllipse => {
+                let (sin, cos) = degrees.to_radians().sin_cos();
+                params[2] = rx * cos;
+                params[3] = rx * sin;
+                params[4] = ry;
+            }
+            _ => panic!("not a curved outline: {outline:?}"),
+        }
+        Layer {
+            outline,
+            params,
+            alpha: 255.0,
+            color: [255.0; 3],
+        }
+    }
+
+    /// The centre, the semi-axis vector `a` and the other semi-axis `b` of
+    /// a curved layer, read independently of the model.
+    fn conic_axes(layer: &Layer) -> ((f64, f64), (f64, f64), f64) {
+        let p = layer.params;
+        let centre = (p[0], p[1]);
+        match layer.outline {
+            Outline::Circle => (centre, (p[2], 0.0), p[2]),
+            Outline::Ellipse => (centre, (p[2], 0.0), p[3]),
+            Outline::RotatedEllipse => (centre, (p[2], p[3]), p[4]),
+            outline => panic!("not a curved outline: {outline:?}"),
+        }
+    }
+
+    /// Where the pixel square centred at `(x, y)` lies against the ellipse
+    /// of `layer`, and how much of it the ellipse covers: `Some(1.0)` if
+    /// the square is wholly inside, `Some(0.0)` if wholly outside, both
+    /// exact; `None` for a pixel the boundary crosses.
+    ///
+    /// The ellipse becomes the unit disc in its own frame, rotated by the
+    /// platform's `atan2`, `sin` and `cos` and scaled by its radii, and the
+    /// square a parallelogram: inside if its four corners are in the disc,
+    /// outside if the origin is outside it and further than 1 from each of
+    /// its sides.
+    fn conic_class(layer: &Layer, x: f64, y: f64) -> Option<f64> {
+        let frame = conic_frame(layer);
+        let corners =
+            [(-0.5, -0.5), (0.5, -0.5), (0.5, 0.5), (-0.5, 0.5)].map(|(u, v)| frame(x + u, y + v));
+        if corners.iter().all(|&(u, v)| u * u + v * v <= 1.0) {
+            return Some(1.0);
+        }
+        let cross = |p: (f64, f64), q: (f64, f64)| p.0 * q.1 - p.1 * q.0;
+        let sides: [f64; 4] = std::array::from_fn(|k| {
+            let (p, q) = (corners[k], corners[(k + 1) % 4]);
+            cross((q.0 - p.0, q.1 - p.1), (-p.0, -p.1))
+        });
+        let contains = sides.iter().all(|&s| s >= 0.0) || sides.iter().all(|&s| s <= 0.0);
+        let far = (0..4).all(|k| {
+            let (p, q) = (corners[k], corners[(k + 1) % 4]);
+            let (ex, ey) = (q.0 - p.0, q.1 - p.1);
+            let t = (-(p.0 * ex + p.1 * ey) / (ex * ex + ey * ey)).clamp(0.0, 1.0);
+            (p.0 + t * ex).hypot(p.1 + t * ey) > 1.0
+        });
+        (!contains && far).then_some(0.0)
+    }
+
+    /// The map of the canvas to the frame of `layer`'s ellipse, where it is
+    /// the unit disc, with the platform's trigonometry.
+    fn conic_frame(layer: &Layer) -> impl Fn(f64, f64) -> (f64, f64) {
+        let (centre, a, b) = conic_axes(layer);
+        let (ra, angle) = (a.0.hypot(a.1), a.1.atan2(a.0));
+        let (sin, cos) = angle.sin_cos();
+        move |x, y| {
+            let (dx, dy) = (x - centre.0, y - centre.1);
+            ((dx * cos + dy * sin) / ra, (dy * cos - dx * sin) / b)
+        }
+    }
+
+    /// The fraction of `n × n` points evenly spread over the pixel square
+    /// centred at `(x, y)` that lie in `layer`'s ellipse.
+    fn conic_supersampled(layer: &Layer, x: f64, y: f64, n: usize) -> f64 {
+        let frame = conic_frame(layer);
+        let inside = (0..n * n)
+            .filter(|i| {
+                let sx = x - 0.5 + ((i % n) as f64 + 0.5) / n as f64;
+                let sy = y - 0.5 + ((i / n) as f64 + 0.5) / n as f64;
+                let (u, v) = frame(sx, sy);
+                u * u + v * v <= 1.0
+            })
+            .count();
+        inside as f64 / (n * n) as f64
+    }
+
+    /// The forward model's coverage of a curved `layer` against the
+    /// reference on a `SIZE × SIZE` canvas: the pixels wholly inside or
+    /// outside ([`conic_class`]) within `1e-6`, every covered pixel inside
+    /// the layer's bounding box, and the same coverage from the gradient's
+    /// path. Returns the mean absolute error over the pixels the boundary
+    /// crosses, against a 64 × 64 supersampling, and the model's and the
+    /// reference's total area.
+    fn compare_conic(layer: &Layer) -> (f64, f64, f64, [f64; 2]) {
+        const SIZE: usize = 64;
+        let scene = blank_scene(SIZE, SIZE);
+        let prepared = Prepared::<f64>::new(layer, &scene);
+        let (mut error, mut boundary) = (0.0, 0);
+        let mut exact_error = [0.0_f64; 2];
+        let (mut model_area, mut reference_area) = (0.0, 0.0);
+        for y in 0..SIZE {
+            for x in 0..SIZE {
+                let (fx, fy) = (x as f64, y as f64);
+                let in_box = (prepared.x0..prepared.x1).contains(&x)
+                    && (prepared.y0..prepared.y1).contains(&y);
+                let model = if in_box {
+                    prepared.pixel(x, y, fy)
+                } else {
+                    0.0
+                };
+                if in_box {
+                    let with_grad = Curved::cover_grad(&prepared, x, y, fy);
+                    assert_eq!(with_grad.map_or(0.0, |(cover, _)| cover), model);
+                }
+                let reference = match conic_class(layer, fx, fy) {
+                    Some(exact) => {
+                        let side = usize::from(exact == 1.0);
+                        exact_error[side] = exact_error[side].max((model - exact).abs());
+                        exact
+                    }
+                    None => {
+                        assert!(in_box, "{layer:?}: ({x}, {y}) outside the box");
+                        let reference = conic_supersampled(layer, fx, fy, 64);
+                        error += (model - reference).abs();
+                        boundary += 1;
+                        reference
+                    }
+                };
+                model_area += model;
+                reference_area += reference;
+            }
+        }
+        (
+            error / boundary.max(1) as f64,
+            model_area,
+            reference_area,
+            exact_error,
+        )
+    }
+
+    /// Circles, axis-aligned and rotated ellipses at random centres of a
+    /// 64 × 64 canvas, with radii from 1 to 32 px and random angles, are
+    /// covered as the reference covers them, within the error of the
+    /// local-straight approximation, which falls with the radius of
+    /// curvature (the square of the shorter radius over the longer). By
+    /// the shorter radius, under 2 px / from 2 to 8 px / from 8 px,
+    /// measured:
+    ///
+    /// - pixels wholly inside: exact (no error above `1e-6`), as the
+    ///   tangent half-plane at the nearest boundary point holds the
+    ///   ellipse;
+    /// - pixels wholly outside: up to 0.219 / 0.078 / 0.0012 (circles alone
+    ///   0.0037 / 0.0021 / 0.0012): the tangent half-plane reaches beyond
+    ///   the curve, most near the tips of thin ellipses;
+    /// - the mean absolute error over the pixels the boundary crosses,
+    ///   worst per shape: 0.047 / 0.018 / 0.0044;
+    /// - the total area from 4 px: within 0.63% of the reference.
+    #[test]
+    fn coverage_of_curved_outlines_matches_their_pixel_area() {
+        let mut rng = ChaCha8Rng::seed_from_u64(12);
+        // The worst mean absolute error over an ellipse's boundary pixels
+        // with its shorter radius in `[1, 2)`, `[2, 8)` and from 8 px, and
+        // the worst relative error of the total area from 4 px.
+        let (mut worst, mut worst_area) = ([0.0_f64; 3], 0.0_f64);
+        let mut worst_exact = [[0.0_f64; 2]; 3];
+        for outline in [Outline::Circle, Outline::Ellipse, Outline::RotatedEllipse] {
+            for short in [1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0, 24.0, 32.0] {
+                for _ in 0..8 {
+                    let long = if outline == Outline::Circle {
+                        short
+                    } else {
+                        rng.random_range(short..=32.0)
+                    };
+                    let radii = if rng.random_bool(0.5) {
+                        (short, long)
+                    } else {
+                        (long, short)
+                    };
+                    let centre = (rng.random_range(0.0..64.0), rng.random_range(0.0..64.0));
+                    let layer = conic(outline, centre, radii, rng.random_range(-180.0..180.0));
+                    let (mae, model, reference, exact) = compare_conic(&layer);
+                    let class = match short {
+                        s if s < 2.0 => 0,
+                        s if s < 8.0 => 1,
+                        _ => 2,
+                    };
+                    worst[class] = worst[class].max(mae);
+                    for side in 0..2 {
+                        worst_exact[class][side] = worst_exact[class][side].max(exact[side]);
+                    }
+                    if short >= 4.0 {
+                        worst_area = worst_area.max((model - reference).abs() / reference);
+                    }
+                }
+            }
+        }
+        for (class, bound) in [0.048, 0.019, 0.0045].into_iter().enumerate() {
+            assert!(worst[class] <= bound, "{worst:?}");
+        }
+        for (class, bound) in [0.22, 0.08, 0.0013].into_iter().enumerate() {
+            assert!(worst_exact[class][0] <= bound, "outside: {worst_exact:?}");
+            assert!(worst_exact[class][1] < 1e-6, "inside: {worst_exact:?}");
+        }
+        assert!(worst_area <= 0.0065, "{worst_area}");
+    }
+
     /// Every layer's colour after one Jacobi step from `tris`, computed
     /// pixel by pixel from [`Prepared::coverage`] alone: each layer moves
     /// against the residual of the stack as it is, with every other layer
@@ -2407,11 +3069,12 @@ pub(super) mod tests {
         assert!(previous < start, "{start} -> {previous}");
     }
 
-    /// `f32` compositing agrees with `f64`.
+    /// `f32` compositing agrees with `f64`, curved layers included.
     #[test]
     fn single_precision_agrees_with_double() {
         let mut rng = ChaCha8Rng::seed_from_u64(21);
         let (scene, mut tris) = mixed_scene(&mut rng, 48, 40, (5, 4, 3));
+        tris.extend(random_conics(&mut rng, 2, 40.0, 1.0..24.0));
         fit(&scene, &mut tris, &mut Workspace::default());
         let single = to_single(&scene);
         let wide = gradients(&scene, &tris, &mut Workspace::default());
@@ -2448,12 +3111,13 @@ pub(super) mod tests {
     }
 
     /// The loss, the gradients and the fit do not depend on the number of
-    /// threads.
+    /// threads, with curved layers that cross every band among the others.
     #[test]
     fn passes_do_not_depend_on_the_thread_count() {
         let run = |threads: usize| {
             let mut rng = ChaCha8Rng::seed_from_u64(33);
             let (scene, mut tris) = mixed_scene(&mut rng, 120, 100, (3, 3, 3));
+            tris.extend(random_conics(&mut rng, 2, 100.0, 10.0..60.0));
             let scene = to_single(&scene);
             let pool = rayon::ThreadPoolBuilder::new()
                 .num_threads(threads)

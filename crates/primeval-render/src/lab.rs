@@ -53,6 +53,10 @@ pub struct Pipeline {
     /// The step sizes of every joint optimisation, in the search and in
     /// the final stage.
     pub tuning: joint::Tuning,
+    /// Whether every joint optimisation, in the search and in the final
+    /// stage, moves the ellipses, circles and rotated ellipses too
+    /// ([`joint::Settings::curved`]); `true` in [`pipeline`].
+    pub curved: bool,
 }
 
 /// When the search runs a refit pass of the model itself, after a step.
@@ -177,6 +181,7 @@ impl From<crate::pipeline::Pipeline> for Pipeline {
             },
             joint: pipeline.joint,
             tuning: pipeline.tuning,
+            curved: pipeline.curved,
         }
     }
 }
@@ -210,6 +215,7 @@ impl From<Pipeline> for crate::pipeline::Pipeline {
             },
             joint: pipeline.joint,
             tuning: pipeline.tuning,
+            curved: pipeline.curved,
         }
     }
 }
@@ -225,11 +231,16 @@ pub fn pipeline(shape: ShapeKind) -> Pipeline {
 /// what ran.
 pub fn after_step(model: &mut Model, pipeline: Pipeline, step: u32, alpha: Alpha) -> Pass {
     let pipeline = crate::pipeline::Pipeline::from(pipeline);
-    let pass =
-        crate::pipeline::after_step(model, pipeline.during, pipeline.tuning, step, alpha, || {
-            false
-        })
-        .expect("a pass that is never cancelled finishes");
+    let pass = crate::pipeline::after_step(
+        model,
+        pipeline.during,
+        pipeline.tuning,
+        pipeline.curved,
+        step,
+        alpha,
+        || false,
+    )
+    .expect("a pass that is never cancelled finishes");
     match pass {
         crate::pipeline::Pass::Skipped => Pass::Skipped,
         crate::pipeline::Pass::Refit => Pass::Refit,
@@ -457,7 +468,7 @@ mod tests {
             ShapeKind::Polygon,
             ShapeKind::Rectangle,
             ShapeKind::RotatedRectangle,
-            ShapeKind::Ellipse,
+            ShapeKind::RotatedEllipse,
         ] {
             let render = RenderOptions {
                 count: 5,
@@ -477,7 +488,7 @@ mod tests {
             let stages = pipeline(shape);
             let (drawing, score, chosen) = final_stage(&mut model, &render, stages, None);
             if let Some(scale) = stages.joint {
-                assert_ne!(shape, ShapeKind::Ellipse);
+                assert_ne!(shape, ShapeKind::RotatedEllipse);
                 assert_eq!(score, primeval_core::joint::score(&model, &drawing));
                 match chosen {
                     Chosen::Joint => assert_ne!(drawing, model.drawing(), "{shape:?}"),
@@ -496,7 +507,7 @@ mod tests {
                     final_stage(&mut greedy.clone(), &render, stages, Some(iterations - 30));
                 assert_ne!(fewer, drawing);
             } else {
-                assert_eq!(shape, ShapeKind::Ellipse);
+                assert_eq!(shape, ShapeKind::RotatedEllipse);
                 assert_eq!(chosen, Chosen::Refitted);
                 assert_eq!(score, model.score_f64());
                 assert_eq!(drawing, model.drawing());

@@ -290,20 +290,23 @@ pub struct ProgressInfo {
     /// pass, which re-optimises one shape at a time, can move, resize and
     /// recolour any shape so far, and after the last step a final stage
     /// can revise every shape, so the result's shape lines can differ from
-    /// the preview. For triangles, polygons, rectangles and rotated
-    /// rectangles the final stage is a joint gradient optimisation of
-    /// every shape at once, whose coordinates are multiples of a quarter of
-    /// a working pixel, and of half a pixel for rectangles, while a rotated
+    /// the preview. For triangles, polygons, rectangles, rotated
+    /// rectangles, ellipses and circles the final stage is a joint gradient
+    /// optimisation of every shape at once, whose coordinates are multiples
+    /// of a quarter of a working pixel, and of half a pixel for rectangles,
+    /// as are an ellipse's or a circle's centre and radii, while a rotated
     /// rectangle's corners are computed from such values, so the result's
     /// coordinates can be fractional. For [`ShapeKind::Any`] it is one
-    /// refit pass, then the same optimisation of those shapes, the others
-    /// keeping their geometry. The optimisation's result is kept only if
+    /// refit pass, then the same optimisation of every shape but the
+    /// quadratics, which keep their geometry, a rotated ellipse's larger
+    /// radius and rotation being computed from its optimised axis, so not
+    /// on that lattice. The optimisation's result is kept only if
     /// the PNG output at the working size is closer to the target than with
     /// the shapes before it; otherwise the stage keeps those, with
     /// coordinates not rounded to that lattice. For
     /// [`ShapeKind::Quadratic`] it is refit passes until one lowers the
-    /// score by less than 1%, at most four. For the other kinds it is one
-    /// refit pass. The passes and the stage keep the shapes' number, their
+    /// score by less than 1%, at most four. For
+    /// [`ShapeKind::RotatedEllipse`] it is one refit pass. The passes and the stage keep the shapes' number, their
     /// order and each shape's kind; an ellipse whose radii a pass makes
     /// equal (or unequal) is written as a `<circle>` (or an `<ellipse>`),
     /// so those two element names can swap.
@@ -459,21 +462,23 @@ impl ApproximateResult {
 /// build on the revised shapes; the passes are spaced so that their cost
 /// grows linearly with the count. A final stage then revises every shape
 /// and reports no progress. For [`ShapeKind::Triangle`],
-/// [`ShapeKind::Polygon`], [`ShapeKind::Rectangle`] and
-/// [`ShapeKind::RotatedRectangle`] it is a joint gradient optimisation of
-/// the geometry, opacity (with [`Alpha::Auto`]) and colour of every shape
-/// at once, against a model of the anti-aliased output, snapped to quarter
+/// [`ShapeKind::Polygon`], [`ShapeKind::Rectangle`],
+/// [`ShapeKind::RotatedRectangle`], [`ShapeKind::Ellipse`] and
+/// [`ShapeKind::Circle`] it is a joint gradient optimisation of the
+/// geometry, opacity (with [`Alpha::Auto`]) and colour of every shape at
+/// once, against a model of the anti-aliased output, snapped to quarter
 /// pixels (half pixels for axis-aligned rectangles) that keep every angle
-/// above 15°, every polygon strictly convex and every rectangle within the
-/// 1:8 aspect cap ([`primeval_core::joint`]). For [`ShapeKind::Any`] it is
-/// one refit pass, then the same joint optimisation of the triangles,
-/// polygons and rectangles, every other shape keeping its geometry. The
+/// above 15°, every polygon strictly convex, every rectangle within the
+/// 1:8 aspect cap and every radius at least 1 px ([`primeval_core::joint`]).
+/// For [`ShapeKind::Any`] it is one refit pass, then the same joint
+/// optimisation of every shape but the quadratics, which keep their
+/// geometry. The
 /// joint optimisation's result is kept only if the PNG output at the
 /// working size is closer to the target than with the shapes before it;
 /// otherwise the stage keeps those, with coordinates not rounded to its
 /// lattice. For [`ShapeKind::Quadratic`] it is refit passes until one
 /// lowers the score by less than 1%, at most four.
-/// For the other kinds it is one refit pass. The result keeps the number,
+/// For [`ShapeKind::RotatedEllipse`] it is one refit pass. The result keeps the number,
 /// order and kind of the shapes, and is encoded from the revised shapes.
 ///
 /// # Errors
@@ -522,6 +527,7 @@ pub fn approximate(
             &mut model,
             pipeline.during,
             pipeline.tuning,
+            pipeline.curved,
             step + 1,
             render.alpha,
             || execution.is_cancelled(),

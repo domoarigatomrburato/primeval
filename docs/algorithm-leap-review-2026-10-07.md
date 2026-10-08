@@ -307,3 +307,30 @@ A warm-up of five iterations is the one tuning that never loses: on the painting
 
 Reproduction: `target/abl/run_steps.sh` and `analyse_steps.py`, then
 `engine --shapes any,rectangle,rotated-rectangle,polygon --refine final --during joint:20:5:20 --joint-warmup 5`.
+
+## 13. Follow-up: B moves ellipses, circles and rotated ellipses (2026-10-08)
+
+The second item of section 8's list. B's forward model gained three outlines, a circle `(c, r)`, an axis-aligned ellipse `(c, rx, ry)` and a rotated ellipse `(c, a, b)` with a semi-axis vector `a` in place of an angle, so that no trigonometry enters the loop (as the rotated rectangle's `c, u, h`). A pixel's coverage takes the boundary as locally straight: in the ellipse's normalised frame, with `r = |q|`, the signed distance is `d = (1 − r) / |∇r|` and the coverage is the edge CDF of `d` with the filter square projected on the normal; the gradient is the exact derivative of that model (central differences agree to 3e-7). Against a 64 × 64 supersampled reference the mean error on boundary pixels is 0.047 below 2 px of radius, 0.018 from 2 to 8 px and 0.0044 above, the total area within 0.63% from 4 px; the one systematic error is a small coverage on pixels just outside a thin ellipse, up to 0.22 below 2 px of minor radius, where the straight half-plane reaches past the curve. Projection keeps every radius at least 1 px, the snap puts centre and radii on the quarter-pixel lattice, a rotated ellipse's exported rotation comes from a trig-free `atan2` of the snapped axis vector, and each kind keeps its contract (a circle stays a circle). A switch, `joint::Settings::curved` and the runner's `--joint-curved`, is off by default, so these runs compare against bit-identical baselines.
+
+Runs on `ellipse,circle,rotated-ellipse,any`, against `--refine final` (today's pipelines: refit passes `Spaced(10, 10)` and one final pass for the three curved kinds; `any`'s B with its curved layers fixed). Change of the median rmse256 at 50 / 100 / 200 / 500 shapes, time ratio over those rows, and the guard's choice at 200 and 500:
+
+| kind | `--joint-curved` with… | Δ median | time | guard kept |
+| --- | --- | --- | ---: | --- |
+| any | its pipeline (B moves the curved layers) | −1.1 / −0.7 / −0.8 / −1.0% | 1.03–1.06× | 4/5 |
+| ellipse | passes, one refit pass, then B | −3.9 / −6.7 / −9.8 / −15.2% | 1.17–1.20× | 5/5, 4/5 |
+| ellipse | passes, then B in place of the refit pass | −3.8 / −6.4 / −9.6 / −15.1% | 1.13–1.20× | 5/5, 4/5 |
+| ellipse | B alone, no passes | −2.5 / −4.1 / −7.0 / −13.3% | 0.57–0.64× | 5/5 |
+| circle | passes, one refit pass, then B | −12.7 / −6.5 / −9.6 / −14.0% | 1.14–1.19× | 5/5 |
+| circle | passes, then B in place of the refit pass | −12.7 / −6.6 / −9.7 / −14.0% | 1.15–1.22× | 5/5 |
+| circle | B alone, no passes | −8.7 / −3.2 / −5.3 / −12.0% | 0.56–0.66× | 5/5 |
+| rotated-ellipse | passes, one refit pass, then B | −2.4 / −2.8 / −2.4 / −2.4% | 1.10–1.12× | 3/5, 1/5 |
+| rotated-ellipse | passes, then B in place of the refit pass | −2.2 / −2.9 / −2.3 / −2.2% | 1.09–1.13× | 3/5, 1/5 |
+| rotated-ellipse | B alone, no passes | +1.1 / −1.7 / +0.8 / +1.5% | 0.68–0.73× | 4/5, 3/5 |
+
+On the paintings ellipses and circles gain far more than the medians say: American Gothic −13.6% (ellipse) and −7.3% (circle) at 200 shapes, −21.8% and −14.9% at 500, Mona Lisa −9.8% / −9.6% and −15.2% / −14.0%; synthetic-shapes −37 to −57%; the texture gains 3–7% with the passes and loses 2–6% at 100–200 shapes with B alone. `any`'s paintings gain 1.8–5.7% (American Gothic) and 0.7–1.1% (Mona Lisa), synthetic-shapes 22–58%, for 3–6% more time. Rotated ellipses gain 2–3% at 10% more time, and the guard rejects B on two to four of the five images from 100 shapes: their greedy search makes thin ellipses (radii from 1 px, continuous), where the local-straight model's halo is largest and its objective disagrees with the export. A coverage exact on high curvature is the follow-up for them.
+
+The schedule for ellipses and circles: with the passes thinned to `Spaced(20, 5)`, the triangles' schedule, and B in place of the final refit pass, the medians are −3.9 / −6.0 / −8.4 / −14.4% (ellipse) and −11.3 / −4.0 / −8.5 / −13.1% (circle), every painting row better (American Gothic −11.7% and −20.4% with ellipses at 200 and 500 shapes, circles −7.0% and −14.6%), the texture within +1.9 / −3.0%: one to two points less than the full `Spaced(10, 10)` passes with B, one to three more than B alone, at about today's time (this run's timing was disturbed by a parallel build; the regeneration after the change measures it).
+
+Verdicts: **`any` adopts B for its curved layers; ellipses and circles move to `Spaced(20, 5)`, no final refit pass, then B**; **rotated ellipses keep their pipeline** until the thin-ellipse coverage improves. The switch stays for the lab (`--joint-curved off`), on by default.
+
+Reproduction: `target/abl/run_curved.sh`, then `engine --shapes ellipse,circle --refine final --joint-curved --joint-scale 1 --final-refits 0 --during spaced:20:5`.
