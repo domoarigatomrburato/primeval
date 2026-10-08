@@ -43,6 +43,35 @@ pub(crate) enum During {
         /// Positive.
         divisor: u32,
     },
+    /// The joint optimisation ([`joint::optimise`]) of the model in place
+    /// of the refit pass, on [`During::Spaced`]'s schedule, its result
+    /// adopted into the model ([`Model::adopt`]) if `guard` keeps it.
+    #[cfg(any(test, feature = "lab"))]
+    Joint {
+        /// As [`During::Spaced`]'s.
+        interval: u32,
+        /// As [`During::Spaced`]'s.
+        divisor: u32,
+        /// The Adam iterations of every pass; positive.
+        iterations: u32,
+        /// What decides whether a pass's result is kept.
+        guard: Guard,
+    },
+}
+
+/// What keeps the result of a joint pass in the search ([`During::Joint`]).
+#[cfg(any(test, feature = "lab"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Guard {
+    /// The model's exact canvas, repainted with the adopted shapes, scores
+    /// strictly lower ([`Model::adopt`] without `force`).
+    Canvas,
+    /// The model's own PNG export at the working size, after adopting the
+    /// joint result, is strictly closer to the target than before
+    /// ([`exports_closer`]): it also sees the rounding of the rectangles
+    /// that adopting converts. Costs a clone of the model and two exports
+    /// per pass, on top of the repaint.
+    Export,
 }
 
 impl During {
@@ -53,16 +82,38 @@ impl During {
             Self::Never => false,
             #[cfg(any(test, feature = "lab"))]
             Self::Every(every) => step.is_multiple_of(every),
-            Self::Spaced { interval, divisor } => {
-                let mut next = u64::from(interval);
-                let step = u64::from(step);
-                while next < step {
-                    next += u64::from(interval).max(next / u64::from(divisor));
-                }
-                next == step
-            }
+            Self::Spaced { interval, divisor } => spaced_due(interval, divisor, step),
+            #[cfg(any(test, feature = "lab"))]
+            Self::Joint {
+                interval, divisor, ..
+            } => spaced_due(interval, divisor, step),
         }
     }
+}
+
+/// [`During::Spaced`]'s rule: whether a pass runs after step `step`.
+fn spaced_due(interval: u32, divisor: u32, step: u32) -> bool {
+    let mut next = u64::from(interval);
+    let step = u64::from(step);
+    while next < step {
+        next += u64::from(interval).max(next / u64::from(divisor));
+    }
+    next == step
+}
+
+/// What [`after_step`] ran.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Pass {
+    /// No pass was due.
+    Skipped,
+    /// A refit pass.
+    Refit,
+    /// A joint pass, and whether its result was kept.
+    #[cfg(any(test, feature = "lab"))]
+    Joint {
+        /// Whether the model adopted the joint result.
+        kept: bool,
+    },
 }
 
 /// The refit passes of the final stage.
@@ -180,20 +231,70 @@ pub(crate) fn pipeline(shape: ShapeKind) -> Pipeline {
     }
 }
 
-/// Runs the refit pass that `during` schedules after step `step` (from 1),
-/// if any. Returns `None` once `cancelled` returns true, with the model as
-/// it was before the pass.
+/// Runs the pass that `during` schedules after step `step` (from 1), if
+/// any, and returns what ran. Returns `None` once `cancelled` returns true,
+/// with the model as it was before the pass.
 pub(crate) fn after_step(
     model: &mut Model,
     during: During,
     step: u32,
     alpha: Alpha,
-    cancelled: impl FnMut() -> bool,
-) -> Option<()> {
-    if during.due(step) {
-        model.refine_unless(alpha, cancelled)?;
+    mut cancelled: impl FnMut() -> bool,
+) -> Option<Pass> {
+    if !during.due(step) {
+        return Some(Pass::Skipped);
     }
-    Some(())
+    #[cfg(any(test, feature = "lab"))]
+    if let During::Joint {
+        iterations, guard, ..
+    } = during
+    {
+        let kept = joint_pass(model, iterations, guard, alpha, cancelled)?;
+        return Some(Pass::Joint { kept });
+    }
+    model.refine_unless(alpha, &mut cancelled)?;
+    Some(Pass::Refit)
+}
+
+/// A joint pass of `iterations` iterations on `model`, its result adopted
+/// if `guard` keeps it; returns whether it was kept. With
+/// [`Guard::Canvas`] the model's exact canvas decides ([`Model::adopt`]
+/// without `force`); with [`Guard::Export`] the result is adopted by force
+/// into the model, whose own export after adopting must then be strictly
+/// closer to the target than its export before ([`exports_closer`]), or a
+/// clone taken before restores it. A result the model cannot adopt
+/// ([`Model::adopt`] returns `None`) is not kept, and a pass not kept
+/// leaves the model as it was. `cancelled` is polled as [`joint::optimise`]
+/// polls it, then once more before the guard; once it returns true,
+/// `None`, with the model unchanged.
+#[cfg(any(test, feature = "lab"))]
+fn joint_pass(
+    model: &mut Model,
+    iterations: u32,
+    guard: Guard,
+    alpha: Alpha,
+    mut cancelled: impl FnMut() -> bool,
+) -> Option<bool> {
+    let mut settings = joint::Settings::default();
+    settings.iterations = Some(iterations);
+    let optimised = joint::optimise(model, alpha, settings, &mut cancelled)?;
+    if cancelled() {
+        return None;
+    }
+    let kept = match guard {
+        Guard::Canvas => model.adopt(&optimised, false) == Some(true),
+        Guard::Export => {
+            let before = model.drawing();
+            let backup = model.clone();
+            let closer = model.adopt(&optimised, true) == Some(true)
+                && exports_closer(backup.target(), &before, &model.drawing());
+            if !closer {
+                *model = backup;
+            }
+            closer
+        }
+    };
+    Some(kept)
 }
 
 /// The final stage of `pipeline` on `model`, after its last step: the
@@ -259,12 +360,20 @@ pub(crate) fn final_stage(
 /// function it calls is the `sin` and `cos` of a rotated ellipse's angle,
 /// which only `any` can draw and which the export itself depends on too.
 fn better_export(target: &Buffer, input: Drawing, joint: Drawing) -> Drawing {
-    let error = |drawing: &Drawing| raster::squared_error(drawing, target).unwrap_or(u64::MAX);
-    if error(&joint) < error(&input) {
+    if exports_closer(target, &input, &joint) {
         joint
     } else {
         input
     }
+}
+
+/// Whether `candidate`'s PNG export at the working size is strictly closer
+/// to `target` than `input`'s ([`raster::squared_error`]): [`better_export`]'s
+/// rule. A drawing that cannot be rendered is as far as can be, so a tie,
+/// or a `candidate` that cannot be rendered, is not closer.
+fn exports_closer(target: &Buffer, input: &Drawing, candidate: &Drawing) -> bool {
+    let error = |drawing: &Drawing| raster::squared_error(drawing, target).unwrap_or(u64::MAX);
+    error(candidate) < error(input)
 }
 
 #[cfg(test)]
@@ -628,7 +737,7 @@ mod tests {
             polls += 1;
             false
         });
-        assert_eq!(finished, Some(()));
+        assert_eq!(finished, Some(Pass::Refit));
         assert_ne!(
             refitted.drawing(),
             greedy.drawing(),
@@ -648,7 +757,7 @@ mod tests {
         let mut model = greedy.clone();
         assert_eq!(
             after_step(&mut model, during, 9, Alpha::Auto, || panic!("polled")),
-            Some(())
+            Some(Pass::Skipped)
         );
     }
 
@@ -696,6 +805,222 @@ mod tests {
                 });
                 assert_eq!(stopped, None, "{pipeline:?}: cancelled at poll {cancel_at}");
             }
+        }
+    }
+
+    /// A joint pass in the search, every `interval` steps up to
+    /// `interval · divisor`, then spaced, of `iterations` iterations.
+    fn joint(interval: u32, divisor: u32, iterations: u32, guard: Guard) -> During {
+        During::Joint {
+            interval,
+            divisor,
+            iterations,
+            guard,
+        }
+    }
+
+    /// The kinds the joint optimisation moves, `any` included.
+    const JOINT_KINDS: [ShapeKind; 5] = [
+        ShapeKind::Any,
+        ShapeKind::Triangle,
+        ShapeKind::Rectangle,
+        ShapeKind::RotatedRectangle,
+        ShapeKind::Polygon,
+    ];
+
+    #[test]
+    fn joint_passes_are_due_at_the_spaced_steps() {
+        for (interval, divisor) in [(10, 5), (20, 5), (5, 2), (20, 2), (3, 1)] {
+            let spaced = due_steps(During::Spaced { interval, divisor }, 600);
+            for guard in [Guard::Canvas, Guard::Export] {
+                let joint = joint(interval, divisor, 7, guard);
+                assert_eq!(due_steps(joint, 600), spaced, "{interval}:{divisor}");
+            }
+        }
+    }
+
+    /// A model of `shape` after `steps` greedy steps, each followed by the
+    /// pass `during` schedules, and what each pass did.
+    fn joint_model(shape: ShapeKind, during: During, steps: u32) -> (Model, Vec<Pass>) {
+        let mut model = model(shape, 0);
+        let passes = (1..=steps)
+            .map(|step| {
+                model.step(shape, Alpha::Auto);
+                after_step(&mut model, during, step, Alpha::Auto, || false).expect("not cancelled")
+            })
+            .collect();
+        (model, passes)
+    }
+
+    /// With the canvas guard a joint pass is kept only if the model's
+    /// exact canvas scores strictly lower, and otherwise leaves the model
+    /// as it was.
+    #[test]
+    fn a_joint_pass_with_the_canvas_guard_never_raises_the_score() {
+        let during = joint(3, 2, 10, Guard::Canvas);
+        let mut kept = 0;
+        for shape in JOINT_KINDS {
+            let mut model = model(shape, 0);
+            for step in 1..=12 {
+                model.step(shape, Alpha::Auto);
+                let before = model.clone();
+                let pass = after_step(&mut model, during, step, Alpha::Auto, || false)
+                    .expect("not cancelled");
+                let context = format!("{shape:?}, step {step}");
+                match pass {
+                    Pass::Joint { kept: true } => {
+                        kept += 1;
+                        assert!(model.score_f64() < before.score_f64(), "{context}");
+                    }
+                    Pass::Joint { kept: false } => {
+                        assert_eq!(model.drawing(), before.drawing(), "{context}");
+                        assert_eq!(model.score_f64(), before.score_f64(), "{context}");
+                    }
+                    Pass::Skipped => assert!(!during.due(step), "{context}"),
+                    Pass::Refit => panic!("{context}: a refit pass"),
+                }
+            }
+        }
+        assert!(kept >= 10, "only {kept} passes kept");
+    }
+
+    /// With the export guard a joint pass is kept only if the model's own
+    /// PNG export at the working size, after adopting, is strictly closer
+    /// to the target, so it never moves further from the target, also for
+    /// the rectangles that adopting rounds; otherwise the model is left as
+    /// it was.
+    #[test]
+    fn a_joint_pass_with_the_export_guard_never_raises_the_export_error() {
+        let during = joint(3, 2, 10, Guard::Export);
+        let mut kept = 0;
+        for shape in JOINT_KINDS {
+            let mut model = model(shape, 0);
+            let error = |model: &Model| {
+                raster::squared_error(&model.drawing(), model.target()).expect("raster")
+            };
+            for step in 1..=12 {
+                model.step(shape, Alpha::Auto);
+                let before = model.clone();
+                let pass = after_step(&mut model, during, step, Alpha::Auto, || false)
+                    .expect("not cancelled");
+                let context = format!("{shape:?}, step {step}");
+                match pass {
+                    Pass::Joint { kept: true } => {
+                        kept += 1;
+                        assert!(error(&model) < error(&before), "{context}");
+                    }
+                    Pass::Joint { kept: false } => {
+                        assert_eq!(model.drawing(), before.drawing(), "{context}");
+                        assert_eq!(model.score_f64(), before.score_f64(), "{context}");
+                    }
+                    Pass::Skipped => assert!(!during.due(step), "{context}"),
+                    Pass::Refit => panic!("{context}: a refit pass"),
+                }
+            }
+        }
+        // 15 of the 20 passes are kept.
+        assert!(kept >= 10, "only {kept} passes kept");
+    }
+
+    /// A joint pass in the search polls `cancelled` before every iteration,
+    /// before the snap and once more before adopting; a cancel at any of
+    /// those polls stops it with the model as it was.
+    #[test]
+    fn cancellation_during_a_joint_pass_in_the_search_stops_it() {
+        for guard in [Guard::Canvas, Guard::Export] {
+            let greedy = model(ShapeKind::Triangle, 10);
+            let during = joint(10, 1, 5, guard);
+            let mut polls = 0;
+            let mut adopted = greedy.clone();
+            let finished = after_step(&mut adopted, during, 10, Alpha::Auto, || {
+                polls += 1;
+                false
+            });
+            assert_eq!(finished, Some(Pass::Joint { kept: true }), "{guard:?}");
+            assert_ne!(adopted.drawing(), greedy.drawing(), "{guard:?}");
+            // Five iterations, the snap and the adoption.
+            assert_eq!(polls, 7, "{guard:?}");
+            for cancel_at in 1..=polls {
+                let mut model = greedy.clone();
+                let mut count = 0;
+                let stopped = after_step(&mut model, during, 10, Alpha::Auto, || {
+                    count += 1;
+                    count >= cancel_at
+                });
+                assert_eq!(stopped, None, "{guard:?}: cancelled at poll {cancel_at}");
+                assert_eq!(model.drawing(), greedy.drawing(), "{guard:?}");
+                assert_eq!(model.score_f64(), greedy.score_f64(), "{guard:?}");
+            }
+        }
+    }
+
+    /// The search with joint passes gives the same drawing at 1, 2, 4 and
+    /// 8 threads, with the canvas guard for every kind the joint
+    /// optimisation moves and with the export guard for two of them; the
+    /// final stage after it does too
+    /// (`every_kind_path_is_identical_across_thread_counts`).
+    #[test]
+    fn joint_passes_are_identical_across_thread_counts() {
+        let export = [ShapeKind::Triangle, ShapeKind::Any].map(|shape| (shape, Guard::Export));
+        let mut kept = 0;
+        for (shape, guard) in JOINT_KINDS
+            .map(|shape| (shape, Guard::Canvas))
+            .into_iter()
+            .chain(export)
+        {
+            let on_threads = |threads| {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .expect("test thread pool");
+                pool.install(|| {
+                    let mut model = sized_model(shape, 0, 24, 18);
+                    let mut passes = Vec::new();
+                    for step in 1..=4 {
+                        model.step(shape, Alpha::Auto);
+                        // Passes after steps 1, 2 and 4.
+                        let during = joint(1, 1, 6, guard);
+                        passes.push(
+                            after_step(&mut model, during, step, Alpha::Auto, || false)
+                                .expect("not cancelled"),
+                        );
+                    }
+                    (model.drawing(), passes)
+                })
+            };
+            let reference = on_threads(1);
+            kept += reference
+                .1
+                .iter()
+                .filter(|&&pass| pass == Pass::Joint { kept: true })
+                .count();
+            for threads in [2, 4, 8] {
+                assert!(
+                    on_threads(threads) == reference,
+                    "{shape:?} {guard:?}: {threads} threads changed the drawing"
+                );
+            }
+        }
+        assert!(kept >= 7, "only {kept} passes kept");
+    }
+
+    /// Greedy steps build on an adopted joint result, whose triangles are
+    /// now polygons: every step still lowers the score or keeps it.
+    #[test]
+    fn greedy_steps_continue_after_an_adopted_joint_pass() {
+        for shape in [ShapeKind::Triangle, ShapeKind::Any] {
+            let (mut model, passes) = joint_model(shape, joint(5, 1, 10, Guard::Canvas), 5);
+            assert_eq!(
+                passes.last(),
+                Some(&Pass::Joint { kept: true }),
+                "{shape:?}"
+            );
+            for _ in 0..5 {
+                let before = model.score_f64();
+                model.step(shape, Alpha::Auto);
+                assert!(model.score_f64() <= before, "{shape:?}");
+            }
+            assert_eq!(model.drawing().shapes.len(), 10, "{shape:?}");
         }
     }
 }

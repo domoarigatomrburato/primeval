@@ -281,6 +281,74 @@ impl Model {
         self.refine_effort = RefineEffort { rounds, age };
     }
 
+    /// Lab hook, not part of the supported API: replaces the committed
+    /// shapes with `drawing`, a [`crate::joint::optimise`] result for this
+    /// model, if it repaints closer to the target, or whatever it scores
+    /// when `force` is set.
+    ///
+    /// Every colour, opacity included, comes from `drawing`, and every
+    /// shape is converted back into the engine's own:
+    ///
+    /// - a triangle, or a polygon, becomes the polygon of the drawing's
+    ///   vertices, which the engine's continuous polygons take exactly; a
+    ///   triangle is then a three-vertex polygon;
+    /// - an axis-aligned rectangle rounds the joint result's half-pixel
+    ///   edges to the engine's pixel bounds, each edge moving at most
+    ///   0.5 px: lossy by design;
+    /// - a rotated rectangle recovers its integer centre, sides and angle
+    ///   from the corners, rounded: lossy too, and through `atan2`, which
+    ///   a production path would have to replace with a libm-free recovery
+    ///   (the arithmetic rule of [`crate::joint`]);
+    /// - every other shape keeps its geometry, which the drawing must not
+    ///   have moved.
+    ///
+    /// The canvas is then repainted exactly, as a refit pass verifies its
+    /// result, and the exact canvas decides: the new shapes are kept if
+    /// `force` is set or their score is strictly below the current one.
+    /// The refit pass index does not change.
+    ///
+    /// Returns `None`, with the model unchanged, if the drawing has another
+    /// size, background or number of shapes, moves a fixed shape, or has a
+    /// shape that does not convert into a valid one of its kind; otherwise
+    /// whether the new shapes were kept.
+    #[cfg(feature = "lab")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn adopt(&mut self, drawing: &Drawing, force: bool) -> Option<bool> {
+        let (width, height) = (self.target.width(), self.target.height());
+        if (drawing.width, drawing.height, drawing.background) != (width, height, self.background)
+            || drawing.shapes.len() != self.history.len()
+        {
+            return None;
+        }
+        let history = self
+            .history
+            .iter()
+            .zip(&drawing.shapes)
+            .map(|(committed, drawn)| {
+                Some(CommittedShape {
+                    shape: committed.shape.adopted(&drawn.geometry)?,
+                    color: drawn.color,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+
+        // The exact canvas decides, as in `refine_unless`.
+        let current =
+            crate::refine::render(width, height, self.background, &history, &mut self.scratch);
+        let score = score::difference_full_raw(&self.target, &current);
+        let kept = force || score < self.score;
+        if kept {
+            self.history = history;
+            self.current = current;
+            self.score = score;
+            if let Some(coarse) = &mut self.coarse {
+                coarse.sync(&self.current);
+            }
+        }
+        Some(kept)
+    }
+
     /// Runs one refit pass: re-optimises every committed shape at its own
     /// layer, with the others fixed, from the top layer down.
     ///
@@ -1183,5 +1251,250 @@ mod tests {
         for threads in [2, 4, 8] {
             assert_eq!(drawing(threads), reference, "{threads} threads");
         }
+    }
+
+    /// Whether every committed shape of `model` keeps its kind's rule.
+    #[cfg(feature = "lab")]
+    fn every_shape_is_valid(model: &Model) -> bool {
+        model
+            .history
+            .iter()
+            .all(|committed| match &committed.shape {
+                Shape::Triangle(shape) => shape.is_valid(),
+                Shape::Rectangle(shape) => shape.is_valid(),
+                Shape::RotatedRectangle(shape) => {
+                    shape.sx >= 1 && shape.sy >= 1 && shape.is_valid()
+                }
+                Shape::Polygon(shape) => shape.is_valid(),
+                Shape::Ellipse(_)
+                | Shape::Circle(_)
+                | Shape::Quadratic(_)
+                | Shape::RotatedEllipse(_) => true,
+            })
+    }
+
+    /// The joint optimisation of `model` with no iterations: it only
+    /// projects, snaps and refits the colours.
+    #[cfg(feature = "lab")]
+    fn snapped(model: &Model) -> Drawing {
+        let settings = crate::joint::Settings {
+            iterations: Some(0),
+        };
+        crate::joint::optimise(model, Alpha::Auto, settings, || false).expect("not cancelled")
+    }
+
+    /// The centre, the sides and the direction of the first side of the
+    /// rectangle whose corners are `geometry`, in [`Shape::geometry`]'s
+    /// order.
+    #[cfg(feature = "lab")]
+    fn rotated_parameters(geometry: &crate::Geometry) -> [f64; 5] {
+        let crate::Geometry::Polygon(points) = geometry else {
+            panic!("not a rotated rectangle: {geometry:?}");
+        };
+        let [a, b, c, d] = points.as_slice() else {
+            panic!("not a rotated rectangle: {geometry:?}");
+        };
+        [
+            (a.x + b.x + c.x + d.x) / 4.0,
+            (a.y + b.y + c.y + d.y) / 4.0,
+            (b.x - a.x).hypot(b.y - a.y),
+            (c.x - b.x).hypot(c.y - b.y),
+            (b.y - a.y).atan2(b.x - a.x).to_degrees(),
+        ]
+    }
+
+    /// Without iterations the joint optimisation keeps a rotated
+    /// rectangle's centre exactly, and its half-side vector on the
+    /// quarter-pixel lattice moves each side by less than 0.5 px, so the
+    /// adopted rectangle has the original centre and sides. The lattice can
+    /// turn the vector by more than half a degree (up to about 2° for a
+    /// side of 10 px), so the adopted angle is the joint result's, rounded
+    /// to the degree, and not always the original's.
+    #[cfg(feature = "lab")]
+    fn assert_rotated_round_trip(
+        adopted: &crate::Geometry,
+        optimised: &crate::Geometry,
+        original: &crate::Geometry,
+        context: &str,
+    ) {
+        let [x, y, sx, sy, angle] = rotated_parameters(adopted);
+        let [ox, oy, osx, osy, _] = rotated_parameters(original);
+        let [.., joint_angle] = rotated_parameters(optimised);
+        for (value, expected) in [(x, ox), (y, oy), (sx, osx), (sy, osy)] {
+            assert!((value - expected).abs() < 1e-9, "{context}: {adopted:?}");
+        }
+        let turn = (angle - joint_angle).rem_euclid(360.0);
+        assert!(
+            turn.min(360.0 - turn) <= 0.5 + 1e-9,
+            "{context}: {angle} against {joint_angle}"
+        );
+    }
+
+    /// A joint result without iterations adopts exactly for triangles and
+    /// polygons, which become continuous polygons; rectangles recover their
+    /// integer bounds, rotated rectangles their centre and sides and the
+    /// joint result's angle ([`assert_rotated_round_trip`]), and the fixed
+    /// kinds keep their geometry. The canvas is the exact replay of the adopted shapes,
+    /// with every colour of the joint result.
+    #[cfg(feature = "lab")]
+    #[test]
+    fn adopt_round_trips_a_joint_result_of_every_kind() {
+        for (index, kind) in every_kind().into_iter().enumerate() {
+            for size in [SMALL, (41, 33)] {
+                let context = format!("{kind:?} on {size:?}");
+                let mut model = stepped_model(index as u64, size, kind, 6);
+                let before = model.drawing();
+                let joint = snapped(&model);
+                let kinds: Vec<Shape> = model.history.iter().map(|c| c.shape.clone()).collect();
+
+                assert_eq!(model.adopt(&joint, true), Some(true), "{context}");
+
+                let after = model.drawing();
+                assert_eq!(after.shapes.len(), before.shapes.len(), "{context}");
+                for (layer, shape) in kinds.iter().enumerate() {
+                    let (adopted, optimised, original) = (
+                        &after.shapes[layer],
+                        &joint.shapes[layer],
+                        &before.shapes[layer],
+                    );
+                    let context = format!("{context}: layer {layer}");
+                    assert_eq!(adopted.color, optimised.color, "{context}");
+                    match shape {
+                        Shape::Triangle(_) | Shape::Polygon(_) => {
+                            assert_eq!(adopted.geometry, optimised.geometry, "{context}");
+                        }
+                        Shape::RotatedRectangle(_) => assert_rotated_round_trip(
+                            &adopted.geometry,
+                            &optimised.geometry,
+                            &original.geometry,
+                            &context,
+                        ),
+                        _ => assert_eq!(adopted.geometry, original.geometry, "{context}"),
+                    }
+                }
+                assert!(every_shape_is_valid(&model), "{context}");
+                assert_consistent(&model, &context);
+            }
+        }
+    }
+
+    /// Without `force`, a drawing that repaints further from the target is
+    /// not kept, and the model is left exactly as it was.
+    #[cfg(feature = "lab")]
+    #[test]
+    fn adopt_keeps_the_model_when_the_drawing_repaints_worse() {
+        for kind in [ShapeKind::Triangle, ShapeKind::Rectangle, ShapeKind::Any] {
+            let before = stepped_model(3, (41, 33), kind, 6);
+            let joint = snapped(&before);
+            let mut moved = joint.clone();
+            for shape in &mut moved.shapes {
+                let c = shape.color;
+                shape.color = Color::new(255 - c.r, 255 - c.g, 255 - c.b, c.a.max(200));
+            }
+            let mut model = before.clone();
+            assert_eq!(model.adopt(&moved, false), Some(false), "{kind:?}");
+            assert_unchanged(&model, &before, &format!("{kind:?}"));
+            // The same drawing, forced, is kept and scores worse.
+            assert_eq!(model.adopt(&moved, true), Some(true), "{kind:?}");
+            assert!(model.score > before.score, "{kind:?}");
+            assert_consistent(&model, &format!("{kind:?}, forced"));
+        }
+    }
+
+    /// A drawing that is not this model's, or whose shapes do not convert
+    /// into valid ones of their kinds, is refused, and the model is left
+    /// exactly as it was.
+    #[cfg(feature = "lab")]
+    #[test]
+    fn adopt_refuses_a_drawing_it_cannot_convert() {
+        use crate::{Geometry, Point};
+
+        let refused = |model: &Model, drawing: &Drawing, context: &str| {
+            let mut copy = model.clone();
+            assert_eq!(copy.adopt(drawing, true), None, "{context}");
+            assert_unchanged(&copy, model, context);
+        };
+        let rectangles = stepped_model(2, (41, 33), ShapeKind::Rectangle, 4);
+        let joint = snapped(&rectangles);
+        let mut fewer = joint.clone();
+        fewer.shapes.pop();
+        refused(&rectangles, &fewer, "one shape fewer");
+        let mut wider = joint.clone();
+        wider.width += 1;
+        refused(&rectangles, &wider, "another size");
+        let mut background = joint.clone();
+        background.background = Color::new(1, 2, 3, 255);
+        refused(&rectangles, &background, "another background");
+        let rect = |x, y, width, height| Geometry::Rect {
+            x,
+            y,
+            width,
+            height,
+        };
+        for (geometry, context) in [
+            (rect(3.0, 4.0, 18.0, 2.0), "aspect 9"),
+            // Halves round away from zero: 16 / 2 becomes 17 / 2.
+            (rect(-0.5, 4.0, 16.0, 2.0), "aspect 8, rounded to 17 / 2"),
+            (rect(3.0, 4.0, 0.4, 2.0), "a side that rounds to 0"),
+            (
+                Geometry::Polygon(vec![Point::new(1.0, 1.0); 3]),
+                "a polygon in place of a rectangle",
+            ),
+        ] {
+            let mut drawing = joint.clone();
+            drawing.shapes[1].geometry = geometry;
+            refused(&rectangles, &drawing, context);
+        }
+
+        let triangles = stepped_model(2, SMALL, ShapeKind::Triangle, 4);
+        let mut flat = snapped(&triangles);
+        flat.shapes[0].geometry = Geometry::Polygon(vec![
+            Point::new(1.0, 1.0),
+            Point::new(5.0, 1.25),
+            Point::new(9.0, 1.5),
+        ]);
+        refused(&triangles, &flat, "a flat triangle");
+
+        let rotated = stepped_model(2, SMALL, ShapeKind::RotatedRectangle, 4);
+        let mut thin = snapped(&rotated);
+        thin.shapes[0].geometry = Geometry::Polygon(vec![
+            Point::new(1.0, 1.0),
+            Point::new(10.0, 1.0),
+            Point::new(10.0, 1.25),
+            Point::new(1.0, 1.25),
+        ]);
+        refused(&rotated, &thin, "a rotated side that rounds to 0");
+
+        let ellipses = stepped_model(2, SMALL, ShapeKind::Ellipse, 4);
+        let mut moved = snapped(&ellipses);
+        let Geometry::Ellipse { cx, .. } = &mut moved.shapes[2].geometry else {
+            panic!("not an ellipse");
+        };
+        *cx += 1.0;
+        refused(&ellipses, &moved, "a fixed shape that moved");
+    }
+
+    /// Adopting leaves the refit pass index alone: the next pass draws the
+    /// streams it would have drawn on a model that got the same shapes
+    /// otherwise.
+    #[cfg(feature = "lab")]
+    #[test]
+    fn adopt_keeps_the_refit_pass_index() {
+        let mut model = stepped_model(6, SMALL, ShapeKind::Triangle, 5);
+        model.refine(Alpha::Auto);
+        let joint = snapped(&model);
+        let mut assigned = model.clone();
+        assert_eq!(model.adopt(&joint, true), Some(true));
+        assert_eq!(model.passes, 1);
+        assigned.history = model.history.clone();
+        assigned.current = model.current.clone();
+        assigned.score = model.score;
+
+        model.refine(Alpha::Auto);
+        assigned.refine(Alpha::Auto);
+
+        assert_eq!(model.history, assigned.history);
+        assert_eq!(model.score, assigned.score);
+        assert_eq!(model.passes, 2);
     }
 }

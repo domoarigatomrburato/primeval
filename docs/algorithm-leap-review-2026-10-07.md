@@ -209,3 +209,57 @@ for r in 10 16 20; do $E --no-synthetic --shapes triangle,any,rotated-ellipse --
 ```
 
 Each corpus run takes 3–6 minutes on the M2 Pro; the thread and round runs take seconds. The baseline and the two reference runs were run twice, before and after a reboot: the quality columns are identical (seeded output does not depend on timing) and the time ratios agree within 4%. The comparison scripts (`parse.py`, `ladder.py`, `equal_time.py`) read the runner's Markdown tables; they are not part of the repository. The raw tables are kept in `target/abl/` (gitignored).
+
+## 10. Follow-up: B during the search (2026-10-08)
+
+The first item of section 8's list, measured. The engine runner gained a lab-only schedule, `--during joint:K:C:I`: on the `Spaced(K, C)` schedule, in place of a refit pass, the joint optimisation (B) runs on the model's shapes with `I` Adam iterations and its result is adopted into the model (`Model::adopt`, lab only), so later greedy steps build on it. A result is kept only if the exact engine canvas, repainted with the adopted shapes, scores strictly lower, the refit pass's own rule; `joint-export:K:C:I` keeps it if the model's PNG export after adopting is closer to the target instead. Adopting converts B's output back to the engine's shapes: triangles and polygons exactly, as continuous polygons; axis-aligned rectangles rounded from B's half-pixel edges to integer pixel bounds; rotated rectangles to an integer centre, sides and angle; every other kind keeps its geometry and takes B's colours. The final stage of each kind is unchanged.
+
+Runs on the five kinds B moves, default corpus and checkpoints, all at `aa8bfd5` (the retuned pipeline of `d85a5b1`), on the same idle machine:
+
+| run | flags |
+| --- | --- |
+| `base5` | `--refine final` (today's pipeline: refit passes `Spaced(20, 5)` or `Spaced(20, 2)`, then the final stage) |
+| `nodur5` | `--refine final --during none` (no passes during the search) |
+| `bdur-20-5-i10` / `i20` / `i40` | `--refine final --during joint:20:5:I` |
+| `bdur-10-10-i20` | `--refine final --during joint:10:10:20` |
+| `bdur-20-5-i20-x` | `--refine final --during joint-export:20:5:20` |
+
+Mean of the 100- and 200-shape median rmse256 against `base5`, and the time ratio over the same rows:
+
+| kind | `nodur5` | `joint:20:5:10` | `joint:20:5:20` | `joint:20:5:40` | `joint:10:10:20` | `joint-export:20:5:20` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| any | +1.4% · 0.73× | +1.4% · 0.74× | +0.9% · 0.76× | +0.5% · 0.85× | +1.4% · 0.83× | +0.9% · 0.78× |
+| triangle | +2.6% · 0.55× | +1.2% · 0.64× | **−1.3% · 0.70×** | −1.4% · 0.87× | −1.4% · 0.90× | −1.3% · 0.74× |
+| rectangle | +3.7% · 0.49× | +3.0% · 0.58× | +2.5% · 0.65× | +1.8% · 0.79× | +2.3% · 0.83× | +2.5% · 0.67× |
+| rotated-rectangle | +1.8% · 0.78× | +1.7% · 0.88× | +0.9% · 0.97× | +1.0% · 1.11× | +1.1% · 1.14× | +1.6% · 0.98× |
+| polygon | +2.8% · 0.71× | +0.8% · 0.75× | −0.2% · 0.76× | −0.0% · 0.84× | −0.5% · 0.84× | −0.2% · 0.78× |
+
+The `adopted` column of the runner (passes kept over passes run, up to the checkpoint) explains the kinds:
+
+- **Triangles and polygons adopt almost every pass** (8/8 at 200 shapes on every image but synthetic-shapes, 1–3/8 there; 12–13/13 at 500). The conversion is exact, so B's gain carries over to the canvas.
+- **Rectangles adopt 1/8 and 3/8 on the two paintings** (7–8/8 on the gradient and the texture), **rotated rectangles 2–4/8 on the paintings and 0/8 on the texture.** Rounding B's half-pixel edges, or its angle to the degree, gives back most of what B gained, and the exact canvas then rejects the result. The export guard keeps the same counts on rectangles, so the rounding, not the guard, is the limit: these kinds would need a continuous representation in the engine before B can run during their search.
+- **`any` adopts 8/8 on the paintings**, but B moves only its triangles, polygons and rectangles, while the refit passes it replaces also serve the curved layers.
+
+Per image and shape count, against `base5`, for triangles with `joint:20:5:20`: both paintings improve at 50, 100 and 200 shapes (American Gothic −2.1 / −1.4 / −2.4%, Mona Lisa −1.1 / −1.0 / −1.6%) and are within ±1.4% at 500; the gradient and the texture are within ±1.3%; synthetic-shapes, the hard-edged image on which the guard rejects B (section 6), is +6.1% at 200 and +3.5% at 500 on a median rmse256 of 0.0065. With 40 iterations the paintings gain about the same for 0.87× the time, and `joint:10:10:20` gains the most on the paintings (−3.8% and −2.2% at 200) at 0.90×, with +10% on synthetic-shapes: 20 iterations at `Spaced(20, 5)` is the knee. At equal time against the greedy curve of section 4, triangles at 200 shapes move from a ratio of 1.019 (`base5`) to 0.936; `nodur5`, with no passes at all, stays the most time-efficient at 0.898, as every stage during the search costs time, but the product's use case is a fixed shape count.
+
+For polygons the mean hides a split: the paintings are within ±1.8% and the gradient improves, while synthetic-shapes regresses by 33–41% at 100–500 shapes, exactly as `nodur5` does (+48–53%). On flat hard-edged shapes the refit passes are what polygons need, and B, rejected by the guard there (the near-collinear coverage of section 8), cannot replace them. For `any`, the paintings lose 2.2% (Mona Lisa, 200) and 2.6% (American Gothic, 500).
+
+Verdicts:
+
+- **Triangles: B during the search replaces the refit passes** in `approximate`'s pipeline: `Spaced(20, 5)`, 20 iterations, the canvas guard; 1.3% below the retuned pipeline at 0.70× its time, and every step of the search stays independent of the thread count (the adoption repaints sequentially and B's result is thread-independent; its conversion is an exact copy, so native and WebAssembly agree).
+- **Polygons: deferred** until B's near-collinear coverage is fixed (section 8's third item), which should let B keep what the refit passes do on hard edges; then the same schedule is worth re-measuring, since it already saves 24% of the time on the paintings.
+- **Rectangles, rotated rectangles, `any`: negative.** The refit passes stay.
+
+Reproduction, with the runner at or after this change:
+
+```bash
+E=target/release/examples/engine
+K=any,triangle,rectangle,rotated-rectangle,polygon
+$E --shapes $K --refine final > base5.md
+$E --shapes $K --refine final --during none > nodur5.md
+for i in 10 20 40; do $E --shapes $K --refine final --during joint:20:5:$i > bdur-20-5-i$i.md; done
+$E --shapes $K --refine final --during joint:10:10:20 > bdur-10-10-i20.md
+$E --shapes $K --refine final --during joint-export:20:5:20 > bdur-20-5-i20-x.md
+```
+
+Each run took 104–135 s.

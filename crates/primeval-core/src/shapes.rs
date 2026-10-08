@@ -407,6 +407,61 @@ impl Shape {
             Self::Polygon(shape) => shape.geometry(),
         }
     }
+
+    /// This shape moved to `geometry`, a joint optimisation result for it
+    /// in [`Self::geometry`]'s coordinates, as the engine's shape of the
+    /// same family; `None` if it does not convert into a valid one. See
+    /// `Model::adopt`, the only caller, for the rules.
+    #[cfg(feature = "lab")]
+    pub(crate) fn adopted(&self, geometry: &Geometry) -> Option<Self> {
+        match (self, geometry) {
+            (Self::Triangle(_), Geometry::Polygon(points)) if points.len() == 3 => {
+                Polygon::through(points).map(Self::Polygon)
+            }
+            (Self::Polygon(polygon), Geometry::Polygon(points))
+                if points.len() == polygon.order =>
+            {
+                Polygon::through(points).map(Self::Polygon)
+            }
+            (
+                Self::Rectangle(_),
+                &Geometry::Rect {
+                    x,
+                    y,
+                    width,
+                    height,
+                },
+            ) => {
+                // The pixels `x1..=x2` cover `[x1, x2 + 1)`.
+                let rectangle = Rectangle {
+                    x1: lattice(x)?,
+                    y1: lattice(y)?,
+                    x2: lattice(x + width)? - 1,
+                    y2: lattice(y + height)? - 1,
+                };
+                (rectangle.x2 >= rectangle.x1
+                    && rectangle.y2 >= rectangle.y1
+                    && rectangle.is_valid())
+                .then_some(Self::Rectangle(rectangle))
+            }
+            (Self::RotatedRectangle(_), Geometry::Polygon(points)) if points.len() == 4 => {
+                RotatedRectangle::from_corners(points).map(Self::RotatedRectangle)
+            }
+            (
+                Self::Ellipse(_) | Self::Circle(_) | Self::Quadratic(_) | Self::RotatedEllipse(_),
+                geometry,
+            ) => (*geometry == self.geometry()).then(|| self.clone()),
+            _ => None,
+        }
+    }
+}
+
+/// `value` rounded to the nearest integer, half away from zero, if that is
+/// well inside `i32`.
+#[cfg(feature = "lab")]
+fn lattice(value: f64) -> Option<i32> {
+    let rounded = value.round();
+    (rounded.abs() < f64::from(1 << 30)).then_some(rounded as i32)
 }
 
 impl ShapeKind {
@@ -747,6 +802,32 @@ impl RotatedRectangle {
     #[must_use]
     pub(crate) fn is_valid(&self) -> bool {
         self.sx.max(self.sy) <= MAX_ASPECT * self.sx.min(self.sy)
+    }
+
+    /// The rectangle whose corners, in [`Self::corners`]' order, are about
+    /// `corners`: the centre is their mean, `sx` the length of the side
+    /// from the first to the second, `sy` of the next, and `angle` the
+    /// direction of the first side in degrees, in `0..360`, each rounded.
+    /// `None` if a side rounds to 0 or the rectangle breaks the
+    /// aspect-ratio cap.
+    ///
+    /// Lab only: the angle comes from `atan2`, whose last bit can differ
+    /// between platforms.
+    #[cfg(feature = "lab")]
+    fn from_corners(corners: &[Point]) -> Option<Self> {
+        let [a, b, c, d] = corners else {
+            return None;
+        };
+        let side = |p: &Point, q: &Point| (q.x - p.x).hypot(q.y - p.y);
+        let angle = (b.y - a.y).atan2(b.x - a.x).to_degrees().round();
+        let rectangle = Self {
+            x: lattice((a.x + b.x + c.x + d.x) / 4.0)?,
+            y: lattice((a.y + b.y + c.y + d.y) / 4.0)?,
+            sx: lattice(side(a, b))?,
+            sy: lattice(side(b, c))?,
+            angle: lattice(angle)?.rem_euclid(360),
+        };
+        (rectangle.sx >= 1 && rectangle.sy >= 1 && rectangle.is_valid()).then_some(rectangle)
     }
 
     fn rasterize<'a, R>(&self, worker: &'a mut WorkerCtx<R>) -> &'a [Scanline] {
@@ -1149,6 +1230,25 @@ impl Polygon {
         };
         polygon.mutate(worker, Step::Coarse);
         polygon
+    }
+
+    /// The polygon through `points`, three or four of them, if it is valid
+    /// ([`Self::is_valid`]). The unused vertex of a triangle is the origin.
+    #[cfg(feature = "lab")]
+    fn through(points: &[Point]) -> Option<Self> {
+        if !(3..=4).contains(&points.len()) {
+            return None;
+        }
+        let (mut x, mut y) = ([0.0; 4], [0.0; 4]);
+        for (i, point) in points.iter().enumerate() {
+            (x[i], y[i]) = (point.x, point.y);
+        }
+        let polygon = Self {
+            order: points.len(),
+            x,
+            y,
+        };
+        polygon.is_valid().then_some(polygon)
     }
 
     /// Whether the polygon is simple and strictly convex with every angle

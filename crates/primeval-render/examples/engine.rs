@@ -32,7 +32,15 @@
 //!                       one pass after every K-th step, `spaced:K:C`
 //!                       after step K, then each max(K, s / C) steps after
 //!                       the pass at step s (default: `approximate`'s for
-//!                       the kind with `--refine final`, otherwise none)
+//!                       the kind with `--refine final`, otherwise none);
+//!                       `joint:K:C:I` (lab only) on the schedule of
+//!                       `spaced:K:C`, the joint optimisation of I
+//!                       iterations (positive) in place of the refit pass,
+//!                       its result adopted into the model if the model's
+//!                       exact canvas scores lower (`Model::adopt`), and
+//!                       `joint-export:K:C:I` the same, adopted if its PNG
+//!                       at the working size is closer to the target, the
+//!                       final stage's rule
 //!   --final-refits R    with `--refine final` or `joint:R`: the final
 //!                       stage's refit passes, `R` passes or `until:G:C`,
 //!                       passes until one lowers the score by less than G
@@ -116,8 +124,9 @@
 //!
 //! - `search_s`: cumulative wall time of the `Model::step` calls up to this
 //!   checkpoint, plus the refit passes: every pass during the search so
-//!   far (`every:K` or `--during`), and with `end:P` this checkpoint's
-//!   passes, with `final` or `joint:R` this checkpoint's final stage.
+//!   far (`every:K` or `--during`, joint passes included), and with `end:P`
+//!   this checkpoint's passes, with `final` or `joint:R` this checkpoint's
+//!   final stage.
 //!   Decoding, the thumbnail, the clone, the
 //!   metrics and the encodings are outside the clock, as are all the
 //!   columns below.
@@ -143,6 +152,11 @@
 //!   column of earlier runs).
 //! - `svg_bytes`: the length in bytes of the SVG output at the default
 //!   output size.
+//! - `adopted`, with `--during joint:K:C:I` or `joint-export:K:C:I`: the
+//!   joint passes during the search up to this checkpoint whose result the
+//!   model adopted, over those that ran, as `kept/ran`; empty for a
+//!   schedule without joint passes. Their time is in `search_s` and
+//!   `refine_s`, as every pass's during the search.
 //! - `violations`, in the per-kind summary only: the drawing's shapes that
 //!   break the legibility rules, checked independently with `acos` angles:
 //!   triangles with an angle of 15° or less; quadrilaterals (polygons
@@ -176,7 +190,7 @@ mod common;
 use common::{ALL_SHAPES, BoxError, SEED, rgb_rmse};
 use image::{ImageFormat, RgbImage, imageops};
 use primeval_core::{Drawing, Geometry, Model, ModelOptions};
-use primeval_render::lab::{During, Pipeline, Refits};
+use primeval_render::lab::{During, Guard, Pass, Pipeline, Refits};
 use primeval_render::{OutputFormat, RenderOptions, ShapeKind, lab};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -235,7 +249,12 @@ impl Config {
 }
 
 fn parse_during(value: &str) -> Result<During, BoxError> {
-    let invalid = || format!("--during: expected none, every:K or spaced:K:C, got {value}");
+    let invalid = || {
+        format!(
+            "--during: expected none, every:K, spaced:K:C, joint:K:C:I or joint-export:K:C:I, \
+             got {value}"
+        )
+    };
     let numbers: Vec<u32> = value
         .split(':')
         .skip(1)
@@ -249,6 +268,18 @@ fn parse_during(value: &str) -> Result<During, BoxError> {
         (Some("none"), []) => Ok(During::Never),
         (Some("every"), &[every]) => Ok(During::Every(every)),
         (Some("spaced"), &[interval, divisor]) => Ok(During::Spaced { interval, divisor }),
+        (Some(name @ ("joint" | "joint-export")), &[interval, divisor, iterations]) => {
+            Ok(During::Joint {
+                interval,
+                divisor,
+                iterations,
+                guard: if name == "joint" {
+                    Guard::Canvas
+                } else {
+                    Guard::Export
+                },
+            })
+        }
         _ => Err(invalid().into()),
     }
 }
@@ -303,6 +334,18 @@ fn describe_pipeline(pipeline: Pipeline) -> String {
         During::Never => "none".to_owned(),
         During::Every(every) => format!("every:{every}"),
         During::Spaced { interval, divisor } => format!("spaced:{interval}:{divisor}"),
+        During::Joint {
+            interval,
+            divisor,
+            iterations,
+            guard,
+        } => {
+            let name = match guard {
+                Guard::Canvas => "joint",
+                Guard::Export => "joint-export",
+            };
+            format!("{name}:{interval}:{divisor}:{iterations}")
+        }
     };
     let refits = match pipeline.refits {
         Refits::Passes(passes) => format!("{passes}"),
@@ -383,6 +426,7 @@ struct Row {
     ssim1024: f64,
     svg_bytes: usize,
     violations: usize,
+    adopted: Option<(u32, u32)>,
 }
 
 fn main() -> Result<(), BoxError> {
@@ -414,6 +458,7 @@ fn main() -> Result<(), BoxError> {
                     ssim1024: lab::ssim(&checkpoint.output, output_reference),
                     svg_bytes: checkpoint.svg_bytes,
                     violations: checkpoint.violations,
+                    adopted: checkpoint.adopted,
                 });
             }
         }
@@ -431,17 +476,22 @@ fn main() -> Result<(), BoxError> {
     };
     println!(
         "| image | shape | steps | search_s |{refine_head} score | rmse256 | gap | ssim128 | \
-         ssim1024 | svg_bytes |"
+         ssim1024 | svg_bytes | adopted |"
     );
-    println!("| --- | --- | ---: | ---: |{refine_rule} ---: | ---: | ---: | ---: | ---: | ---: |");
+    println!(
+        "| --- | --- | ---: | ---: |{refine_rule} ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+    );
     for row in &rows {
         let refine = if refined {
             format!(" {:.3} |", row.refine.as_secs_f64())
         } else {
             String::new()
         };
+        let adopted = row
+            .adopted
+            .map_or_else(String::new, |(kept, ran)| format!("{kept}/{ran}"));
         println!(
-            "| {} | {} | {} | {:.3} |{refine} {:.6} | {:.6} | {:+.4} | {:.6} | {:.6} | {} |",
+            "| {} | {} | {} | {:.3} |{refine} {:.6} | {:.6} | {:+.4} | {:.6} | {:.6} | {} | {adopted} |",
             row.image,
             row.shape,
             row.steps,
@@ -577,6 +627,9 @@ struct Checkpoint {
     output: RgbImage,
     svg_bytes: usize,
     violations: usize,
+    /// The joint passes during the search so far, kept and run, if the
+    /// schedule has any.
+    adopted: Option<(u32, u32)>,
 }
 
 /// Runs one search of `shape` to the last of the checkpoints (sorted,
@@ -606,6 +659,7 @@ fn search(input: &[u8], shape: ShapeKind, config: &Config) -> Result<Vec<Checkpo
 
     let mut search = Duration::ZERO;
     let mut refined = Duration::ZERO;
+    let mut adopted = matches!(pipeline.during, During::Joint { .. }).then_some((0, 0));
     let mut recorded = Vec::with_capacity(checkpoints.len());
     let mut next = checkpoints.iter().copied().peekable();
     for step in 1..=last {
@@ -622,10 +676,15 @@ fn search(input: &[u8], shape: ShapeKind, config: &Config) -> Result<Vec<Checkpo
             refined += elapsed;
         }
         let start = Instant::now();
-        if lab::after_step(&mut model, pipeline, step, render.alpha) {
+        let pass = lab::after_step(&mut model, pipeline, step, render.alpha);
+        if pass.ran() {
             let elapsed = start.elapsed();
             search += elapsed;
             refined += elapsed;
+        }
+        if let (Pass::Joint { kept }, Some((adopted, ran))) = (pass, adopted.as_mut()) {
+            *adopted += u32::from(kept);
+            *ran += 1;
         }
 
         if next.next_if_eq(&step).is_none() {
@@ -676,6 +735,7 @@ fn search(input: &[u8], shape: ShapeKind, config: &Config) -> Result<Vec<Checkpo
             output: png(&drawing, render.output_size)?,
             svg_bytes,
             violations: violations(&drawing, render.shape),
+            adopted,
         });
     }
     Ok(recorded)

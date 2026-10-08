@@ -68,6 +68,53 @@ pub enum During {
         /// The divisor of the step number.
         divisor: u32,
     },
+    /// On [`During::Spaced`]'s schedule, the joint optimisation of the
+    /// model in place of the refit pass, its result adopted into the model
+    /// ([`Model::adopt`]) if `guard` keeps it. All three numbers are
+    /// positive.
+    Joint {
+        /// The smallest number of steps between two passes.
+        interval: u32,
+        /// The divisor of the step number.
+        divisor: u32,
+        /// The Adam iterations of every pass.
+        iterations: u32,
+        /// What decides whether a pass's result is kept.
+        guard: Guard,
+    },
+}
+
+/// What keeps the result of a joint pass in the search ([`During::Joint`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Guard {
+    /// The model's exact canvas, repainted with the adopted shapes, scores
+    /// strictly lower.
+    Canvas,
+    /// The joint result's PNG export at the working size is strictly closer
+    /// to the target than the model's drawing's, the final stage's rule.
+    Export,
+}
+
+/// What [`after_step`] ran.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pass {
+    /// No pass was due.
+    Skipped,
+    /// A refit pass.
+    Refit,
+    /// A joint pass ([`During::Joint`]), and whether its result was kept.
+    Joint {
+        /// Whether the model adopted the joint result.
+        kept: bool,
+    },
+}
+
+impl Pass {
+    /// Whether a pass ran.
+    #[must_use]
+    pub fn ran(self) -> bool {
+        self != Self::Skipped
+    }
 }
 
 /// The refit passes of the final stage.
@@ -93,6 +140,20 @@ impl From<crate::pipeline::Pipeline> for Pipeline {
                 D::Never => During::Never,
                 D::Every(every) => During::Every(every),
                 D::Spaced { interval, divisor } => During::Spaced { interval, divisor },
+                D::Joint {
+                    interval,
+                    divisor,
+                    iterations,
+                    guard,
+                } => During::Joint {
+                    interval,
+                    divisor,
+                    iterations,
+                    guard: match guard {
+                        crate::pipeline::Guard::Canvas => Guard::Canvas,
+                        crate::pipeline::Guard::Export => Guard::Export,
+                    },
+                },
             },
             refits: match pipeline.refits {
                 R::Passes(passes) => Refits::Passes(passes),
@@ -111,6 +172,20 @@ impl From<Pipeline> for crate::pipeline::Pipeline {
                 During::Never => D::Never,
                 During::Every(every) => D::Every(every),
                 During::Spaced { interval, divisor } => D::Spaced { interval, divisor },
+                During::Joint {
+                    interval,
+                    divisor,
+                    iterations,
+                    guard,
+                } => D::Joint {
+                    interval,
+                    divisor,
+                    iterations,
+                    guard: match guard {
+                        Guard::Canvas => crate::pipeline::Guard::Canvas,
+                        Guard::Export => crate::pipeline::Guard::Export,
+                    },
+                },
             },
             refits: match pipeline.refits {
                 Refits::Passes(passes) => R::Passes(passes),
@@ -127,14 +202,18 @@ pub fn pipeline(shape: ShapeKind) -> Pipeline {
     crate::pipeline::pipeline(shape).into()
 }
 
-/// Runs the refit pass `pipeline` schedules after step `step` (from 1) of
-/// `model`, if any, exactly as [`crate::approximate`] runs it. Returns
-/// whether a pass ran.
-pub fn after_step(model: &mut Model, pipeline: Pipeline, step: u32, alpha: Alpha) -> bool {
+/// Runs the pass `pipeline` schedules after step `step` (from 1) of
+/// `model`, if any, exactly as [`crate::approximate`] runs it, and returns
+/// what ran.
+pub fn after_step(model: &mut Model, pipeline: Pipeline, step: u32, alpha: Alpha) -> Pass {
     let during = crate::pipeline::Pipeline::from(pipeline).during;
-    crate::pipeline::after_step(model, during, step, alpha, || false)
+    let pass = crate::pipeline::after_step(model, during, step, alpha, || false)
         .expect("a pass that is never cancelled finishes");
-    during.due(step)
+    match pass {
+        crate::pipeline::Pass::Skipped => Pass::Skipped,
+        crate::pipeline::Pass::Refit => Pass::Refit,
+        crate::pipeline::Pass::Joint { kept } => Pass::Joint { kept },
+    }
 }
 
 /// Runs the final stage of `pipeline` on `model`, a search after its last
@@ -328,7 +407,7 @@ mod tests {
         let mut passes = 0;
         for step in 1..=render.count {
             model.step(render.shape, render.alpha);
-            passes += u32::from(after_step(&mut model, stages, step, render.alpha));
+            passes += u32::from(after_step(&mut model, stages, step, render.alpha).ran());
         }
         let (drawing, _) = final_stage(&mut model, render, stages, None);
         let bytes = encode(&drawing, render.output_size, output)
