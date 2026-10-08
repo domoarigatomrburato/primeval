@@ -885,15 +885,21 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
   - rotated ellipse: 16 rounds and climb age ×1, −7.0% at 1.56× (was −9.2% at 3.03×).
 
   Quadratics keep the age ×2 (2.6 points for 57% more time; no cheaper lever). Rotated ellipse's greedy digest is new (`0xf9f17763932224cc`); `any`'s is unchanged.
-- **Next:**
-  1. Re-run `versus_go` on the branch for the README (polygon and quadratic were below Go on x86 before these changes).
-  2. Optionally, fix B's coverage of near-collinear edges, so that the guard rejects B less often.
-  3. Experiment 6 (memory guard at `resizeInput` 1024 / 2048), the single-threaded browser time of "Refining", then the pre-merge list below.
+- **Next** (agreed 2026-10-08 on `docs/algorithm-leap-review-2026-10-07.md`; `versus_go`, the gallery and the README were regenerated at `646252c`):
+  1. B during the search, at a `Spaced`-like schedule, in place of the refit passes for the kinds it covers: B is the most efficient stage and the passes during the search are the cost. Judge with the engine runner against the pipeline of `d85a5b1`.
+  2. B for the curved kinds (ellipse, circle, rotated ellipse; quadratic last), with a smooth coverage on the boundary pixels, so that their costly passes can go.
+  3. B's coverage of near-collinear edges (an exact convex-polygon pixel area, or a penalty near 180°), so that the guard rejects B less often.
+  4. A per-shape stroke width for quadratic, bounded and exported as `stroke-width`; no new public option.
+  5. Layer-parallel refit, verified against the sequential pass: the only large lever left on refit time (more climbs per layer do not help; see the review).
+  6. A2, better greedy proposals (an evolution strategy seeded from the error grid); never tried.
+  7. A second final refit pass for the kinds without B: 1–3% for about 10% time.
+  8. x86 SIMD kernels, last, in a session on x86 runners where they can be measured; the NEON-against-scalar parity tests are the model.
+  Also still open: experiment 6 (memory guard at `resizeInput` 1024 / 2048), the manual demo check below, and the review of the merged change.
 
-**Before merging the branch** (user decision: it merges once, when B's productisation is done too, with no intermediate merge):
-- a full review of the whole branch (user request), with the `/simplify` and `/code-review` skills;
-- regenerate the gallery, the README comparison images and the versus-Go numbers (`CONTRIBUTING.md`), which output changes make stale;
-- check by hand in the demo that "Refining" stays visible during a long single-threaded pass, and that Stop during it keeps the preview.
+**After the merge** (the branch was squash-merged as `16877bb` on 2026-10-07 before these were done; status as of 2026-10-08):
+- a full review of the merged change (user request), with the `/simplify` and `/code-review` skills: **open**;
+- regenerate the gallery, the README comparison images and the versus-Go numbers (`CONTRIBUTING.md`): **done** at `646252c`, after the retune;
+- check by hand in the demo that "Refining" stays visible during a long single-threaded pass, and that Stop during it keeps the preview: **open**.
 
 ---
 
