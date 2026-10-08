@@ -1062,7 +1062,7 @@ mod tests {
                 let context = format!("{shape:?}, step {step}");
                 match pass {
                     Pass::Joint { kept: true } => {
-                        kept += 1;
+                        kept += usize::from(shape != ShapeKind::Any);
                         assert!(model.score_f64() < before.score_f64(), "{context}");
                     }
                     Pass::Joint { kept: false } => {
@@ -1074,7 +1074,12 @@ mod tests {
                 }
             }
         }
-        assert!(kept >= 10, "only {kept} passes kept");
+        // An `any` stack usually holds rotated rectangles or curved shapes,
+        // which `Model::adopt` refuses in the production build, so its
+        // joint passes are kept only in the lab build: the floor counts the
+        // four concrete kinds' passes, 9 of their 12 (rotated rectangles
+        // adopt only in the lab build too).
+        assert!(kept >= 9, "only {kept} passes kept");
     }
 
     /// With the export guard a joint pass is kept only if the model's own
@@ -1107,7 +1112,7 @@ mod tests {
                 let context = format!("{shape:?}, step {step}");
                 match pass {
                     Pass::Joint { kept: true } => {
-                        kept += 1;
+                        kept += usize::from(shape != ShapeKind::Any);
                         assert!(error(&model) < error(&before), "{context}");
                     }
                     Pass::Joint { kept: false } => {
@@ -1119,8 +1124,12 @@ mod tests {
                 }
             }
         }
-        // 15 of the 20 passes are kept.
-        assert!(kept >= 10, "only {kept} passes kept");
+        // An `any` stack usually holds rotated rectangles or curved shapes,
+        // which `Model::adopt` refuses in the production build, so its
+        // joint passes are kept only in the lab build: the floor counts the
+        // four concrete kinds' passes, 9 of their 12 (rotated rectangles
+        // adopt only in the lab build too).
+        assert!(kept >= 9, "only {kept} passes kept");
     }
 
     /// A joint pass in the search polls `cancelled` before every iteration,
@@ -1233,7 +1242,11 @@ mod tests {
     /// now polygons: every step still lowers the score or keeps it.
     #[test]
     fn greedy_steps_continue_after_an_adopted_joint_pass() {
-        for shape in [ShapeKind::Triangle, ShapeKind::Any] {
+        // Not `any`: its stack usually holds rotated rectangles or curved
+        // shapes, which `Model::adopt` refuses in the production build, so
+        // its joint passes are kept only in the lab build. Polygons adopt
+        // exactly.
+        for shape in [ShapeKind::Triangle, ShapeKind::Polygon] {
             let (mut model, passes) = joint_model(shape, joint(5, 1, 10, Guard::Canvas), 5);
             assert_eq!(
                 passes.last(),

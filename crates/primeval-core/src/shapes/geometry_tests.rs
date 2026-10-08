@@ -442,7 +442,7 @@ const COVERAGE_BOUND: f64 = 0.06;
 #[test]
 fn quadratic_coverage_matches_the_exported_stroke() {
     let (mut worker, round) = make_test_round(W, H, 31);
-    let width = Quadratic::STROKE_WIDTH;
+    let width = Quadratic::STROKE_WIDTHS.0;
     let curve = |x1, y1, x2, y2, x3, y3| {
         Shape::Quadratic(Quadratic {
             x1,

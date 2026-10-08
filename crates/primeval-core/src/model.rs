@@ -4,7 +4,7 @@ use crate::drawing::{Drawing, DrawnShape};
 use crate::error_grid::ErrorGrid;
 use crate::refine::RefineEffort;
 use crate::score;
-use crate::shapes::{Shape, ShapeKind};
+use crate::shapes::{Quadratic, Shape, ShapeKind};
 use crate::state::State;
 use crate::worker::{SearchRound, WorkerCtx};
 use crate::{Buffer, Color};
@@ -107,7 +107,8 @@ pub struct Model {
     /// Refit passes run so far, the pass index of the next
     /// [`Model::refine`]'s random streams.
     passes: u64,
-    /// Scratch for rasterizing the shape that [`Model::add`] paints.
+    /// Scratch for rasterizing the shape that [`Model::add`] paints; the
+    /// refit pass's workers take their quadratic width bounds from it.
     scratch: WorkerCtx<ChaCha8Rng>,
     /// The search effort of [`Model::step`] for every kind, set only by
     /// the lab hook; otherwise each kind's [`Effort::of`].
@@ -115,6 +116,11 @@ pub struct Model {
     /// The effort of every refit pass: [`RefineEffort::DEFAULT`] unless the
     /// lab hook set it.
     refine_effort: RefineEffort,
+    /// The bounds of a quadratic curve's stroke width that every worker
+    /// of the search and of the refit pass gets (see
+    /// `WorkerCtx::quadratic_width`): `Quadratic::STROKE_WIDTHS` unless
+    /// the lab hook set them.
+    quadratic_width: (f64, f64),
     /// Whether the search may stop evaluations early; see
     /// `WorkerCtx::pruning`.
     #[cfg(test)]
@@ -174,6 +180,7 @@ impl Model {
             scratch,
             effort: None,
             refine_effort: RefineEffort::DEFAULT,
+            quadratic_width: Quadratic::STROKE_WIDTHS,
             #[cfg(test)]
             pruning: true,
             #[cfg(test)]
@@ -218,6 +225,7 @@ impl Model {
         } = self.effort.unwrap_or(Effort::of(kind));
         let (candidate_count, hill_climb_age) =
             (candidate_count * candidates, hill_climb_age * age);
+        let quadratic_width = self.quadratic_width;
         #[cfg(test)]
         let pruning = self.pruning;
         let results: Vec<(State, u64)> = (0..rounds)
@@ -226,6 +234,7 @@ impl Model {
                 || WorkerCtx::new(width, height, crate::rng::round_rng(seed, step, 0)),
                 |worker, index| {
                     worker.rng = crate::rng::round_rng(seed, step, index);
+                    worker.quadratic_width = quadratic_width;
                     #[cfg(test)]
                     {
                         worker.pruning = pruning;
@@ -279,6 +288,23 @@ impl Model {
     pub fn set_refine_effort(&mut self, rounds: u64, age: usize) {
         assert!(rounds > 0 && age > 0, "refine effort must be positive");
         self.refine_effort = RefineEffort { rounds, age };
+    }
+
+    /// Lab only: makes every later [`Model::step`] and [`Model::refine`]
+    /// choose each quadratic curve's stroke width between `min` and `max`
+    /// working pixels instead of the default 2 to 6 px: random curves draw
+    /// it uniformly and a fourth move shifts it. `1 <= min <= max`; equal
+    /// bounds fix the width, `2:2` as it was before the search chose it.
+    /// Not part of the supported API.
+    #[cfg(feature = "lab")]
+    #[doc(hidden)]
+    pub fn set_quadratic_width(&mut self, min: f64, max: f64) {
+        assert!(
+            1.0 <= min && min <= max,
+            "quadratic width bounds must satisfy 1 <= min <= max"
+        );
+        self.quadratic_width = (min, max);
+        self.scratch.quadratic_width = (min, max);
     }
 
     /// Replaces the committed shapes with `drawing`, a
@@ -807,17 +833,19 @@ mod tests {
     /// keeping twice the climb age; `polygon`'s digest is the one it had
     /// before the 32 rounds. `rotated-ellipse` again when it went back to
     /// 16 rounds and the climb age ×1; `any`, back to 16 rounds as well,
-    /// kept its digests.
+    /// kept its digests. `quadratic` and `any` (both coarse and not) again
+    /// when the search began to draw and move each quadratic curve's
+    /// stroke width, between 2 and 6 px, instead of fixing it at 2 px.
     #[test]
     fn seeded_greedy_output_is_pinned() {
         let pinned = [
-            (ShapeKind::Any, 0xc79e328758b81cac),
+            (ShapeKind::Any, 0xb126c51184c55dc3),
             (ShapeKind::Triangle, 0x0b2c1d60c966824f),
             (ShapeKind::Rectangle, 0xd8f95f8e1f029eac),
             (ShapeKind::Ellipse, 0xdd99e621c00e71b6),
             (ShapeKind::Circle, 0x1cc7d6677aa8b599),
             (ShapeKind::RotatedRectangle, 0x52186adc7569380b),
-            (ShapeKind::Quadratic, 0xe3a5dd0d1b3341ff),
+            (ShapeKind::Quadratic, 0xb32c52aba93ea445),
             (ShapeKind::RotatedEllipse, 0xf9f17763932224cc),
             (ShapeKind::Polygon, 0xb57dc794666b2a2b),
         ];
@@ -834,7 +862,7 @@ mod tests {
         assert_eq!(actual, pinned);
         assert_eq!(
             digest(&seeded_drawing_of(42, 2, 2, ShapeKind::Any, true, COARSE)),
-            0x90ca95129c711074,
+            0x82420a134976eb5b,
             "with a coarse random phase"
         );
     }
@@ -1189,6 +1217,99 @@ mod tests {
         assert_consistent(&model, "refine effort 8:25");
     }
 
+    /// The stroke widths of `drawing`'s quadratic curves.
+    fn quadratic_widths(drawing: &Drawing) -> Vec<f64> {
+        drawing
+            .shapes
+            .iter()
+            .filter_map(|shape| match shape.geometry {
+                crate::drawing::Geometry::Quadratic { width, .. } => Some(width),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// By default the search chooses each curve's width between 2 and 6
+    /// working pixels. (On a noise target every curve takes the widest
+    /// stroke, so the target mixes thin and wide features.)
+    #[test]
+    fn quadratic_widths_default_to_between_2_and_6_pixels() {
+        let worker = WorkerCtx::new(8, 8, crate::rng::create_rng(0));
+        assert_eq!(worker.quadratic_width, (2.0, 6.0));
+        // Thin lines on the left, where thin strokes fit, and a solid block
+        // on the right, where wide strokes fit.
+        let (width, height) = (48_u32, 36_u32);
+        let pixels = (0..height)
+            .flat_map(|y| (0..width).map(move |x| (x, y)))
+            .flat_map(|(x, y)| {
+                let lit = if x < width / 2 {
+                    y % 8 < 2
+                } else {
+                    (8..28).contains(&y)
+                };
+                [if lit { 255 } else { 0 }; 3]
+            })
+            .collect();
+        let target = Buffer::from_rgb(width, height, pixels).expect("valid length");
+        let options = ModelOptions {
+            seed: Some(5),
+            ..ModelOptions::default()
+        };
+        let mut model = Model::new(target, Color::new(0, 0, 0, 255), options);
+        assert_eq!(model.quadratic_width, (2.0, 6.0));
+        assert_eq!(model.scratch.quadratic_width, (2.0, 6.0));
+        for _ in 0..8 {
+            model.step(ShapeKind::Quadratic, Alpha::Auto);
+        }
+        let widths = quadratic_widths(&model.drawing());
+        assert_eq!(widths.len(), 8);
+        assert!(
+            widths.iter().all(|width| (2.0..=6.0).contains(width)),
+            "{widths:?}"
+        );
+        assert!(widths.iter().any(|&width| width != widths[0]), "{widths:?}");
+    }
+
+    /// With wider bounds, the search chooses each curve's width within
+    /// them.
+    #[cfg(feature = "lab")]
+    #[test]
+    fn a_variable_quadratic_width_searches_widths_within_its_bounds() {
+        let mut model = stepped_model(5, (48, 36), ShapeKind::Quadratic, 0);
+        model.set_quadratic_width(1.5, 6.0);
+        for _ in 0..8 {
+            model.step(ShapeKind::Quadratic, Alpha::Auto);
+        }
+        let widths = quadratic_widths(&model.drawing());
+        assert_eq!(widths.len(), 8);
+        assert!(
+            widths.iter().all(|width| (1.5..=6.0).contains(width)),
+            "{widths:?}"
+        );
+        assert!(widths.iter().any(|&width| width != 2.0), "{widths:?}");
+        assert_consistent(&model, "quadratic width 1.5:6");
+    }
+
+    /// The refit pass's climbs move the widths too.
+    #[cfg(feature = "lab")]
+    #[test]
+    fn a_refit_pass_moves_quadratic_widths_within_their_bounds() {
+        let mut model = stepped_model(5, (48, 36), ShapeKind::Quadratic, 0);
+        model.set_quadratic_width(1.5, 6.0);
+        for _ in 0..8 {
+            model.step(ShapeKind::Quadratic, Alpha::Auto);
+        }
+        let before = quadratic_widths(&model.drawing());
+        model.refine(Alpha::Auto);
+        let after = quadratic_widths(&model.drawing());
+        assert!(
+            after.iter().all(|width| (1.5..=6.0).contains(width)),
+            "{after:?}"
+        );
+        assert_ne!(after, before, "the pass changed no width");
+        assert_consistent(&model, "refit at quadratic width 1.5:6");
+    }
+
     /// [`seeded_drawing`] with a refit pass after every other step when
     /// `refine` is set.
     fn refined_drawing(seed: u64, threads: usize, refine: bool) -> Drawing {
@@ -1466,7 +1587,12 @@ mod tests {
     /// not kept, and the model is left exactly as it was.
     #[test]
     fn adopt_keeps_the_model_when_the_drawing_repaints_worse() {
-        for kind in [ShapeKind::Triangle, ShapeKind::Rectangle, ShapeKind::Any] {
+        // Not `any`: its stack holds shapes the production build cannot adopt.
+        for kind in [
+            ShapeKind::Triangle,
+            ShapeKind::Rectangle,
+            ShapeKind::Polygon,
+        ] {
             let before = stepped_model(3, (41, 33), kind, 6);
             let joint = snapped(&before);
             let mut moved = joint.clone();

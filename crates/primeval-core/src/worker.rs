@@ -12,7 +12,7 @@ use crate::optimize::hill_climb;
 use crate::raster::{RowScratch, StrokeScratch};
 use crate::scanline::Scanline;
 use crate::score;
-use crate::shapes::{Shape, ShapeKind};
+use crate::shapes::{Quadratic, Shape, ShapeKind};
 use crate::state::State;
 use rand::{Rng, RngExt};
 
@@ -47,6 +47,12 @@ pub(crate) struct WorkerCtx<R> {
     pub(crate) rng: R,
     /// Running count of energy evaluations performed by this worker.
     pub(crate) evaluations: u64,
+    /// The bounds `(min, max)` of a quadratic curve's stroke width in
+    /// working pixels, `1 <= min <= max`, within which random curves and
+    /// their moves choose each curve's width: [`Quadratic::STROKE_WIDTHS`]
+    /// unless the lab hook `Model::set_quadratic_width` set others. Equal
+    /// bounds fix the width.
+    pub(crate) quadratic_width: (f64, f64),
     /// Whether bounded evaluations may stop early; tests turn it off to
     /// check that the early exit never changes a result.
     #[cfg(test)]
@@ -85,6 +91,7 @@ impl<R: Rng> WorkerCtx<R> {
             rows: RowScratch::default(),
             rng,
             evaluations: 0,
+            quadratic_width: Quadratic::STROKE_WIDTHS,
             #[cfg(test)]
             pruning: true,
             #[cfg(test)]

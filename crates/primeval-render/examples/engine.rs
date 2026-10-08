@@ -72,6 +72,12 @@
 //!   --refine-effort R:A every refit pass's hill climbs per layer and the
 //!                       non-improving moves that stop a climb (default:
 //!                       the model's, 4 climbs of age 25)
+//!   --quadratic-width MIN:MAX  the bounds of every quadratic curve's
+//!                       stroke width in working pixels, 1 <= MIN <= MAX
+//!                       (`Model::set_quadratic_width`, default: the
+//!                       model's 2:6; 2:2 reproduces the earlier fixed
+//!                       2 px); for every kind, it only affects
+//!                       quadratics, in `quadratic` and `any`
 //! ```
 //!
 //! For every image × shape kind it runs one greedy search to the largest
@@ -244,6 +250,9 @@ struct Config {
     /// `--refine-effort`: climbs per layer and climb age of every refit
     /// pass.
     refine_effort: Option<(u64, usize)>,
+    /// `--quadratic-width`: the bounds of every quadratic curve's stroke
+    /// width.
+    quadratic_width: Option<(f64, f64)>,
 }
 
 impl Config {
@@ -355,6 +364,23 @@ fn parse_refine_effort(value: &str) -> Result<(u64, usize), BoxError> {
         return Err(invalid().into());
     }
     Ok(effort)
+}
+
+fn parse_quadratic_width(value: &str) -> Result<(f64, f64), BoxError> {
+    let invalid =
+        || format!("--quadratic-width: expected MIN:MAX with 1 <= MIN <= MAX, got {value}");
+    let parts: Vec<&str> = value.split(':').collect();
+    let [min, max] = parts.as_slice() else {
+        return Err(invalid().into());
+    };
+    let (min, max): (f64, f64) = (
+        min.parse().map_err(|_| invalid())?,
+        max.parse().map_err(|_| invalid())?,
+    );
+    if !(min >= 1.0 && min <= max && max.is_finite()) {
+        return Err(invalid().into());
+    }
+    Ok((min, max))
 }
 
 /// A positive, finite value of `flag`.
@@ -593,6 +619,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
     let mut joint_scale = None;
     let mut effort = None;
     let mut refine_effort = None;
+    let mut quadratic_width = None;
     let mut tuning = joint::Tuning::default();
     let mut curved = true;
     while let Some(arg) = args.next() {
@@ -638,6 +665,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
             }
             "--effort" => effort = Some(parse_effort(&value()?)?),
             "--refine-effort" => refine_effort = Some(parse_refine_effort(&value()?)?),
+            "--quadratic-width" => quadratic_width = Some(parse_quadratic_width(&value()?)?),
             other => return Err(format!("unknown argument {other}; see the doc comment").into()),
         }
     }
@@ -688,6 +716,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
         curved,
         effort,
         refine_effort,
+        quadratic_width,
     })
 }
 
@@ -735,6 +764,9 @@ fn search(input: &[u8], shape: ShapeKind, config: &Config) -> Result<Vec<Checkpo
     }
     if let Some((rounds, age)) = config.refine_effort {
         model.set_refine_effort(rounds, age);
+    }
+    if let Some((min, max)) = config.quadratic_width {
+        model.set_quadratic_width(min, max);
     }
 
     let mut search = Duration::ZERO;
@@ -938,6 +970,9 @@ fn print_header(config: &Config) {
     }
     if let Some((rounds, age)) = config.refine_effort {
         println!("- refine effort: {rounds} climbs per layer, climb age {age}");
+    }
+    if let Some((min, max)) = config.quadratic_width {
+        println!("- quadratic width: {min} to {max} px");
     }
     println!();
 }

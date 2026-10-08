@@ -9,6 +9,9 @@ use std::str::FromStr;
 
 const POSITION_SIGMA: f64 = 16.0;
 const ANGLE_SIGMA: f64 = 32.0;
+/// The `σ` in pixels of a coarse move of a quadratic curve's stroke width,
+/// when its bounds let it vary (`WorkerCtx::quadratic_width`).
+const WIDTH_SIGMA: f64 = 1.0;
 
 /// The shape family the search draws from.
 ///
@@ -941,18 +944,37 @@ impl RotatedRectangle {
 impl Quadratic {
     const MUTATE_MARGIN: f64 = 16.0;
     const MAX_MUTATE_ATTEMPTS: u32 = 6;
-    /// Stroke width in working pixels. The rasterizer covers each pixel by
-    /// the share of its area under the stroke, as the exporter draws it,
-    /// so the colour fit sees the coverage the output has. tiny-skia draws
-    /// a stroke at most 1 px wide as a hairline, thinner than its width on
-    /// a diagonal, so the PNG at the working size would disagree with the
-    /// SVG and every larger PNG. Among the widths measured with the engine
-    /// runner (1, 1.5, 2 and 3 px, refit pass included), wider strokes fit
-    /// better: 2 px cut the median RMSE of the working-size PNG by 15% at
-    /// 100 shapes and 24% at 200 against the earlier 1 px stroke, 3 px by
-    /// 26% and 54%. Wider strokes change the look of the curves more and
-    /// cost more time, so the width stays at 2 px.
-    const STROKE_WIDTH: f64 = 2.0;
+    /// The bounds `(min, max)` of the stroke width in working pixels, within
+    /// which the search chooses each curve's width: a random curve draws
+    /// it uniformly, a move shifts it by a normal step of `σ` 1 px, clamped,
+    /// and the refit's climbs scale that step as they scale the positions'.
+    ///
+    /// The rasterizer covers each pixel by the share of its area under the
+    /// stroke, as the exporter draws it, so the colour fit sees the
+    /// coverage the output has. The width was first fixed: among the widths
+    /// measured with the engine runner (1, 1.5, 2 and 3 px, refit pass
+    /// included), wider strokes fit better: 2 px cut the median RMSE of the
+    /// working-size PNG by 15% at 100 shapes and 24% at 200 against the
+    /// earlier 1 px stroke, 3 px by 26% and 54%. Wider strokes change the
+    /// look of the curves more and cost more time, so the width stayed at
+    /// 2 px.
+    ///
+    /// Letting the search choose it between 2 and 6 px cut the median RMSE
+    /// against the fixed 2 px (final refit, five images) by 28, 60, 66 and
+    /// 49% at 50, 100, 200 and 500 shapes, both paintings by 52% and 50% at
+    /// 200 shapes and by 41% and 32% at 500, the texture by 27 to 2%, at
+    /// 1.39, 1.32, 1.25 and 1.11 times the time and 3% more SVG bytes. A
+    /// fixed 3 px cut 27% at 1.14 times the time; `any` moved by at most 2%.
+    ///
+    /// The minimum stays at 2 px: tiny-skia draws a stroke at most 1 px
+    /// wide as a hairline, thinner than its width on a diagonal, so the PNG
+    /// at the working size would disagree with the SVG and every larger
+    /// PNG, and a range from 1.5 px gained nothing more; 2 px also keeps
+    /// the pixels on the centre line fully covered. The maximum stays at
+    /// 6 px: up to 8 px gained 5 to 6 more points on the paintings at 200
+    /// shapes for up to 1.52 times the time, and wider strokes change the
+    /// look of the curves more.
+    pub(crate) const STROKE_WIDTHS: (f64, f64) = (2.0, 6.0);
 
     /// The stroke rasterizer measures distances in continuous coordinates,
     /// so the control points map unchanged.
@@ -971,6 +993,14 @@ impl Quadratic {
         let y2 = y1 + worker.rng.random::<f64>() * 40.0 - 20.0;
         let x3 = x2 + worker.rng.random::<f64>() * 40.0 - 20.0;
         let y3 = y2 + worker.rng.random::<f64>() * 40.0 - 20.0;
+        // A fixed width draws nothing, so equal bounds keep the streams of
+        // the earlier fixed width.
+        let (min, max) = worker.quadratic_width;
+        let width = if min < max {
+            worker.rng.random_range(min..=max)
+        } else {
+            min
+        };
         let mut quadratic = Self {
             x1,
             y1,
@@ -978,7 +1008,7 @@ impl Quadratic {
             y2,
             x3,
             y3,
-            width: Self::STROKE_WIDTH,
+            width,
         };
         quadratic.mutate(worker, Step::Coarse);
         quadratic
@@ -1170,7 +1200,25 @@ impl Quadratic {
         let max_x = f64::from(worker.width - 1) + Self::MUTATE_MARGIN;
         let max_y = f64::from(worker.height - 1) + Self::MUTATE_MARGIN;
         let old = *self;
-        let choice = worker.rng.random_range(0..3u32);
+        // A fourth move, of the width, only when its bounds let it vary, so
+        // that equal bounds keep the three moves and their streams.
+        let (min_width, max_width) = worker.quadratic_width;
+        let choice = if min_width < max_width {
+            worker.rng.random_range(0..4u32)
+        } else {
+            worker.rng.random_range(0..3u32)
+        };
+        if choice == 3 {
+            self.width = (self.width + step.offset_f64(&mut worker.rng, WIDTH_SIGMA))
+                .clamp(min_width, max_width);
+            // The width leaves the curve as valid as it was; only a curve
+            // that `random` has not repaired yet needs the repair.
+            if !self.is_valid() {
+                self.repair_control_point(worker.width, worker.height);
+            }
+            debug_assert!(self.is_valid());
+            return;
+        }
 
         for _ in 0..Self::MAX_MUTATE_ATTEMPTS {
             match choice {
@@ -2202,6 +2250,87 @@ mod tests {
             quadratic.mutate(&mut worker, Step::Coarse);
             assert!(quadratic.is_valid(), "seed {seed} produced invalid shape");
         }
+    }
+
+    /// The 64-bit FNV-1a digest of `text`.
+    fn fnv1a(text: &str) -> u64 {
+        text.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+    }
+
+    /// With the width fixed at 2 px, random quadratics and their moves draw
+    /// the same random streams and make the same shapes as before the
+    /// width became searchable: the digest was recorded before that change.
+    #[test]
+    fn fixed_width_quadratics_keep_their_random_streams() {
+        let (mut worker, round) = round(64, 48);
+        worker.quadratic_width = (2.0, 2.0);
+        let mut trace = String::new();
+        for _ in 0..50 {
+            let Shape::Quadratic(mut quadratic) =
+                Shape::random(ShapeKind::Quadratic, &mut worker, &round)
+            else {
+                panic!("expected a quadratic");
+            };
+            for step in [Step::Coarse, Step::Scaled(0.5), Step::Coarse] {
+                quadratic.mutate(&mut worker, step);
+                assert_eq!(quadratic.width, 2.0);
+                trace.push_str(&format!("{quadratic:?}"));
+            }
+        }
+        trace.push_str(&format!("{}", worker.rng.random::<u64>()));
+        assert_eq!(fnv1a(&trace), 14_903_134_385_898_611_127);
+    }
+
+    #[test]
+    fn random_quadratics_draw_their_width_within_the_bounds() {
+        let (mut worker, round) = round(64, 48);
+        worker.quadratic_width = (1.5, 6.0);
+        let widths: Vec<f64> = (0..200)
+            .map(|_| {
+                let Shape::Quadratic(quadratic) =
+                    Shape::random(ShapeKind::Quadratic, &mut worker, &round)
+                else {
+                    panic!("expected a quadratic");
+                };
+                assert!(quadratic.is_valid(), "{quadratic:?}");
+                quadratic.width
+            })
+            .collect();
+        assert!(
+            widths.iter().all(|width| (1.5..=6.0).contains(width)),
+            "{widths:?}"
+        );
+        assert!(widths.iter().any(|&width| width != widths[0]), "{widths:?}");
+    }
+
+    #[test]
+    fn quadratic_moves_keep_the_width_within_the_bounds() {
+        let mut moved = 0;
+        for seed in 0..200_u64 {
+            let mut worker = WorkerCtx::new(32, 32, crate::rng::create_rng(seed));
+            worker.quadratic_width = (1.5, 6.0);
+            let mut quadratic = Quadratic {
+                x1: 8.0,
+                y1: 8.0,
+                x2: 16.0,
+                y2: 18.0,
+                x3: 24.0,
+                y3: 8.0,
+                width: 2.0,
+            };
+            quadratic.mutate(&mut worker, Step::Coarse);
+            assert!(quadratic.is_valid(), "seed {seed}: {quadratic:?}");
+            assert!(
+                (1.5..=6.0).contains(&quadratic.width),
+                "seed {seed}: {quadratic:?}"
+            );
+            if quadratic.width != 2.0 {
+                moved += 1;
+            }
+        }
+        assert!(moved > 0, "no move changed the width");
     }
 
     #[test]

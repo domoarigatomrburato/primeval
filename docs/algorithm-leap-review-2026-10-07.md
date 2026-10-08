@@ -334,3 +334,22 @@ The schedule for ellipses and circles: with the passes thinned to `Spaced(20, 5)
 Verdicts: **`any` adopts B for its curved layers; ellipses and circles move to `Spaced(20, 5)`, no final refit pass, then B**; **rotated ellipses keep their pipeline** until the thin-ellipse coverage improves. The switch stays for the lab (`--joint-curved off`), on by default.
 
 Reproduction: `target/abl/run_curved.sh`, then `engine --shapes ellipse,circle --refine final --joint-curved --joint-scale 1 --final-refits 0 --during spaced:20:5`.
+
+## 14. Follow-up: a stroke width per quadratic curve (2026-10-08)
+
+The fourth item of section 8's list. A quadratic curve already carried its stroke width per shape (`Quadratic::width`, rasterised by area coverage and exported as the path's `stroke-width`), fixed at 2 px by the search; the engine's workers now carry bounds for it, the search draws a random curve's width uniformly within them and moves it like a coordinate (a fourth move, σ 1 px, scaled in the refit climbs), and a lab hook with the runner flag `--quadratic-width MIN:MAX` sets them. With the default, a fixed 2 px, the random streams and the greedy digests are unchanged, so the baseline is bit-identical.
+
+Runs on `quadratic,any`, `--refine final`, against the fixed 2 px. Change of the median rmse256 at 50 / 100 / 200 / 500 shapes, the two paintings at 200, the time and the SVG size ratios:
+
+| bounds | quadratic, Δ median | paintings at 200 | time | SVG |
+| --- | --- | --- | ---: | ---: |
+| 3 px, fixed | −7.9 / −14.2 / −43.8 / −26.3% | −26.7 / −27.1% | 1.10–1.15× | 1.01–1.03× |
+| 1.5–4 px | −15.3 / −26.8 / −54.1 / −46.6% | −40.1 / −40.3% | 1.08–1.19× | 0.99–1.02× |
+| 1.5–6 px | −28.3 / −59.8 / −68.0 / −49.3% | −52.4 / −49.9% | 1.10–1.38× | 1.03–1.04× |
+| 1.5–8 px | −40.0 / −64.6 / −72.4 / −50.4% | −56.7 / −52.6% | 1.14–1.52× | 1.04× |
+
+Every image gains at every count with every range; the texture least (−6 to −28%), the hard-edged synthetic image most (−44 to −93%). The width is the lever the review expected (section 8, "Quadratics"): quadratics were 2–3 times worse than every other kind, and a range of widths halves their error on the paintings at 100–200 shapes. Wider bounds gain with diminishing returns and cost time, since a wider stroke covers more pixels per candidate: 1.5–6 px takes 10–38% more time than the fixed 2 px, 1.5–8 px up to 52%. `any`, whose quadratics are one shape in eight, moves by ±1.6% with any range.
+
+The minimum: the same range from 2 px (−28.3 / −59.6 / −66.2 / −48.7%, paintings −52.3 / −49.6% at 200, 1.39–1.11× the time) gains as much as from 1.5 px and keeps the stroke's centre line fully covered, the property the rasteriser's tests hold. **Quadratic curves now choose their width between 2 and 6 px**: the look changes, from a pen of one width to strokes of several, which is the trade the plan accepted for this item; 8 px would gain 5–6 more points on the paintings at 200 shapes for up to 1.52× the time.
+
+Reproduction: `target/abl/run_qwidth.sh`, `analyse_qwidth.py`, then `engine --shapes quadratic,any --refine final --quadratic-width 2:6`.

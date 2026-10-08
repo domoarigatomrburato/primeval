@@ -542,6 +542,7 @@ fn refine_layer<R: Rng>(
     let state = State::committed(committed.shape.clone(), alpha, color.a);
 
     let (width, height) = (scratch.width, scratch.height);
+    let quadratic_width = scratch.quadratic_width;
     let (seed, pass, index) = (streams.seed, streams.pass, index as u64);
     let RefineEffort { rounds, age } = streams.effort;
     let results: Vec<(State, f64, Color, u64)> = (0..rounds)
@@ -550,6 +551,7 @@ fn refine_layer<R: Rng>(
             || WorkerCtx::new(width, height, refine_rng(seed, pass, index, 0)),
             |worker, round| {
                 worker.rng = refine_rng(seed, pass, index, round);
+                worker.quadratic_width = quadratic_width;
                 let evaluations_before = worker.evaluations;
                 let (state, energy, color) =
                     climb(state.clone(), start, worker, age, |state, worker| {
