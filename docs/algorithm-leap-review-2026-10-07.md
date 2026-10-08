@@ -263,3 +263,5 @@ $E --shapes $K --refine final --during joint-export:20:5:20 > bdur-20-5-i20-x.md
 ```
 
 Each run took 104–135 s.
+
+Triangles moved to this schedule in `approximate` at `8e77bb2` (`During::Joint`, `Guard::Canvas`, `Model::adopt`; the rotated-rectangle conversion and the export guard stay lab-only). Regenerated on the same machine with the README's runners: the quality runner's triangle rows at 200 steps went from 1.21 s to 0.89 s (American Gothic) and from 0.95 s to 0.81 s (Mona Lisa), with the export's RMSE 0.7% and 0.2% lower; `versus_go` (alpha 128, not auto) has triangles at 3.96× Go's speed at 200 steps (was 3.4×) and 4.01× at 1000 (was 3.6×), with the RMSE against the resized original 12.30 (was 12.32) and 9.53 (was 9.45): at 1000 shapes with a fixed alpha the quality is 0.8% worse for 10% less time, a regime the engine runner, which stops at 500 shapes with alpha auto, did not cover. The geometric-mean speedup over Go moves from 3.26× / 3.75× to 3.30× / 3.78×, the RMSE ratio stays at 0.811 / 0.742, and every other kind's row is unchanged to the last digit, as the pipeline change is confined to triangles.
