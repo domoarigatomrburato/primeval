@@ -62,7 +62,7 @@ pub enum Geometry {
     /// most four vertices, so no point is enclosed twice and both rules
     /// give the same fill.
     Polygon(Vec<Point>),
-    /// Stroked quadratic Bézier curve with butt caps.
+    /// Stroked quadratic Bézier curve, its two ends drawn as `cap`.
     Quadratic {
         /// Where the curve starts.
         start: Point,
@@ -72,7 +72,27 @@ pub enum Geometry {
         end: Point,
         /// Stroke width.
         width: f64,
+        /// How the stroke ends at `start` and `end`. The engine gives every
+        /// quadratic of a drawing the same cap.
+        cap: LineCap,
     },
+}
+
+/// How a stroke ends, as SVG's `stroke-linecap`. The default is the
+/// engine's cap, round, with which it draws every quadratic curve; SVG's
+/// own default is butt, which the SVG writer expresses by writing no
+/// attribute.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LineCap {
+    /// Flat, across the stroke at its end point: the stroke stops there.
+    Butt,
+    /// A half-disc of the stroke's width centred on the end point: the
+    /// stroke covers every point within half its width of the curve.
+    #[default]
+    Round,
+    /// Flat, half the stroke's width past the end point along the curve's
+    /// direction there.
+    Square,
 }
 
 /// One committed shape: its geometry and its colour. `color.a` is the opacity.

@@ -1,6 +1,6 @@
 use crate::alpha::Alpha;
 use crate::coarse::Coarse;
-use crate::drawing::{Drawing, DrawnShape};
+use crate::drawing::{Drawing, DrawnShape, LineCap};
 use crate::error_grid::ErrorGrid;
 use crate::refine::RefineEffort;
 use crate::score;
@@ -108,7 +108,7 @@ pub struct Model {
     /// [`Model::refine`]'s random streams.
     passes: u64,
     /// Scratch for rasterizing the shape that [`Model::add`] paints; the
-    /// refit pass's workers take their quadratic width bounds from it.
+    /// refit pass's workers take their quadratic width bounds and cap from it.
     scratch: WorkerCtx<ChaCha8Rng>,
     /// The search effort of [`Model::step`] for every kind, set only by
     /// the lab hook; otherwise each kind's [`Effort::of`].
@@ -121,6 +121,10 @@ pub struct Model {
     /// `WorkerCtx::quadratic_width`): `Quadratic::STROKE_WIDTHS` unless
     /// the lab hook set them.
     quadratic_width: (f64, f64),
+    /// How the stroke of every quadratic curve that the search draws ends
+    /// (see `WorkerCtx::quadratic_cap`): round unless the lab hook set
+    /// another.
+    quadratic_cap: LineCap,
     /// Whether the search may stop evaluations early; see
     /// `WorkerCtx::pruning`.
     #[cfg(test)]
@@ -181,6 +185,7 @@ impl Model {
             effort: None,
             refine_effort: RefineEffort::DEFAULT,
             quadratic_width: Quadratic::STROKE_WIDTHS,
+            quadratic_cap: LineCap::Round,
             #[cfg(test)]
             pruning: true,
             #[cfg(test)]
@@ -225,7 +230,7 @@ impl Model {
         } = self.effort.unwrap_or(Effort::of(kind));
         let (candidate_count, hill_climb_age) =
             (candidate_count * candidates, hill_climb_age * age);
-        let quadratic_width = self.quadratic_width;
+        let (quadratic_width, quadratic_cap) = (self.quadratic_width, self.quadratic_cap);
         #[cfg(test)]
         let pruning = self.pruning;
         let results: Vec<(State, u64)> = (0..rounds)
@@ -235,6 +240,7 @@ impl Model {
                 |worker, index| {
                     worker.rng = crate::rng::round_rng(seed, step, index);
                     worker.quadratic_width = quadratic_width;
+                    worker.quadratic_cap = quadratic_cap;
                     #[cfg(test)]
                     {
                         worker.pruning = pruning;
@@ -305,6 +311,17 @@ impl Model {
         );
         self.quadratic_width = (min, max);
         self.scratch.quadratic_width = (min, max);
+    }
+
+    /// Lab only: makes every quadratic curve that later [`Model::step`]s
+    /// draw end in `cap` instead of a round cap, in the engine's coverage
+    /// and in [`Model::drawing`]; curves already drawn keep theirs. Not
+    /// part of the supported API.
+    #[cfg(feature = "lab")]
+    #[doc(hidden)]
+    pub fn set_quadratic_cap(&mut self, cap: LineCap) {
+        self.quadratic_cap = cap;
+        self.scratch.quadratic_cap = cap;
     }
 
     /// Replaces the committed shapes with `drawing`, a
@@ -804,7 +821,8 @@ mod tests {
     }
 
     /// The 64-bit FNV-1a digest of `drawing`'s `Debug` form, which spells
-    /// every shape's coordinates, colour and alpha.
+    /// every shape's coordinates, colour and alpha, and a quadratic
+    /// curve's width and cap.
     fn digest(drawing: &Drawing) -> u64 {
         format!("{drawing:?}")
             .bytes()
@@ -835,17 +853,19 @@ mod tests {
     /// 16 rounds and the climb age ×1; `any`, back to 16 rounds as well,
     /// kept its digests. `quadratic` and `any` (both coarse and not) again
     /// when the search began to draw and move each quadratic curve's
-    /// stroke width, between 2 and 6 px, instead of fixing it at 2 px.
+    /// stroke width, between 2 and 6 px, instead of fixing it at 2 px;
+    /// and again when quadratic curves got round caps, which the digest
+    /// spells.
     #[test]
     fn seeded_greedy_output_is_pinned() {
         let pinned = [
-            (ShapeKind::Any, 0xb126c51184c55dc3),
+            (ShapeKind::Any, 0x9d5205c606ab5866),
             (ShapeKind::Triangle, 0x0b2c1d60c966824f),
             (ShapeKind::Rectangle, 0xd8f95f8e1f029eac),
             (ShapeKind::Ellipse, 0xdd99e621c00e71b6),
             (ShapeKind::Circle, 0x1cc7d6677aa8b599),
             (ShapeKind::RotatedRectangle, 0x52186adc7569380b),
-            (ShapeKind::Quadratic, 0xb32c52aba93ea445),
+            (ShapeKind::Quadratic, 0x523abbb2eb939ae9),
             (ShapeKind::RotatedEllipse, 0xf9f17763932224cc),
             (ShapeKind::Polygon, 0xb57dc794666b2a2b),
         ];
@@ -1290,12 +1310,15 @@ mod tests {
         assert_consistent(&model, "quadratic width 1.5:6");
     }
 
-    /// The refit pass's climbs move the widths too.
+    /// The refit pass's climbs move the widths too. With butt caps: with
+    /// round ones, on this small target the curves of most seeds are all
+    /// at the widest, 6 px, before and after the pass.
     #[cfg(feature = "lab")]
     #[test]
     fn a_refit_pass_moves_quadratic_widths_within_their_bounds() {
         let mut model = stepped_model(5, (48, 36), ShapeKind::Quadratic, 0);
         model.set_quadratic_width(1.5, 6.0);
+        model.set_quadratic_cap(LineCap::Butt);
         for _ in 0..8 {
             model.step(ShapeKind::Quadratic, Alpha::Auto);
         }
@@ -1308,6 +1331,56 @@ mod tests {
         );
         assert_ne!(after, before, "the pass changed no width");
         assert_consistent(&model, "refit at quadratic width 1.5:6");
+    }
+
+    /// The caps of `drawing`'s quadratic curves.
+    fn quadratic_caps(drawing: &Drawing) -> Vec<LineCap> {
+        drawing
+            .shapes
+            .iter()
+            .filter_map(|shape| match shape.geometry {
+                crate::drawing::Geometry::Quadratic { cap, .. } => Some(cap),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// By default every quadratic curve has round caps, the engine's
+    /// default cap.
+    #[test]
+    fn quadratic_caps_default_to_round() {
+        assert_eq!(LineCap::default(), LineCap::Round);
+        let worker = WorkerCtx::new(8, 8, crate::rng::create_rng(0));
+        assert_eq!(worker.quadratic_cap, LineCap::Round);
+        let model = stepped_model(5, (48, 36), ShapeKind::Quadratic, 4);
+        assert_eq!(model.quadratic_cap, LineCap::Round);
+        assert_eq!(model.scratch.quadratic_cap, LineCap::Round);
+        assert_eq!(quadratic_caps(&model.drawing()), [LineCap::Round; 4]);
+    }
+
+    /// With another cap every curve that later steps draw has it, in the
+    /// engine's coverage as in the drawing, a refit pass keeps it, and the
+    /// curves drawn before keep theirs.
+    #[cfg(feature = "lab")]
+    #[test]
+    fn a_quadratic_cap_reaches_every_later_curve() {
+        for cap in [LineCap::Butt, LineCap::Square] {
+            let mut model = stepped_model(5, (48, 36), ShapeKind::Quadratic, 2);
+            let mut round = model.clone();
+            model.set_quadratic_cap(cap);
+            for _ in 0..6 {
+                model.step(ShapeKind::Quadratic, Alpha::Auto);
+                round.step(ShapeKind::Quadratic, Alpha::Auto);
+            }
+            let mut expected = vec![LineCap::Round; 2];
+            expected.extend([cap; 6]);
+            assert_eq!(quadratic_caps(&model.drawing()), expected, "{cap:?}");
+            assert_ne!(model.current.pixels(), round.current.pixels(), "{cap:?}");
+            assert_consistent(&model, &format!("{cap:?} caps"));
+            model.refine(Alpha::Auto);
+            assert_eq!(quadratic_caps(&model.drawing()), expected, "{cap:?}");
+            assert_consistent(&model, &format!("{cap:?} caps after a refit pass"));
+        }
     }
 
     /// [`seeded_drawing`] with a refit pass after every other step when

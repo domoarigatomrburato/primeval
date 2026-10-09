@@ -353,3 +353,20 @@ Every image gains at every count with every range; the texture least (−6 to �
 The minimum: the same range from 2 px (−28.3 / −59.6 / −66.2 / −48.7%, paintings −52.3 / −49.6% at 200, 1.39–1.11× the time) gains as much as from 1.5 px and keeps the stroke's centre line fully covered, the property the rasteriser's tests hold. **Quadratic curves now choose their width between 2 and 6 px**: the look changes, from a pen of one width to strokes of several, which is the trade the plan accepted for this item; 8 px would gain 5–6 more points on the paintings at 200 shapes for up to 1.52× the time.
 
 Reproduction: `target/abl/run_qwidth.sh`, `analyse_qwidth.py`, then `engine --shapes quadratic,any --refine final --quadratic-width 2:6`.
+
+## 15. Follow-up: round caps on quadratic curves (2026-10-09)
+
+Experiment 4b of section 14's item. A quadratic curve's stroke ended in butt caps, cut flat across the curve at its end points, in the engine's coverage, in the SVG (the default of `stroke-linecap`) and in the PNG. The engine's workers now carry the cap (`LineCap`, butt, round or square), the rasteriser covers a pixel past a round end by its share within half the width of the end point (the band across the pixel centre's direction from that point, so the disc is locally straight, as the curve's body is) and lengthens the end segments by half the width for a square one, the SVG writer puts `stroke-linecap` once on the root element, which every path inherits, and the export raster strokes with the same cap. Against a stroke supersampled 16 × 16 over seven curves 2–6 px wide, the worst pixel near an end differs by 0.12 with round caps, 0.14 with square ones and 0.19 with butt ones, the sum over the stroke by 1.6%, 1.7% and 1.8% of the reference's; against the export's coverage, round and square caps agree at least as well as butt. A lab hook and the runner flag `--quadratic-cap` set the cap; the butt runs reproduce section 14's bit for bit.
+
+Runs on `quadratic,any`, `--refine final`, at the fixed 2 px and at the 2–6 px of section 14, against butt caps at the same width. Change of the median rmse256 at 50 / 100 / 200 / 500 shapes, the two paintings at 500, the time and the SVG size ratios:
+
+| cap | width | quadratic, Δ median | paintings at 500 | time | SVG |
+| --- | --- | --- | --- | ---: | ---: |
+| round | 2 px | +0.4 / −0.1 / −1.0 / −1.5% | −1.5 / −2.3% | 0.99–1.00× | 1.00× |
+| square | 2 px | +0.3 / −0.1 / −0.6 / −1.0% | −1.0 / −1.4% | 1.01–1.02× | 1.00–1.01× |
+| round | 2–6 px | −0.2 / +0.3 / −3.0 / −5.0% | −4.3 / −5.0% | 0.98–1.00× | 1.00× |
+| square | 2–6 px | −1.0 / +1.4 / −7.1 / −4.1% | −2.0 / −4.1% | 1.00–1.03× | 1.00–1.01× |
+
+The caps are a small lever next to the width: they gain where strokes are wide and many, up to 5% on the paintings at 500 shapes, and cost nothing, since a cap covers a few pixels per candidate and the SVG carries one attribute. Square caps gain as much as round ones on the medians, driven by the synthetic gradient, less on the paintings, and lengthen wide strokes into blocks; round ones end them as a brush would. `any`, whose quadratics are one shape in eight, moves within the noise of its hard-edged synthetic image (±28% there, ±3% elsewhere). **Quadratic curves now end in round caps**, with the 2–6 px width of section 14: the root `<svg>` element of every document carries `stroke-linecap="round"`, whatever the shape kind, so that a live preview wrapped in the root of any render shows the curves as the output does.
+
+Reproduction: `target/abl/run_caps.sh`, `analyse_caps.py`, `montage.mjs` (both paintings, three caps, two widths, side by side with a 3× crop).

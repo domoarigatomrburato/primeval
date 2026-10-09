@@ -451,6 +451,8 @@ fn exports_closer(target: &Buffer, input: &Drawing, candidate: &Drawing) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "lab")]
+    use primeval_core::LineCap;
     use primeval_core::{Color, ModelOptions};
 
     /// A 48 × 40 model of `shape` after `steps` greedy steps.
@@ -1448,5 +1450,41 @@ mod tests {
             "no tuning lowers the ratio: {report}"
         );
         eprintln!("export error ratios: {report}");
+    }
+
+    /// The export's RMSE against the target over the engine's: the gap of
+    /// the engine runner, `rmse256 / score − 1`, of `model`'s drawing.
+    #[cfg(feature = "lab")]
+    fn gap(model: &Model) -> f64 {
+        let target = model.target();
+        let error = raster::squared_error(&model.drawing(), target).expect("raster");
+        let values = f64::from(target.width() * target.height() * 3);
+        (error as f64 / values).sqrt() / 255.0 / model.score_f64() - 1.0
+    }
+
+    /// The PNG at the working size of a drawing with round or square caps
+    /// agrees with the engine's canvas as well as one with butt caps.
+    /// Measured after 16 quadratic steps: a gap of +1.05% with butt caps,
+    /// +0.43% with round ones and +0.49% with square ones.
+    #[cfg(feature = "lab")]
+    #[test]
+    fn capped_quadratics_export_as_the_engine_covers_them() {
+        let gap_of = |cap| {
+            let mut model = sized_model(ShapeKind::Quadratic, 0, 48, 40);
+            model.set_quadratic_cap(cap);
+            for _ in 0..16 {
+                model.step(ShapeKind::Quadratic, Alpha::Auto);
+            }
+            gap(&model)
+        };
+        let butt = gap_of(LineCap::Butt);
+        assert!(butt.abs() <= 0.011, "butt: {butt:+.5}");
+        for (cap, bound) in [(LineCap::Round, 0.005), (LineCap::Square, 0.0055)] {
+            let gap = gap_of(cap);
+            assert!(
+                gap.abs() <= bound && gap.abs() <= butt.abs(),
+                "{cap:?}: {gap:+.5} against butt's {butt:+.5}"
+            );
+        }
     }
 }

@@ -41,7 +41,7 @@ mod test_util;
 pub use alpha::Alpha;
 pub use buffer::Buffer;
 pub use color::Color;
-pub use drawing::{Drawing, DrawnShape, Geometry, Point};
+pub use drawing::{Drawing, DrawnShape, Geometry, LineCap, Point};
 pub use error::ParseError;
 pub use model::{Model, ModelOptions};
 pub use shapes::ShapeKind;

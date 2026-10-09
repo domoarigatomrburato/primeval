@@ -6,7 +6,7 @@
 use super::*;
 use crate::drawing::{Geometry, Point};
 use crate::test_util::make_test_round;
-use tiny_skia::{FillRule, LineCap, Paint, PathBuilder, Pixmap, Stroke, Transform};
+use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
 
 const W: u32 = 64;
 const H: u32 = 48;
@@ -23,6 +23,15 @@ fn engine_mask(shape: &Shape, worker: &mut WorkerCtx<rand_chacha::ChaCha8Rng>) -
         }
     }
     coverage.iter().map(|&a| a >= 0x8000).collect()
+}
+
+/// tiny-skia's cap for `cap`, as the PNG writer maps it.
+fn skia_cap(cap: LineCap) -> tiny_skia::LineCap {
+    match cap {
+        LineCap::Butt => tiny_skia::LineCap::Butt,
+        LineCap::Round => tiny_skia::LineCap::Round,
+        LineCap::Square => tiny_skia::LineCap::Square,
+    }
 }
 
 fn geometry_mask(geometry: &Geometry) -> Vec<bool> {
@@ -91,6 +100,7 @@ fn geometry_mask(geometry: &Geometry) -> Vec<bool> {
             control,
             end,
             width,
+            cap,
         } => {
             pb.move_to(start.x as f32, start.y as f32);
             pb.quad_to(
@@ -101,7 +111,7 @@ fn geometry_mask(geometry: &Geometry) -> Vec<bool> {
             );
             let stroke = Stroke {
                 width: *width as f32,
-                line_cap: LineCap::Butt,
+                line_cap: skia_cap(*cap),
                 ..Stroke::default()
             };
             pixmap.stroke_path(&pb.finish().expect("path"), &paint, &stroke, t, None);
@@ -146,11 +156,13 @@ fn shift(geometry: &Geometry, dx: f64, dy: f64) -> Geometry {
             control,
             end,
             width,
+            cap,
         } => Geometry::Quadratic {
             start: p(start),
             control: p(control),
             end: p(end),
             width: *width,
+            cap: *cap,
         },
     }
 }
@@ -171,6 +183,7 @@ fn perimeter(geometry: &Geometry) -> f64 {
             control,
             end,
             width,
+            ..
         } => 2.0 * (dist(start, control) + dist(control, end)) + 2.0 * width,
     }
 }
@@ -252,6 +265,7 @@ fn quadratic_geometry_keeps_the_working_width() {
         x3: 5.0,
         y3: 6.0,
         width: 0.5,
+        cap: LineCap::Butt,
     });
     assert_eq!(
         shape.geometry(),
@@ -260,6 +274,7 @@ fn quadratic_geometry_keeps_the_working_width() {
             control: Point::new(3.0, 4.0),
             end: Point::new(5.0, 6.0),
             width: 0.5,
+            cap: LineCap::Butt,
         }
     );
 }
@@ -372,13 +387,14 @@ fn engine_coverage(shape: &Shape, worker: &mut WorkerCtx<rand_chacha::ChaCha8Rng
 
 /// The coverage of every pixel by the stroke the PNG writer draws for
 /// `geometry` at scale 1, the working size: tiny-skia's anti-aliased stroke
-/// with butt caps, on its high-precision pipeline.
+/// with the geometry's caps, on its high-precision pipeline.
 fn exported_coverage(geometry: &Geometry) -> Vec<f64> {
     let Geometry::Quadratic {
         start,
         control,
         end,
         width,
+        cap,
     } = *geometry
     else {
         panic!("expected a quadratic, got {geometry:?}");
@@ -398,7 +414,7 @@ fn exported_coverage(geometry: &Geometry) -> Vec<f64> {
     );
     let stroke = Stroke {
         width: width as f32,
-        line_cap: LineCap::Butt,
+        line_cap: skia_cap(cap),
         ..Stroke::default()
     };
     let path = pb.finish().expect("path");
@@ -452,6 +468,7 @@ fn quadratic_coverage_matches_the_exported_stroke() {
             x3,
             y3,
             width,
+            cap: LineCap::Butt,
         })
     };
     let curves = [
@@ -481,4 +498,66 @@ fn quadratic_coverage_matches_the_exported_stroke() {
         "random quadratics: differ by {:.3} of the exported coverage",
         difference / total
     );
+}
+
+/// The share of the exported coverage that the engine's differs by, for
+/// the named curves of [`quadratic_coverage_matches_the_exported_stroke`]
+/// at 2 and 6 px, and for random curves of the default widths, all with
+/// `cap`.
+fn cap_coverage_differences(cap: LineCap) -> (f64, f64) {
+    let (mut worker, round) = make_test_round(W, H, 37);
+    worker.quadratic_cap = cap;
+    let curve = |x1, y1, x2, y2, x3, y3, width| {
+        Shape::Quadratic(Quadratic {
+            x1,
+            y1,
+            x2,
+            y2,
+            x3,
+            y3,
+            width,
+            cap,
+        })
+    };
+    let mut named = 0.0_f64;
+    for width in [2.0, 6.0] {
+        for shape in [
+            curve(8.0, 20.3, 30.0, 20.3, 52.0, 20.3, width),
+            curve(9.0, 7.0, 26.0, 24.0, 43.0, 41.0, width),
+            curve(8.0, 10.2, 30.0, 19.7, 54.0, 30.1, width),
+            curve(20.4, 6.0, 27.0, 22.0, 33.3, 41.0, width),
+            curve(9.0, 38.0, 30.0, -6.0, 55.0, 38.0, width),
+        ] {
+            let (difference, total) = coverage_difference(&shape, &mut worker);
+            named = named.max(difference / total);
+        }
+    }
+    let (mut difference, mut total) = (0.0, 0.0);
+    for _ in 0..SHAPES_PER_KIND {
+        let shape = Shape::random(ShapeKind::Quadratic, &mut worker, &round);
+        let (d, t) = coverage_difference(&shape, &mut worker);
+        difference += d;
+        total += t;
+    }
+    (named, difference / total)
+}
+
+/// Round and square caps agree with tiny-skia's as well as butt caps do.
+/// Measured: the worst named curve differs by 4.9% of the exported
+/// coverage with every cap, the random curves by 3.53% with butt caps,
+/// 2.92% with round ones and 3.20% with square ones.
+#[test]
+fn quadratic_caps_match_the_exported_stroke() {
+    let (butt_named, butt_random) = cap_coverage_differences(LineCap::Butt);
+    assert!(
+        butt_named <= 0.05 && butt_random <= 0.036,
+        "butt: {butt_named:.4}, {butt_random:.4}"
+    );
+    for (cap, random_bound) in [(LineCap::Round, 0.03), (LineCap::Square, 0.033)] {
+        let (named, random) = cap_coverage_differences(cap);
+        assert!(
+            named <= 0.05 && random <= random_bound && random <= butt_random,
+            "{cap:?}: the worst named curve differs by {named:.4}, random ones by {random:.4}"
+        );
+    }
 }

@@ -112,9 +112,10 @@ export type ProgressInfo = {
    * become equal or unequal.
    *
    * To draw the preview, wrap the shapes received so far in an `<svg>` with
-   * the final document's `viewBox` and background, for example taken from a
-   * `count: 1` render with the same options: the background and canvas size
-   * do not depend on `count`. When the result arrives, show the result.
+   * the final document's root element (its `viewBox` and `stroke-linecap`)
+   * and background, for example taken from a `count: 1` render with the same
+   * options: the root element and background do not depend on `count`. When
+   * the result arrives, show the result.
    */
   shape: string;
 };

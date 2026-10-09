@@ -81,6 +81,7 @@ fn drawing() -> Drawing {
                     control: rng.point(),
                     end: rng.point(),
                     width: rng.range(0.5, 4.0),
+                    cap: primeval_core::LineCap::Butt,
                 },
             };
             DrawnShape {

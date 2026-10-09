@@ -1410,7 +1410,7 @@ mod tests {
         };
         assert!(data.starts_with(
             "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"10\" \
-             viewBox=\"0 0 8 5\">"
+             viewBox=\"0 0 8 5\" stroke-linecap=\"round\">"
         ));
         let ApproximateResult::Png { data, .. } = &png else {
             panic!("expected png output");

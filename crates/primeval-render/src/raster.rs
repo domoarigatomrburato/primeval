@@ -81,6 +81,7 @@ fn render(drawing: &Drawing, width: u32, height: u32) -> Option<Pixmap> {
                 control,
                 end,
                 width,
+                cap,
             } => {
                 let mut builder = PathBuilder::new();
                 builder.move_to(start.x as f32, start.y as f32);
@@ -95,7 +96,11 @@ fn render(drawing: &Drawing, width: u32, height: u32) -> Option<Pixmap> {
                 };
                 let stroke = Stroke {
                     width: *width as f32,
-                    line_cap: LineCap::Butt,
+                    line_cap: match cap {
+                        primeval_core::LineCap::Butt => LineCap::Butt,
+                        primeval_core::LineCap::Round => LineCap::Round,
+                        primeval_core::LineCap::Square => LineCap::Square,
+                    },
                     ..Stroke::default()
                 };
                 pixmap.stroke_path(&path, &paint, &stroke, transform, None);
@@ -169,7 +174,7 @@ pub(crate) fn encode_png(width: u32, height: u32, rgb: &[u8]) -> image::ImageRes
 #[cfg(test)]
 mod tests {
     use super::*;
-    use primeval_core::{DrawnShape, Point};
+    use primeval_core::{DrawnShape, LineCap, Point};
 
     const WHITE: Color = Color::new(255, 255, 255, 255);
     const RED: Color = Color::new(255, 0, 0, 255);
@@ -260,6 +265,7 @@ mod tests {
                 control: Point::new(5.0, 5.0),
                 end: Point::new(9.0, 5.0),
                 width: 1.0,
+                cap: LineCap::Butt,
             },
         ];
         for geometry in shapes {
@@ -269,6 +275,37 @@ mod tests {
             };
             let rgb = render_rgb(&drawing(vec![shape]), 40, 40).expect("render");
             assert_eq!(pixel(&rgb, 40, 20, 20), [255, 0, 0], "{geometry:?}");
+        }
+    }
+
+    /// A curve's cap reaches past its ends as tiny-skia strokes it: a
+    /// round cap covers the centre line half a width past the start, but
+    /// not the corner of the square cap.
+    #[test]
+    fn quadratic_caps_reach_past_the_ends() {
+        let white = [255, 255, 255];
+        let red = [255, 0, 0];
+        for (cap, centre, corner) in [
+            (LineCap::Butt, white, white),
+            (LineCap::Round, red, white),
+            (LineCap::Square, red, red),
+        ] {
+            let curve = DrawnShape {
+                geometry: Geometry::Quadratic {
+                    start: Point::new(3.0, 5.0),
+                    control: Point::new(5.0, 5.0),
+                    end: Point::new(7.0, 5.0),
+                    width: 2.0,
+                    cap,
+                },
+                color: RED,
+            };
+            let rgb = render_rgb(&drawing(vec![curve]), 40, 40).expect("render");
+            // Output pixel (9, 20) is centred at canvas (2.375, 5.125), and
+            // (8, 16) at (2.125, 4.125).
+            assert_eq!(pixel(&rgb, 40, 9, 20), centre, "{cap:?}");
+            assert_eq!(pixel(&rgb, 40, 8, 16), corner, "{cap:?}");
+            assert_eq!(pixel(&rgb, 40, 20, 20), red, "{cap:?}");
         }
     }
 

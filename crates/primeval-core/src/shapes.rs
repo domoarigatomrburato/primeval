@@ -1,4 +1,4 @@
-use crate::drawing::{Geometry, Point};
+use crate::drawing::{Geometry, LineCap, Point};
 use crate::error::ParseError;
 use crate::scanline::Scanline;
 use crate::util::{radians, rotate_sc};
@@ -197,6 +197,9 @@ pub(crate) struct Quadratic {
     pub(crate) x3: f64,
     pub(crate) y3: f64,
     pub(crate) width: f64,
+    /// How the stroke ends: the worker's `quadratic_cap` when the curve
+    /// was drawn, never moved.
+    pub(crate) cap: LineCap,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -346,6 +349,7 @@ impl Shape {
                 half(shape.x3),
                 half(shape.y3),
                 half(shape.width) / 2.0,
+                shape.cap,
             ),
             Self::RotatedEllipse(shape) => {
                 crate::raster::fill_rotated_ellipse_direct(
@@ -984,6 +988,7 @@ impl Quadratic {
             control: Point::new(self.x2, self.y2),
             end: Point::new(self.x3, self.y3),
             width: self.width,
+            cap: self.cap,
         }
     }
 
@@ -1009,6 +1014,7 @@ impl Quadratic {
             x3,
             y3,
             width,
+            cap: worker.quadratic_cap,
         };
         quadratic.mutate(worker, Step::Coarse);
         quadratic
@@ -1192,6 +1198,7 @@ impl Quadratic {
             self.x3,
             self.y3,
             self.width / 2.0,
+            self.cap,
         )
     }
 
@@ -2178,6 +2185,7 @@ mod tests {
             x3: 20.0,
             y3: 6.0,
             width: 2.0,
+            cap: LineCap::Butt,
         });
         assert!(!shape.rasterize(&mut worker).is_empty());
     }
@@ -2186,7 +2194,8 @@ mod tests {
     /// is drawn several pixels wide and mostly fully covered. A working-size
     /// stroke that never fully covers a pixel gets saturated colours that
     /// compensate for its partial coverage and look wrong at output size, so
-    /// random quadratics must be wide enough to fully cover their centre line.
+    /// random quadratics must be wide enough to fully cover their centre line
+    /// between their ends (past them, a round cap covers pixels partly).
     #[test]
     fn random_quadratics_fully_cover_pixels_on_their_centre_line() {
         let (mut worker, round) = round(64, 48);
@@ -2206,9 +2215,10 @@ mod tests {
             });
             let lines = straight.rasterize(&mut worker);
             let centre_row: Vec<_> = lines.iter().filter(|line| line.y == 20).collect();
-            assert!(!centre_row.is_empty(), "{random:?}");
             assert!(
-                centre_row.iter().all(|line| line.alpha == 0xFFFF),
+                (4..56).all(|x| centre_row
+                    .iter()
+                    .any(|line| (line.x1..=line.x2).contains(&x) && line.alpha == 0xFFFF)),
                 "{random:?}: centre row {centre_row:?}"
             );
         }
@@ -2224,6 +2234,7 @@ mod tests {
             x3: 8.0,
             y3: 4.0,
             width: 0.5,
+            cap: LineCap::Butt,
         };
 
         assert!(!quadratic.is_valid());
@@ -2245,6 +2256,7 @@ mod tests {
                 x3: 24.0,
                 y3: 8.0,
                 width: 0.5,
+                cap: LineCap::Butt,
             };
 
             quadratic.mutate(&mut worker, Step::Coarse);
@@ -2261,7 +2273,9 @@ mod tests {
 
     /// With the width fixed at 2 px, random quadratics and their moves draw
     /// the same random streams and make the same shapes as before the
-    /// width became searchable: the digest was recorded before that change.
+    /// width became searchable: the digest was recorded before that change,
+    /// and again when curves got a cap, round by default, which the trace
+    /// spells and their moves keep.
     #[test]
     fn fixed_width_quadratics_keep_their_random_streams() {
         let (mut worker, round) = round(64, 48);
@@ -2276,11 +2290,12 @@ mod tests {
             for step in [Step::Coarse, Step::Scaled(0.5), Step::Coarse] {
                 quadratic.mutate(&mut worker, step);
                 assert_eq!(quadratic.width, 2.0);
+                assert_eq!(quadratic.cap, LineCap::Round);
                 trace.push_str(&format!("{quadratic:?}"));
             }
         }
         trace.push_str(&format!("{}", worker.rng.random::<u64>()));
-        assert_eq!(fnv1a(&trace), 14_903_134_385_898_611_127);
+        assert_eq!(fnv1a(&trace), 6_973_592_854_616_683_699);
     }
 
     #[test]
@@ -2319,6 +2334,7 @@ mod tests {
                 x3: 24.0,
                 y3: 8.0,
                 width: 2.0,
+                cap: LineCap::Butt,
             };
             quadratic.mutate(&mut worker, Step::Coarse);
             assert!(quadratic.is_valid(), "seed {seed}: {quadratic:?}");
@@ -2344,6 +2360,7 @@ mod tests {
             x3: 48.0,
             y3: 16.0,
             width: 0.5,
+            cap: LineCap::Butt,
         };
         assert!(old.is_valid());
 
@@ -2380,6 +2397,7 @@ mod tests {
             x3: 48.0,
             y3: 16.0,
             width: 0.5,
+            cap: LineCap::Butt,
         };
         assert!(quadratic.is_valid());
 
@@ -2409,6 +2427,7 @@ mod tests {
             x3: 48.0,
             y3: 16.0,
             width: 0.5,
+            cap: LineCap::Butt,
         };
         assert!(quadratic.is_valid());
 
@@ -2436,6 +2455,7 @@ mod tests {
             x3: 0.9,
             y3: 0.0,
             width: 0.5,
+            cap: LineCap::Butt,
         };
         assert!(
             q.is_valid(),

@@ -184,7 +184,7 @@ test("native approximate renders a 2000x5 banner on a 256x2 canvas", async () =>
     render: render({ count: 2, resizeInput: 256 }),
   });
 
-  assert.match(result.data, /viewBox="0 0 256 2"/);
+  assert.match(result.data, /^<svg [^>\n]* viewBox="0 0 256 2" stroke-linecap="round">\n/);
 });
 
 test("numeric options are range-checked in Rust without wrapping", async () => {

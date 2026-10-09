@@ -78,6 +78,16 @@
 //!                       model's 2:6; 2:2 reproduces the earlier fixed
 //!                       2 px); for every kind, it only affects
 //!                       quadratics, in `quadratic` and `any`
+//!   --quadratic-cap CAP how every quadratic curve's stroke ends, `butt`,
+//!                       `round` or `square`, in the engine's coverage, the
+//!                       SVG and the PNG (`Model::set_quadratic_cap`,
+//!                       default: the model's round); it only affects
+//!                       quadratics, in `quadratic` and `any`
+//!   --save DIR          also write, for every row, the PNG at the default
+//!                       output size that `ssim1024` is measured on and the
+//!                       SVG whose length is `svg_bytes`, as
+//!                       `DIR/<image>-<shape>-<steps>.png` and `.svg`,
+//!                       creating DIR if needed (default: none)
 //! ```
 //!
 //! For every image × shape kind it runs one greedy search to the largest
@@ -215,10 +225,10 @@ mod common;
 
 use common::{ALL_SHAPES, BoxError, SEED, rgb_rmse};
 use image::{ImageFormat, RgbImage, imageops};
-use primeval_core::{Drawing, Geometry, Model, ModelOptions, joint};
+use primeval_core::{Drawing, Geometry, LineCap, Model, ModelOptions, joint};
 use primeval_render::lab::{Chosen, During, Guard, Pass, Pipeline, Refits};
 use primeval_render::{OutputFormat, RenderOptions, ShapeKind, lab};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const DEFAULT_CHECKPOINTS: [u32; 4] = [50, 100, 200, 500];
@@ -253,6 +263,10 @@ struct Config {
     /// `--quadratic-width`: the bounds of every quadratic curve's stroke
     /// width.
     quadratic_width: Option<(f64, f64)>,
+    /// `--quadratic-cap`: how every quadratic curve's stroke ends.
+    quadratic_cap: Option<LineCap>,
+    /// `--save`: where to write each row's PNG and SVG.
+    save: Option<PathBuf>,
 }
 
 impl Config {
@@ -381,6 +395,23 @@ fn parse_quadratic_width(value: &str) -> Result<(f64, f64), BoxError> {
         return Err(invalid().into());
     }
     Ok((min, max))
+}
+
+fn parse_quadratic_cap(value: &str) -> Result<LineCap, BoxError> {
+    match value {
+        "butt" => Ok(LineCap::Butt),
+        "round" => Ok(LineCap::Round),
+        "square" => Ok(LineCap::Square),
+        _ => Err(format!("--quadratic-cap: expected butt, round or square, got {value}").into()),
+    }
+}
+
+fn describe_cap(cap: LineCap) -> &'static str {
+    match cap {
+        LineCap::Butt => "butt",
+        LineCap::Round => "round",
+        LineCap::Square => "square",
+    }
 }
 
 /// A positive, finite value of `flag`.
@@ -517,7 +548,7 @@ fn main() -> Result<(), BoxError> {
         let mut output_reference: Option<RgbImage> = None;
         for &shape in &config.shapes {
             eprintln!("{} {}", input.name, shape.as_str());
-            for checkpoint in search(&input.bytes, shape, &config)? {
+            for checkpoint in search(input, shape, &config)? {
                 let small_reference =
                     small_reference.get_or_insert_with(|| resampled(&original, &checkpoint.small));
                 let output_reference = output_reference
@@ -620,6 +651,8 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
     let mut effort = None;
     let mut refine_effort = None;
     let mut quadratic_width = None;
+    let mut quadratic_cap = None;
+    let mut save = None;
     let mut tuning = joint::Tuning::default();
     let mut curved = true;
     while let Some(arg) = args.next() {
@@ -666,6 +699,8 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
             "--effort" => effort = Some(parse_effort(&value()?)?),
             "--refine-effort" => refine_effort = Some(parse_refine_effort(&value()?)?),
             "--quadratic-width" => quadratic_width = Some(parse_quadratic_width(&value()?)?),
+            "--quadratic-cap" => quadratic_cap = Some(parse_quadratic_cap(&value()?)?),
+            "--save" => save = Some(PathBuf::from(value()?)),
             other => return Err(format!("unknown argument {other}; see the doc comment").into()),
         }
     }
@@ -717,6 +752,8 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
         effort,
         refine_effort,
         quadratic_width,
+        quadratic_cap,
+        save,
     })
 }
 
@@ -743,8 +780,14 @@ struct Checkpoint {
 
 /// Runs one search of `shape` to the last of the checkpoints (sorted,
 /// unique and positive) exactly as `approximate` would, with the refit
-/// passes, pipeline and effort of `config`, and records each checkpoint.
-fn search(input: &[u8], shape: ShapeKind, config: &Config) -> Result<Vec<Checkpoint>, BoxError> {
+/// passes, pipeline and effort of `config`, and records each checkpoint,
+/// writing its PNG and SVG with `--save`.
+fn search(
+    input: &common::Input,
+    shape: ShapeKind,
+    config: &Config,
+) -> Result<Vec<Checkpoint>, BoxError> {
+    let (name, input) = (&input.name, &input.bytes[..]);
     let (checkpoints, refine, iterations) = (&config.checkpoints, config.refine, config.iterations);
     let pipeline = config.pipeline(shape);
     let last = *checkpoints.last().ok_or("--steps: no checkpoints")?;
@@ -767,6 +810,12 @@ fn search(input: &[u8], shape: ShapeKind, config: &Config) -> Result<Vec<Checkpo
     }
     if let Some((min, max)) = config.quadratic_width {
         model.set_quadratic_width(min, max);
+    }
+    if let Some(cap) = config.quadratic_cap {
+        model.set_quadratic_cap(cap);
+    }
+    if let Some(dir) = &config.save {
+        std::fs::create_dir_all(dir)?;
     }
 
     let mut search = Duration::ZERO;
@@ -837,9 +886,16 @@ fn search(input: &[u8], shape: ShapeKind, config: &Config) -> Result<Vec<Checkpo
             working.dimensions(),
             "the PNG at the working size must have the working target's dimensions"
         );
-        let svg_bytes = lab::encode(&drawing, render.output_size, OutputFormat::Svg)?
-            .into_bytes()
-            .len();
+        let svg = lab::encode(&drawing, render.output_size, OutputFormat::Svg)?.into_bytes();
+        let output_png = lab::encode(&drawing, render.output_size, OutputFormat::Png)?.into_bytes();
+        if let Some(dir) = &config.save {
+            save(
+                dir,
+                &format!("{name}-{}-{step}", shape.as_str()),
+                &output_png,
+                &svg,
+            )?;
+        }
         recorded.push(Checkpoint {
             steps: step,
             search,
@@ -847,8 +903,8 @@ fn search(input: &[u8], shape: ShapeKind, config: &Config) -> Result<Vec<Checkpo
             score,
             rmse256: rgb_rmse(&exported, &working),
             small: png(&drawing, SMALL_SIZE)?,
-            output: png(&drawing, render.output_size)?,
-            svg_bytes,
+            output: image::load_from_memory_with_format(&output_png, ImageFormat::Png)?.to_rgb8(),
+            svg_bytes: svg.len(),
             violations: violations(&drawing, render.shape),
             adopted,
             final_joint,
@@ -931,6 +987,13 @@ fn violations(drawing: &Drawing, kind: ShapeKind) -> usize {
         .count()
 }
 
+/// Writes `png` and `svg` as `dir/<stem>.png` and `dir/<stem>.svg`.
+fn save(dir: &Path, stem: &str, png: &[u8], svg: &[u8]) -> Result<(), BoxError> {
+    std::fs::write(dir.join(format!("{stem}.png")), png)?;
+    std::fs::write(dir.join(format!("{stem}.svg")), svg)?;
+    Ok(())
+}
+
 /// `drawing` encoded as a PNG at `output_size` and decoded again.
 fn png(drawing: &Drawing, output_size: u32) -> Result<RgbImage, BoxError> {
     let bytes = lab::encode(drawing, output_size, OutputFormat::Png)?.into_bytes();
@@ -973,6 +1036,9 @@ fn print_header(config: &Config) {
     }
     if let Some((min, max)) = config.quadratic_width {
         println!("- quadratic width: {min} to {max} px");
+    }
+    if let Some(cap) = config.quadratic_cap {
+        println!("- quadratic cap: {}", describe_cap(cap));
     }
     println!();
 }

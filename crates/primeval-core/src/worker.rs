@@ -7,6 +7,7 @@
 
 use crate::alpha::Alpha;
 use crate::buffer::Buffer;
+use crate::drawing::LineCap;
 use crate::error_grid::ErrorGrid;
 use crate::optimize::hill_climb;
 use crate::raster::{RowScratch, StrokeScratch};
@@ -53,6 +54,10 @@ pub(crate) struct WorkerCtx<R> {
     /// unless the lab hook `Model::set_quadratic_width` set others. Equal
     /// bounds fix the width.
     pub(crate) quadratic_width: (f64, f64),
+    /// How the stroke of every quadratic curve that random curves start
+    /// ends, which their moves keep: [`LineCap::Round`] unless the lab hook
+    /// `Model::set_quadratic_cap` set another.
+    pub(crate) quadratic_cap: LineCap,
     /// Whether bounded evaluations may stop early; tests turn it off to
     /// check that the early exit never changes a result.
     #[cfg(test)]
@@ -92,6 +97,7 @@ impl<R: Rng> WorkerCtx<R> {
             rng,
             evaluations: 0,
             quadratic_width: Quadratic::STROKE_WIDTHS,
+            quadratic_cap: LineCap::Round,
             #[cfg(test)]
             pruning: true,
             #[cfg(test)]
