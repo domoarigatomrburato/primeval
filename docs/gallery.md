@@ -43,7 +43,7 @@ The originals are in the public domain: [Sources and credits](readme/originals/S
         <img src="images/thumbs/americangothic/any-1000.jpg" alt="American Gothic approximated with mixed after 1000 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 103.5 KB</sub>
+      <sub>SVG 103.2 KB</sub>
     </td>
   </tr>
   <tr>
@@ -156,14 +156,14 @@ The originals are in the public domain: [Sources and credits](readme/originals/S
         <img src="images/thumbs/americangothic/rotated-rectangle-200.jpg" alt="American Gothic approximated with rotated rectangle after 200 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 21.2 KB</sub>
+      <sub>SVG 21.4 KB</sub>
     </td>
     <td align="center">
       <a href="images/progression/americangothic/rotated-rectangle-1000.svg">
         <img src="images/thumbs/americangothic/rotated-rectangle-1000.jpg" alt="American Gothic approximated with rotated rectangle after 1000 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 107.7 KB</sub>
+      <sub>SVG 107.5 KB</sub>
     </td>
   </tr>
   <tr>
@@ -620,14 +620,14 @@ The originals are in the public domain: [Sources and credits](readme/originals/S
         <img src="images/thumbs/grand-prismatic-spring/rotated-rectangle-200.jpg" alt="Grand Prismatic Spring approximated with rotated rectangle after 200 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 21.7 KB</sub>
+      <sub>SVG 22.0 KB</sub>
     </td>
     <td align="center">
       <a href="images/progression/grand-prismatic-spring/rotated-rectangle-1000.svg">
         <img src="images/thumbs/grand-prismatic-spring/rotated-rectangle-1000.jpg" alt="Grand Prismatic Spring approximated with rotated rectangle after 1000 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 108.5 KB</sub>
+      <sub>SVG 108.7 KB</sub>
     </td>
   </tr>
   <tr>
@@ -739,7 +739,7 @@ The originals are in the public domain: [Sources and credits](readme/originals/S
         <img src="images/thumbs/mae-jemison/any-1000.jpg" alt="Mae Jemison approximated with mixed after 1000 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 106.0 KB</sub>
+      <sub>SVG 105.9 KB</sub>
     </td>
   </tr>
   <tr>
@@ -859,7 +859,7 @@ The originals are in the public domain: [Sources and credits](readme/originals/S
         <img src="images/thumbs/mae-jemison/rotated-rectangle-1000.jpg" alt="Mae Jemison approximated with rotated rectangle after 1000 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 110.0 KB</sub>
+      <sub>SVG 109.7 KB</sub>
     </td>
   </tr>
   <tr>
@@ -1084,14 +1084,14 @@ The originals are in the public domain: [Sources and credits](readme/originals/S
         <img src="images/thumbs/monalisa/rotated-rectangle-200.jpg" alt="Mona Lisa approximated with rotated rectangle after 200 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 22.2 KB</sub>
+      <sub>SVG 22.0 KB</sub>
     </td>
     <td align="center">
       <a href="images/progression/monalisa/rotated-rectangle-1000.svg">
         <img src="images/thumbs/monalisa/rotated-rectangle-1000.jpg" alt="Mona Lisa approximated with rotated rectangle after 1000 steps." width="240" />
       </a>
       <br />
-      <sub>SVG 109.0 KB</sub>
+      <sub>SVG 108.7 KB</sub>
     </td>
   </tr>
   <tr>
