@@ -2,6 +2,7 @@
 #![allow(clippy::too_many_arguments)]
 use crate::drawing::LineCap;
 use crate::scanline::Scanline;
+use crate::util::sin_cos_degrees;
 use crate::worker::WorkerCtx;
 use rand::Rng;
 
@@ -117,7 +118,8 @@ fn flatten_quadratic(
 
     if flat {
         let &(last_x, last_y) = points.last().expect("points start at the curve's start");
-        if (x2 - last_x).hypot(y2 - last_y) > 1e-9 {
+        let (dx, dy) = (x2 - last_x, y2 - last_y);
+        if (dx * dx + dy * dy).sqrt() > 1e-9 {
             points.push((x2, y2));
         }
     } else {
@@ -468,9 +470,10 @@ fn stroke_segment(
             } else if along > length && end_b == End::RoundCap {
                 round_cap(half_width, centre - b_major, minor_centre - b_minor)
             } else if along < 0.0 && end_a == End::Round {
-                trapezoid.band(half_width, along.hypot(across))
+                trapezoid.band(half_width, (along * along + across * across).sqrt())
             } else if along > length && end_b == End::Round {
-                trapezoid.band(half_width, (along - length).hypot(across))
+                let past = along - length;
+                trapezoid.band(half_width, (past * past + across * across).sqrt())
             } else {
                 trapezoid.band(half_width, across.abs())
             };
@@ -784,9 +787,10 @@ pub(crate) fn fill_polygon_direct(
 /// Fills a rotated ellipse directly into `lines` using 4x vertical antialiasing.
 ///
 /// The ellipse is centered at `(cx, cy)` with radii `rx` and `ry`, rotated by
-/// `angle` radians. Each row is intersected at 4 sub-row sample positions, then
-/// the exact horizontal overlap of each sub-row span with each pixel is summed
-/// into a 16-bit alpha value.
+/// `degrees`, whose sine and cosine come from [`sin_cos_degrees`] so that
+/// every target computes the same coverage. Each row is intersected at 4
+/// sub-row sample positions, then the exact horizontal overlap of each sub-row
+/// span with each pixel is summed into a 16-bit alpha value.
 pub(crate) fn fill_rotated_ellipse_direct(
     lines: &mut Vec<Scanline>,
     scratch: &mut RowScratch,
@@ -794,7 +798,7 @@ pub(crate) fn fill_rotated_ellipse_direct(
     cy: f64,
     rx: f64,
     ry: f64,
-    angle: f64,
+    degrees: f64,
     w: i32,
     h: i32,
 ) {
@@ -804,14 +808,14 @@ pub(crate) fn fill_rotated_ellipse_direct(
     }
 
     const NUM_AA: usize = 4;
-    let (sin_t, cos_t) = angle.sin_cos();
+    let (sin_t, cos_t) = sin_cos_degrees(degrees);
     let inv_rx2 = 1.0 / (rx * rx);
     let inv_ry2 = 1.0 / (ry * ry);
     let coeff_a = cos_t * cos_t * inv_rx2 + sin_t * sin_t * inv_ry2;
     let coeff_b = 2.0 * cos_t * sin_t * (inv_rx2 - inv_ry2);
     let coeff_c = sin_t * sin_t * inv_rx2 + cos_t * cos_t * inv_ry2;
 
-    let half_height = ((rx * sin_t).powi(2) + (ry * cos_t).powi(2)).sqrt();
+    let half_height = ((rx * sin_t) * (rx * sin_t) + (ry * cos_t) * (ry * cos_t)).sqrt();
     let iy_min = ((cy - half_height - 1.0).floor() as i32).max(0);
     let iy_max = ((cy + half_height + 1.0).ceil() as i32).min(h - 1);
     let RowScratch { spans, edges, .. } = scratch;
@@ -1282,7 +1286,7 @@ mod tests {
             24.0,
             10.0,
             6.0,
-            std::f64::consts::FRAC_PI_2,
+            90.0,
             48,
             48,
         );
@@ -1346,7 +1350,7 @@ mod tests {
             16.0,
             10.0,
             6.0,
-            0.7,
+            40.0,
             32,
             32,
         );
@@ -1428,12 +1432,13 @@ mod tests {
     }
 
     /// The span of the horizontal line at `y_sub` inside a rotated ellipse,
-    /// solved as [`fill_rotated_ellipse_direct`] does.
+    /// its angle in degrees, solved as [`fill_rotated_ellipse_direct`] does,
+    /// with the portable sine and cosine.
     fn ellipse_sub_row_spans(
-        (cx, cy, rx, ry, angle): (f64, f64, f64, f64, f64),
+        (cx, cy, rx, ry, degrees): (f64, f64, f64, f64, f64),
         y_sub: f64,
     ) -> Vec<(f64, f64)> {
-        let (sin_t, cos_t) = angle.sin_cos();
+        let (sin_t, cos_t) = crate::util::sin_cos_degrees(degrees);
         let inv_rx2 = 1.0 / (rx * rx);
         let inv_ry2 = 1.0 / (ry * ry);
         let a = cos_t * cos_t * inv_rx2 + sin_t * sin_t * inv_ry2;
@@ -1495,14 +1500,14 @@ mod tests {
                 coordinate(&mut rng, -8.0, 40.0),
                 coordinate(&mut rng, 0.5, 30.0),
                 coordinate(&mut rng, 0.5, 30.0),
-                if rng.random_range(0..4) == 0 {
-                    0.0
-                } else {
-                    rng.random_range(0.0..std::f64::consts::TAU)
+                match rng.random_range(0..4) {
+                    0 => 0.0,
+                    1 => f64::from(rng.random_range(0..4)) * 90.0,
+                    _ => rng.random_range(0.0..360.0),
                 },
             );
-            let (cx, cy, rx, ry, angle) = ellipse;
-            fill_rotated_ellipse_direct(&mut lines, &mut scratch, cx, cy, rx, ry, angle, w, h);
+            let (cx, cy, rx, ry, degrees) = ellipse;
+            fill_rotated_ellipse_direct(&mut lines, &mut scratch, cx, cy, rx, ry, degrees, w, h);
             let expected = reference_fill(w, h, |y| ellipse_sub_row_spans(ellipse, y));
             assert_eq!(lines, expected, "case {case}: {ellipse:?}");
         }
@@ -1518,7 +1523,7 @@ mod tests {
             3.0,
             9.0,
             5.0,
-            0.4,
+            23.0,
             16,
             12,
         );

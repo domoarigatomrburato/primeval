@@ -402,7 +402,12 @@ pub(super) mod tests {
             (TAN_ONE_DEGREE, 1.0),
         ] {
             let tan = degrees.to_radians().tan();
-            assert!((literal - tan).abs() <= 1e-16 * tan, "{literal} vs {tan}");
+            // The platform's `tan` may differ from the literal in the last
+            // bits (glibc's does), so a few ulps, not bit for bit.
+            assert!(
+                (literal - tan).abs() <= 4.0 * f64::EPSILON * tan,
+                "{literal} vs {tan}"
+            );
         }
     }
 

@@ -20,10 +20,11 @@
 //!   lattice. The checks on the lattice are exact: lattice values are
 //!   small multiples of a power of two, so their sums, products and
 //!   squares are exact in `f64`.
-//! - [`sin_cos_degrees`] turns the greedy search's angles into a rotated
-//!   rectangle's `u` and a rotated ellipse's semi-axis vector, and
-//!   [`atan2_degrees`] a rotated ellipse's semi-axis vector back into its
-//!   angle, by `+ − × ÷` alone.
+//! - [`atan2_degrees`] turns a rotated ellipse's semi-axis vector back
+//!   into its angle, by `+ − × ÷` alone. The other way, a rotated
+//!   rectangle's `u` and a rotated ellipse's semi-axis vector come from the
+//!   greedy search's angles through [`crate::util::sin_cos_degrees`], the
+//!   function the greedy search's own corners and coverage use.
 
 use super::angle::Projected;
 use super::diff::COORDS;
@@ -213,54 +214,6 @@ pub(super) fn snap_rotated(p: &[f64; COORDS], quantum: f64) -> ([f64; COORDS], b
     (out, true)
 }
 
-/// `sin` and `cos` of `x` radians, `0 ≤ x ≤ π/4`, by their Taylor series
-/// to the terms in `x¹⁹` and `x¹⁸`, in Horner form: the first omitted
-/// terms are below `10⁻¹⁹`, under an ulp of the results.
-fn sin_cos_octant(x: f64) -> (f64, f64) {
-    let x2 = x * x;
-    let (mut sin, mut cos) = (1.0, 1.0);
-    for n in (1..=9).rev() {
-        let n = f64::from(n);
-        sin = 1.0 - x2 / ((2.0 * n) * (2.0 * n + 1.0)) * sin;
-        cos = 1.0 - x2 / ((2.0 * n - 1.0) * (2.0 * n)) * cos;
-    }
-    (x * sin, cos)
-}
-
-/// `sin` and `cos` of `degrees`, by `+ − × ÷` and `floor` alone: the
-/// angle reduced to a turn and then to `0..=45°` by the symmetries of the
-/// circle, then [`sin_cos_octant`]. The engine computes the shapes of the
-/// greedy search with the platform's `sin_cos`, which may differ in the
-/// last bit between native and WebAssembly builds, so the joint
-/// optimisation starts from these instead: a rotated rectangle's `u` from
-/// its integer angle, a rotated ellipse's semi-axis vector from its
-/// continuous one.
-///
-/// Whole degrees reduce exactly, so a whole angle takes the same steps as
-/// the integer angles of the rotated rectangles always did; a continuous
-/// angle's reduction rounds once or twice, deterministically.
-pub(super) fn sin_cos_degrees(degrees: f64) -> (f64, f64) {
-    let degrees = degrees - 360.0 * (degrees / 360.0).floor();
-    // `degrees / 90` can round up to the next whole quadrant, leaving `rest`
-    // a rounding below zero, where the octant's series holds as well.
-    let quadrant = (degrees / 90.0).floor().clamp(0.0, 3.0);
-    let rest = degrees - 90.0 * quadrant;
-    let radians = |degrees: f64| degrees * (std::f64::consts::PI / 180.0);
-    let (sin, cos) = if rest <= 45.0 {
-        sin_cos_octant(radians(rest))
-    } else {
-        let (sin, cos) = sin_cos_octant(radians(90.0 - rest));
-        (cos, sin)
-    };
-    // `0.0 - value`, not `-value`, keeps zero positive.
-    match quadrant as u8 {
-        0 => (sin, cos),
-        1 => (cos, 0.0 - sin),
-        2 => (0.0 - sin, 0.0 - cos),
-        _ => (0.0 - cos, sin),
-    }
-}
-
 /// `atan t` for `0 ≤ t ≤ tan(π/8)`, by its Taylor series to the term in
 /// `t⁴⁵`, in Horner form: the first omitted term is below `10⁻¹⁸`.
 fn atan_octant(t: f64) -> f64 {
@@ -344,37 +297,11 @@ pub(super) mod tests {
             && long <= 8.0 * short * (1.0 + tolerance)
     }
 
+    /// The angle of a vector in degrees against the platform's on a sweep
+    /// that includes the axes and the octant boundaries, well within
+    /// `1e-12°`: measured 2.8e-14°.
     #[test]
-    fn sines_and_cosines_of_whole_degrees_match_the_platform() {
-        let mut worst: f64 = 0.0;
-        for degrees in -720..=720 {
-            let (sin, cos) = sin_cos_degrees(f64::from(degrees));
-            let (expected_sin, expected_cos) = f64::from(degrees).to_radians().sin_cos();
-            // The platform's argument is `degrees · π / 180` rounded, an ulp
-            // of up to 2e-15 at 720°.
-            assert!((sin - expected_sin).abs() <= 2e-15, "{degrees}: {sin}");
-            assert!((cos - expected_cos).abs() <= 2e-15, "{degrees}: {cos}");
-            if (0..=90).contains(&degrees) {
-                worst = worst.max((sin - expected_sin).abs().max((cos - expected_cos).abs()));
-            }
-        }
-        // Within an ulp of 1 of the platform's from 0° to 90°.
-        assert!(worst <= f64::EPSILON, "{worst}");
-        assert_eq!(sin_cos_degrees(0.0), (0.0, 1.0));
-        assert_eq!(sin_cos_degrees(90.0), (1.0, 0.0));
-        assert_eq!(sin_cos_degrees(180.0), (0.0, -1.0));
-        assert_eq!(sin_cos_degrees(-90.0), (-1.0, 0.0));
-        assert!(sin_cos_degrees(180.0).0.is_sign_positive());
-    }
-
-    /// The sine and cosine of real angles in degrees, and the angle of a
-    /// vector in degrees, against the platform's on a sweep that includes
-    /// the axes and the octant boundaries, well within `1e-9`: measured
-    /// 2.1e-15 for the sine and cosine (the platform's own argument,
-    /// `degrees · π / 180`, rounds by up to an ulp of 17 at 1000°) and
-    /// 2.8e-14° for the angle.
-    #[test]
-    fn sines_cosines_and_angles_of_real_degrees_match_the_platform() {
+    fn angles_of_real_degrees_match_the_platform() {
         let mut angles: Vec<f64> = (-16..=16).map(|k| f64::from(k) * 45.0).collect();
         for k in -16..=16 {
             let boundary = f64::from(k) * 45.0;
@@ -383,15 +310,11 @@ pub(super) mod tests {
         angles.extend((0..20_000).map(|k| -720.0 + f64::from(k) * 0.072_003_1));
         let mut rng = ChaCha8Rng::seed_from_u64(45);
         angles.extend((0..5000).map(|_| rng.random_range(-1000.0..1000.0)));
-        let (mut worst_sin_cos, mut worst_angle) = (0.0_f64, 0.0_f64);
+        let mut worst_angle = 0.0_f64;
         for &degrees in &angles {
-            let (sin, cos) = sin_cos_degrees(degrees);
-            let (expected_sin, expected_cos) = degrees.to_radians().sin_cos();
-            worst_sin_cos = worst_sin_cos
-                .max((sin - expected_sin).abs())
-                .max((cos - expected_cos).abs());
+            let (sin, cos) = degrees.to_radians().sin_cos();
             for radius in [1.0, 0.25, 37.5] {
-                let (y, x) = (radius * expected_sin, radius * expected_cos);
+                let (y, x) = (radius * sin, radius * cos);
                 let angle = atan2_degrees(y, x);
                 let expected = y.atan2(x).to_degrees();
                 // Both in `[−180°, 180°]`; `±180°` may differ in sign at
@@ -401,7 +324,6 @@ pub(super) mod tests {
                 assert!((-180.0..=180.0).contains(&angle), "{y}, {x}: {angle}");
             }
         }
-        assert!(worst_sin_cos <= 1e-14, "sin, cos: {worst_sin_cos}");
         assert!(worst_angle <= 1e-12, "atan2: {worst_angle}°");
         assert_eq!(atan2_degrees(0.0, 0.0), 0.0);
         assert_eq!(atan2_degrees(0.0, 2.0), 0.0);
@@ -410,11 +332,6 @@ pub(super) mod tests {
         assert_eq!(atan2_degrees(-0.5, 0.0), -90.0);
         assert!((atan2_degrees(1.0, 1.0) - 45.0).abs() <= 1e-14);
         assert!((atan2_degrees(-1.0, -1.0) + 135.0).abs() <= 1e-13);
-        // Whole degrees, as the rotated rectangles' integer angles, are
-        // exact multiples of a right angle at the axes.
-        assert_eq!(sin_cos_degrees(90.0), (1.0, 0.0));
-        assert_eq!(sin_cos_degrees(-270.0), (1.0, 0.0));
-        assert_eq!(sin_cos_degrees(360.0), (0.0, 1.0));
     }
 
     /// The projection lands on the set, leaves points inside alone, and

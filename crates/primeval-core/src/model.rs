@@ -855,16 +855,22 @@ mod tests {
     /// when the search began to draw and move each quadratic curve's
     /// stroke width, between 2 and 6 px, instead of fixing it at 2 px;
     /// and again when quadratic curves got round caps, which the digest
-    /// spells.
+    /// spells. `rotated-rectangle` and `any` again when rotated rectangles'
+    /// corners and rotated ellipses' coverage took their sine and cosine
+    /// from `util::sin_cos_degrees` instead of the platform's `sin_cos`,
+    /// whose last bit differs between libms: before, x86_64 (glibc, and
+    /// macOS) gave other digests for both than Apple Silicon; now every
+    /// digest is the same on aarch64 and x86_64. `rotated-ellipse` and the
+    /// coarse `any` kept theirs.
     #[test]
     fn seeded_greedy_output_is_pinned() {
         let pinned = [
-            (ShapeKind::Any, 0x9d5205c606ab5866),
+            (ShapeKind::Any, 0x10bfbb1a786a1c4a),
             (ShapeKind::Triangle, 0x0b2c1d60c966824f),
             (ShapeKind::Rectangle, 0xd8f95f8e1f029eac),
             (ShapeKind::Ellipse, 0xdd99e621c00e71b6),
             (ShapeKind::Circle, 0x1cc7d6677aa8b599),
-            (ShapeKind::RotatedRectangle, 0x52186adc7569380b),
+            (ShapeKind::RotatedRectangle, 0x3f4a0794729f9615),
             (ShapeKind::Quadratic, 0x523abbb2eb939ae9),
             (ShapeKind::RotatedEllipse, 0xf9f17763932224cc),
             (ShapeKind::Polygon, 0xb57dc794666b2a2b),

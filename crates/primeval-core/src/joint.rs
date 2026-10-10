@@ -68,13 +68,14 @@
 //! and which the native–wasm tripwire test covers. A rotated rectangle's
 //! starting `u` needs the sine and cosine of the greedy search's integer
 //! angle: they come from a Taylor polynomial in `+ − × ÷`
-//! (`rect::sin_cos_degrees`), not from the platform's `sin_cos`, so B's
-//! input is the same on every platform even where the platforms' `sin_cos`
-//! differ in the last bit; so does a rotated ellipse's starting semi-axis
-//! vector, from its continuous angle, and its exported rotation, the angle
-//! of that vector, comes from `rect::atan2_degrees`, a polynomial in
-//! `+ − × ÷` too. The exported rotated ellipse is then drawn with the
-//! platform's `sin_cos`, as the greedy search's are.
+//! (`crate::util::sin_cos_degrees`), the one the greedy search's corners
+//! come from, not from the platform's `sin_cos`, so B's input is the same
+//! on every platform even where the platforms' `sin_cos` differ in the
+//! last bit; so does a rotated ellipse's starting semi-axis vector, from
+//! its continuous angle, and its exported rotation, the angle of that
+//! vector, comes from `rect::atan2_degrees`, a polynomial in `+ − × ÷`
+//! too. The exported rotated ellipse is then drawn through
+//! `sin_cos_degrees` as well, as the greedy search's are.
 
 mod angle;
 mod convex;
@@ -84,6 +85,7 @@ mod rect;
 
 use crate::model::CommittedShape;
 use crate::shapes::Shape;
+use crate::util::sin_cos_degrees;
 use crate::worker::WorkerCtx;
 use crate::{Alpha, Buffer, Color, Drawing, DrawnShape, Geometry, Model, Point};
 use diff::{ALPHA, COORDS, Layer, Mask, Outline, PARAMS, Real, Scene, Workspace};
@@ -377,7 +379,7 @@ fn parts<F: Real>(
                 }
                 // The centre is continuous; `u` runs along the side `sx`.
                 Shape::RotatedRectangle(rectangle) => {
-                    let (sin, cos) = rect::sin_cos_degrees(f64::from(rectangle.angle));
+                    let (sin, cos) = sin_cos_degrees(f64::from(rectangle.angle));
                     let half = f64::from(rectangle.sx) / 2.0;
                     let mut params = [0.0; COORDS];
                     params[..5].copy_from_slice(&[
@@ -421,7 +423,7 @@ fn parts<F: Real>(
                 // The centre is continuous; `a` runs along the radius `rx`,
                 // at the angle `angle` in degrees.
                 &Shape::RotatedEllipse(ellipse) if curved => {
-                    let (sin, cos) = rect::sin_cos_degrees(ellipse.angle);
+                    let (sin, cos) = sin_cos_degrees(ellipse.angle);
                     let mut params = [0.0; COORDS];
                     params[..5].copy_from_slice(&[
                         ellipse.x - 0.5,
@@ -580,7 +582,7 @@ fn score_shapes(
                         layer.params[3] = ry;
                     }
                     _ => {
-                        let (sin, cos) = rect::sin_cos_degrees(rotation);
+                        let (sin, cos) = sin_cos_degrees(rotation);
                         layer.params[2..5].copy_from_slice(&[rx * cos, rx * sin, ry]);
                     }
                 }

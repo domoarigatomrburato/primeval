@@ -1,7 +1,7 @@
 use crate::drawing::{Geometry, LineCap, Point};
 use crate::error::ParseError;
 use crate::scanline::Scanline;
-use crate::util::{radians, rotate_sc};
+use crate::util::{rotate_sc, sin_cos_degrees};
 use crate::worker::{SearchRound, WorkerCtx};
 use rand::{Rng, RngExt};
 use rand_distr::{Distribution, StandardNormal};
@@ -359,7 +359,7 @@ impl Shape {
                     half(shape.y),
                     half(shape.rx),
                     half(shape.ry),
-                    radians(shape.angle),
+                    shape.angle,
                     worker.width,
                     worker.height,
                 );
@@ -833,11 +833,13 @@ impl RotatedRectangle {
         )
     }
 
-    /// The exact corners, rotated by `angle` degrees about `(x, y)`.
+    /// The exact corners, rotated by `angle` degrees about `(x, y)`, by
+    /// [`sin_cos_degrees`], so that every target computes the same ones;
+    /// whole quarter turns are exact.
     fn corners(&self) -> [(f64, f64); 4] {
         let half_x = f64::from(self.sx) / 2.0;
         let half_y = f64::from(self.sy) / 2.0;
-        let (sin_a, cos_a) = radians(f64::from(self.angle)).sin_cos();
+        let (sin_a, cos_a) = sin_cos_degrees(f64::from(self.angle));
         [
             (-half_x, -half_y),
             (half_x, -half_y),
@@ -1294,7 +1296,7 @@ impl RotatedEllipse {
             self.y,
             self.rx,
             self.ry,
-            radians(self.angle),
+            self.angle,
             worker.width,
             worker.height,
         );
@@ -2560,6 +2562,59 @@ mod tests {
             angle: 30,
         });
         assert_eq!(shape.rasterize(&mut worker), &[]);
+    }
+
+    /// The corners rotate by [`sin_cos_degrees`], never the platform's
+    /// `sin_cos`, so every target and WebAssembly draw the same rectangles.
+    #[test]
+    fn rotated_rectangle_corners_rotate_by_the_portable_sine_and_cosine() {
+        for angle in 0..360 {
+            let shape = RotatedRectangle {
+                x: 10,
+                y: 12,
+                sx: 7,
+                sy: 3,
+                angle,
+            };
+            let (sin, cos) = sin_cos_degrees(f64::from(angle));
+            let expected = [(-3.5, -1.5), (3.5, -1.5), (3.5, 1.5), (-3.5, 1.5)].map(|(x, y)| {
+                let (rx, ry) = rotate_sc(x, y, sin, cos);
+                (rx + 10.0, ry + 12.0)
+            });
+            assert_eq!(shape.corners(), expected, "{angle}°");
+        }
+    }
+
+    /// Quarter turns are exact: a 6 × 4 rectangle turned by 90° has the
+    /// corners of a 4 × 6 one, in the turned order.
+    #[test]
+    fn quarter_turned_rotated_rectangles_have_exact_corners() {
+        let corners = |angle| {
+            RotatedRectangle {
+                x: 10,
+                y: 10,
+                sx: 6,
+                sy: 4,
+                angle,
+            }
+            .corners()
+        };
+        assert_eq!(
+            corners(0),
+            [(7.0, 8.0), (13.0, 8.0), (13.0, 12.0), (7.0, 12.0)]
+        );
+        assert_eq!(
+            corners(90),
+            [(12.0, 7.0), (12.0, 13.0), (8.0, 13.0), (8.0, 7.0)]
+        );
+        assert_eq!(
+            corners(180),
+            [(13.0, 12.0), (7.0, 12.0), (7.0, 8.0), (13.0, 8.0)]
+        );
+        assert_eq!(
+            corners(270),
+            [(8.0, 13.0), (8.0, 7.0), (12.0, 7.0), (12.0, 13.0)]
+        );
     }
 
     #[test]
