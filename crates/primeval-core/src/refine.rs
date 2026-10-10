@@ -42,15 +42,20 @@
 //!
 //! The pass runs top-down, `i = N − 1 … 0`, so `A` and `B` start at `1` and
 //! `0` and are folded in incrementally, layer by layer, after each layer is
-//! decided. The canvas below layer `i` comes from exact u8 checkpoints of
-//! the old layers, rendered at the start of the pass every
-//! [`checkpoint_interval`] layers: a top-down pass has not refitted any
-//! layer below `i` yet, so the checkpoints hold for the whole pass.
+//! decided. The canvas below layer `i` is the exact u8 canvas of the old
+//! layers: a top-down pass has not refitted any layer below `i` yet. The
+//! pass renders checkpoints of it at its start, every `interval` layers,
+//! and visits the layers in runs of a segment between two checkpoints,
+//! each replayed once from its checkpoint into the canvas below each of
+//! its layers ([`Replay`], [`replay_plan`]). A pass thus draws every old
+//! layer at most twice, once for the checkpoints and once in its run, or a
+//! few more times where the memory budget shortens the runs.
 //!
 //! At each layer the committed shape, evaluated with its current colour, is
 //! the bar. [`ROUNDS`] independent hill climbs ([`climb`]) from the
 //! committed shape and alpha then search with the fitted colour, as rayon
-//! tasks, each on its own [`refine_rng`] stream. Their moves start at the
+//! tasks, each on its own [`refine_rng`] stream and on one of the pass's
+//! [`climbers`], which every layer reuses. Their moves start at the
 //! greedy search's coarse size and adapt to how often they are kept
 //! ([`StepScale`]), down to one- and two-pixel moves that polish the
 //! shape; a climb stops after [`AGE`] moves in a row are not kept
@@ -73,7 +78,9 @@ use crate::shapes::Step;
 use crate::state::State;
 use crate::worker::WorkerCtx;
 use rand::Rng;
+use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
+use std::ops::Range;
 
 /// Independent hill climbs per layer of a refit pass.
 ///
@@ -170,7 +177,8 @@ impl StepScale {
     }
 }
 
-/// The memory the canvas checkpoints of a pass may take, in bytes.
+/// The memory the canvas checkpoints of a pass, and a refit pass's run
+/// canvases ([`replay_plan`]), may take, in bytes.
 const CHECKPOINT_BUDGET: usize = 64 << 20;
 
 /// `M` of the fixed-point blend, as a float.
@@ -393,17 +401,80 @@ impl Sums {
 /// interval whose checkpoints fit, or a single checkpoint for a canvas
 /// larger than the budget.
 ///
-/// A pass keeps `⌈layers / interval⌉` checkpoints and redraws at most
-/// `interval − 1` layers onto a copy of one for every layer it visits. Its
-/// other memory does not grow with the layers: one working canvas and the
-/// 16 bytes per pixel of [`Above`].
+/// The joint optimisation's reverse pass keeps `⌈layers / interval⌉`
+/// checkpoints; a refit pass plans its own with [`replay_plan`].
 pub(crate) fn checkpoint_interval(layers: usize, canvas_bytes: usize) -> usize {
-    let mut root = layers.isqrt();
-    if root * root < layers {
-        root += 1;
-    }
     let affordable = (CHECKPOINT_BUDGET / canvas_bytes.max(1)).max(1);
-    root.max(layers.div_ceil(affordable)).max(1)
+    ceil_sqrt(layers).max(layers.div_ceil(affordable)).max(1)
+}
+
+/// `⌈√n⌉`.
+fn ceil_sqrt(n: usize) -> usize {
+    let root = n.isqrt();
+    if root * root < n { root + 1 } else { root }
+}
+
+/// How a refit pass replays the old layers: the exact canvas before every
+/// `interval`-th layer ([`Checkpoints`]), and runs of up to `run` layers,
+/// each replayed once from its checkpoint into as many canvases, the
+/// canvas below each of its layers ([`Self::runs`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Replay {
+    pub(crate) interval: usize,
+    pub(crate) run: usize,
+}
+
+impl Replay {
+    /// The runs of a pass over `layers` layers in the order the pass
+    /// visits them, top-down, as `(bottom, top)` for the layers
+    /// `bottom..top`: each segment of `interval` layers after a checkpoint,
+    /// from its top, in runs of `run` layers.
+    pub(crate) fn runs(self, layers: usize) -> impl Iterator<Item = (usize, usize)> {
+        let Self { interval, run } = self;
+        (0..layers.div_ceil(interval))
+            .rev()
+            .flat_map(move |segment| {
+                let start = segment * interval;
+                let end = (start + interval).min(layers);
+                (0..(end - start).div_ceil(run)).map(move |k| {
+                    let top = end - k * run;
+                    (top.saturating_sub(run).max(start), top)
+                })
+            })
+    }
+}
+
+/// The [`Replay`] of a pass over `layers` layers on a canvas of
+/// `canvas_bytes` bytes.
+///
+/// The pass keeps `⌈layers / interval⌉` checkpoints and `run` canvases.
+/// With runs of whole segments that is fewest at
+/// `interval = run = ⌈√layers⌉`, the plan whenever it fits in
+/// [`CHECKPOINT_BUDGET`]: every layer is then replayed once per pass.
+/// Otherwise the budget is split evenly between checkpoints and runs, which
+/// minimises the replay of a segment in shorter runs, each from the
+/// segment's checkpoint: `⌈interval / run⌉` replays of up to `interval`
+/// layers. A canvas too large for two canvases in the budget gets the
+/// smallest plan, one checkpoint and runs of one canvas.
+///
+/// Its other memory does not grow with the layers: the 16 bytes per pixel
+/// of [`Above`].
+pub(crate) fn replay_plan(layers: usize, canvas_bytes: usize) -> Replay {
+    let affordable = (CHECKPOINT_BUDGET / canvas_bytes.max(1)).max(1);
+    let root = ceil_sqrt(layers).max(1);
+    if layers.div_ceil(root) + root <= affordable {
+        return Replay {
+            interval: root,
+            run: root,
+        };
+    }
+    let run = (affordable / 2).max(1);
+    let checkpoints = affordable.saturating_sub(run).max(1);
+    let interval = layers.div_ceil(checkpoints).max(1);
+    Replay {
+        interval,
+        run: run.min(interval),
+    }
 }
 
 /// The exact canvas before every `interval`-th layer.
@@ -432,19 +503,30 @@ impl Checkpoints {
         Self { interval, canvases }
     }
 
-    /// Writes the exact canvas below layer `index` of `layers` into `out`.
-    fn below<R: Rng>(
+    /// Writes the exact canvas below each layer of the run `run` of
+    /// `layers` into `below`, in order, replaying the layers from the run's
+    /// checkpoint once; the run must not cross a checkpoint.
+    fn replay<R: Rng>(
         &self,
-        index: usize,
         layers: &[CommittedShape],
-        out: &mut Buffer,
+        run: Range<usize>,
+        below: &mut [Buffer],
         scratch: &mut WorkerCtx<R>,
     ) {
-        let first = index / self.interval * self.interval;
-        out.pixels_mut()
-            .copy_from_slice(self.canvases[index / self.interval].pixels());
-        for layer in &layers[first..index] {
-            score::draw_lines(out, layer.color, layer.shape.rasterize(scratch));
+        let segment = run.start / self.interval;
+        let below = &mut below[..run.len()];
+        let (first, rest) = below.split_first_mut().expect("a run has a layer");
+        first
+            .pixels_mut()
+            .copy_from_slice(self.canvases[segment].pixels());
+        for layer in &layers[segment * self.interval..run.start] {
+            score::draw_lines(first, layer.color, layer.shape.rasterize(scratch));
+        }
+        let mut previous = &*first;
+        for (canvas, layer) in rest.iter_mut().zip(&layers[run]) {
+            canvas.pixels_mut().copy_from_slice(previous.pixels());
+            score::draw_lines(canvas, layer.color, layer.shape.rasterize(scratch));
+            previous = canvas;
         }
     }
 }
@@ -489,43 +571,83 @@ pub(crate) fn pass<R: Rng>(
     scratch: &mut WorkerCtx<R>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Option<(Option<Vec<CommittedShape>>, u64)> {
+    let canvas_bytes = target.width() as usize * target.height() as usize * BYTES_PER_PIXEL;
+    let replay = replay_plan(layers.len(), canvas_bytes);
+    pass_with(
+        replay, target, background, layers, alpha, streams, scratch, cancelled,
+    )
+}
+
+/// [`pass`] with the checkpoints and runs of `replay`, which do not change
+/// its result.
+#[allow(clippy::too_many_arguments)]
+fn pass_with<R: Rng>(
+    replay: Replay,
+    target: &Buffer,
+    background: Color,
+    layers: &[CommittedShape],
+    alpha: Alpha,
+    streams: Streams,
+    scratch: &mut WorkerCtx<R>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Option<(Option<Vec<CommittedShape>>, u64)> {
     let (width, height) = (target.width(), target.height());
     let canvas = Buffer::new_from_color(width, height, background);
-    let canvas_bytes = width as usize * height as usize * BYTES_PER_PIXEL;
-    let interval = checkpoint_interval(layers.len(), canvas_bytes);
-    let checkpoints = Checkpoints::render(&canvas, layers, interval, scratch);
-    let mut below = canvas;
+    let checkpoints = Checkpoints::render(&canvas, layers, replay.interval, scratch);
+    let mut below = vec![canvas; replay.run];
     let mut above = Above::new(width, height);
+    let mut workers = climbers(width as i32, height as i32, streams.effort);
     let mut refitted = layers.to_vec();
     let mut changed = false;
     let mut evaluations = 0;
 
-    for index in (0..layers.len()).rev() {
-        if cancelled() {
-            return None;
+    for (bottom, top) in replay.runs(layers.len()) {
+        checkpoints.replay(layers, bottom..top, &mut below, scratch);
+        for index in (bottom..top).rev() {
+            if cancelled() {
+                return None;
+            }
+            let layer = Layer {
+                target,
+                below: &below[index - bottom],
+                above: &above,
+            };
+            let committed = &layers[index];
+            let (refit, count) = refine_layer(
+                &layer,
+                committed,
+                index,
+                alpha,
+                streams,
+                scratch,
+                &mut workers,
+            );
+            evaluations += count;
+            if let Some(refit) = refit {
+                refitted[index] = refit;
+                changed = true;
+            }
+            let decided = &refitted[index];
+            above.fold(decided.shape.rasterize(scratch), decided.color);
         }
-        checkpoints.below(index, layers, &mut below, scratch);
-        let layer = Layer {
-            target,
-            below: &below,
-            above: &above,
-        };
-        let (refit, count) = refine_layer(&layer, &layers[index], index, alpha, streams, scratch);
-        evaluations += count;
-        if let Some(refit) = refit {
-            refitted[index] = refit;
-            changed = true;
-        }
-        let decided = &refitted[index];
-        above.fold(decided.shape.rasterize(scratch), decided.color);
     }
 
     Some((changed.then_some(refitted), evaluations))
 }
 
+/// The workers of a pass's climbs, one per climb of `effort`, which every
+/// layer of the pass reuses: each climb resets its worker's random stream
+/// and evaluation settings, and the rest of a worker is scratch space.
+fn climbers(width: i32, height: i32, effort: RefineEffort) -> Vec<WorkerCtx<ChaCha8Rng>> {
+    (0..effort.rounds)
+        .map(|_| WorkerCtx::new(width, height, refine_rng(0, 0, 0, 0)))
+        .collect()
+}
+
 /// Refits layer `index`, `committed`, under `layer`: the replacement if one
 /// is strictly below the committed shape in its current colour, and the
-/// number of evaluations.
+/// number of evaluations. Climb `round` runs on `workers[round]`
+/// ([`climbers`]).
 fn refine_layer<R: Rng>(
     layer: &Layer<'_>,
     committed: &CommittedShape,
@@ -533,6 +655,7 @@ fn refine_layer<R: Rng>(
     alpha: Alpha,
     streams: Streams,
     scratch: &mut WorkerCtx<R>,
+    workers: &mut [WorkerCtx<ChaCha8Rng>],
 ) -> (Option<CommittedShape>, u64) {
     let color = committed.color;
     let rgb = [color.r, color.g, color.b];
@@ -541,33 +664,31 @@ fn refine_layer<R: Rng>(
     let start = layer.evaluate(lines, color.a, rgb);
     let state = State::committed(committed.shape.clone(), alpha, color.a);
 
-    let (width, height) = (scratch.width, scratch.height);
     let (quadratic_width, quadratic_cap) = (scratch.quadratic_width, scratch.quadratic_cap);
     let (seed, pass, index) = (streams.seed, streams.pass, index as u64);
     let RefineEffort { rounds, age } = streams.effort;
-    let results: Vec<(State, f64, Color, u64)> = (0..rounds)
-        .into_par_iter()
-        .map_init(
-            || WorkerCtx::new(width, height, refine_rng(seed, pass, index, 0)),
-            |worker, round| {
-                worker.rng = refine_rng(seed, pass, index, round);
-                worker.quadratic_width = quadratic_width;
-                worker.quadratic_cap = quadratic_cap;
-                let evaluations_before = worker.evaluations;
-                let (state, energy, color) =
-                    climb(state.clone(), start, worker, age, |state, worker| {
-                        worker.evaluations += 1;
-                        let lines = state.shape.rasterize(worker);
-                        layer.evaluate(lines, state.alpha, rgb)
-                    });
-                (
-                    state,
-                    energy,
-                    color,
-                    worker.evaluations - evaluations_before,
-                )
-            },
-        )
+    debug_assert_eq!(workers.len() as u64, rounds, "one worker per climb");
+    let results: Vec<(State, f64, Color, u64)> = workers
+        .par_iter_mut()
+        .enumerate()
+        .map(|(round, worker)| {
+            worker.rng = refine_rng(seed, pass, index, round as u64);
+            worker.quadratic_width = quadratic_width;
+            worker.quadratic_cap = quadratic_cap;
+            let evaluations_before = worker.evaluations;
+            let (state, energy, color) =
+                climb(state.clone(), start, worker, age, |state, worker| {
+                    worker.evaluations += 1;
+                    let lines = state.shape.rasterize(worker);
+                    layer.evaluate(lines, state.alpha, rgb)
+                });
+            (
+                state,
+                energy,
+                color,
+                worker.evaluations - evaluations_before,
+            )
+        })
         .collect();
 
     // The bar and the fitted start.
@@ -993,7 +1114,16 @@ mod tests {
                         effort,
                     };
                     let committed = &layers[index];
-                    refine_layer(&layer, committed, index, Alpha::Auto, streams, &mut worker)
+                    let mut workers = climbers(width as i32, height as i32, effort);
+                    refine_layer(
+                        &layer,
+                        committed,
+                        index,
+                        Alpha::Auto,
+                        streams,
+                        &mut worker,
+                        &mut workers,
+                    )
                 };
                 let (default, default_count) = refit(RefineEffort::DEFAULT);
                 let (extended, extended_count) = refit(more);
@@ -1046,6 +1176,151 @@ mod tests {
         }
     }
 
+    /// A refit pass as a naive implementation runs it: top-down, the canvas
+    /// below every layer rendered from scratch.
+    fn naive_pass(
+        target: &Buffer,
+        background: Color,
+        layers: &[CommittedShape],
+        alpha: Alpha,
+        streams: Streams,
+        worker: &mut WorkerCtx<ChaCha8Rng>,
+    ) -> (Option<Vec<CommittedShape>>, u64) {
+        let (width, height) = (target.width(), target.height());
+        let mut above = Above::new(width, height);
+        let mut refitted = layers.to_vec();
+        let (mut changed, mut evaluations) = (false, 0);
+        for index in (0..layers.len()).rev() {
+            let below = render(width, height, background, &layers[..index], worker);
+            let layer = Layer {
+                target,
+                below: &below,
+                above: &above,
+            };
+            // Fresh workers for every layer's climbs.
+            let mut workers = climbers(width as i32, height as i32, streams.effort);
+            let committed = &layers[index];
+            let (refit, count) = refine_layer(
+                &layer,
+                committed,
+                index,
+                alpha,
+                streams,
+                worker,
+                &mut workers,
+            );
+            evaluations += count;
+            if let Some(refit) = refit {
+                refitted[index] = refit;
+                changed = true;
+            }
+            let decided = &refitted[index];
+            above.fold(decided.shape.rasterize(worker), decided.color);
+        }
+        (changed.then_some(refitted), evaluations)
+    }
+
+    /// A pass returns exactly the layers and the evaluations of the naive
+    /// pass, whatever its checkpoints and runs, across segment and run
+    /// boundaries.
+    #[test]
+    fn a_pass_refits_every_layer_against_the_exact_canvas_below_it() {
+        let mut rng = ChaCha8Rng::seed_from_u64(0x5e9);
+        let (width, height) = (24, 19);
+        let canvas_bytes = (width * height * 3) as usize;
+        let streams = Streams {
+            seed: 11,
+            pass: 2,
+            effort: RefineEffort::DEFAULT,
+        };
+        let mut changed = 0;
+        for count in [1, 7, 16, 17, 50] {
+            let target = noise(&mut rng, width, height);
+            let background = opaque(&mut rng);
+            let layers = random_layers(&mut rng, ShapeKind::Any, count, (width, height));
+            let mut worker = WorkerCtx::new(width as i32, height as i32, create_rng(3));
+            let naive = naive_pass(
+                &target,
+                background,
+                &layers,
+                Alpha::Auto,
+                streams,
+                &mut worker,
+            );
+            changed += usize::from(naive.0.is_some());
+            let plans = [
+                replay_plan(count, canvas_bytes),
+                Replay {
+                    interval: 1,
+                    run: 1,
+                },
+                Replay {
+                    interval: 4,
+                    run: 4,
+                },
+                Replay {
+                    interval: 7,
+                    run: 3,
+                },
+                Replay {
+                    interval: count,
+                    run: count.min(2),
+                },
+            ];
+            for replay in plans {
+                let pass = pass_with(
+                    replay,
+                    &target,
+                    background,
+                    &layers,
+                    Alpha::Auto,
+                    streams,
+                    &mut worker,
+                    &mut || false,
+                );
+                assert_eq!(pass, Some(naive.clone()), "{count} layers, {replay:?}");
+            }
+        }
+        assert!(changed >= 4, "only {changed} passes changed a layer");
+    }
+
+    /// A pass keeps `⌈layers / interval⌉` checkpoints and a run of `run`
+    /// canvases. Where they fit in the budget at `⌈√layers⌉`, which
+    /// minimises them, both are `⌈√layers⌉`; otherwise the budget is split
+    /// between checkpoints and runs, and only the smallest plan, one
+    /// checkpoint and runs of one canvas, may exceed it.
+    #[test]
+    fn replay_plan_is_the_square_root_unless_memory_caps_it() {
+        let plan = |interval, run| Replay { interval, run };
+        let small = 256 * 256 * 3;
+        assert_eq!(replay_plan(1, small), plan(1, 1));
+        assert_eq!(replay_plan(2, small), plan(2, 2));
+        assert_eq!(replay_plan(100, small), plan(10, 10));
+        assert_eq!(replay_plan(500, small), plan(23, 23));
+        // A 2048 x 2048 canvas: five canvases fit in the budget, against the
+        // eight of four checkpoints and a run of four for 16 layers. Three
+        // checkpoints and a run of two fill it.
+        let large = 2048 * 2048 * 3;
+        assert_eq!(CHECKPOINT_BUDGET / large, 5);
+        assert_eq!(replay_plan(16, large), plan(6, 2));
+        assert_eq!(replay_plan(500, large), plan(167, 2));
+        // A canvas larger than the budget: the smallest plan.
+        assert_eq!(replay_plan(500, 2 * CHECKPOINT_BUDGET), plan(500, 1));
+        for layers in [1, 7, 16, 17, 499, 500, 501, 5000] {
+            for bytes in [12, small, large, CHECKPOINT_BUDGET, 2 * CHECKPOINT_BUDGET] {
+                let Replay { interval, run } = replay_plan(layers, bytes);
+                let context = format!("{layers} layers of {bytes} bytes");
+                assert!(1 <= run && run <= interval, "{context}");
+                let kept = layers.div_ceil(interval) + run;
+                let smallest = layers.div_ceil(interval) == 1 && run == 1;
+                assert!(
+                    smallest || kept * bytes <= CHECKPOINT_BUDGET,
+                    "{context}: {kept} canvases"
+                );
+            }
+        }
+    }
+
     #[test]
     fn checkpoints_give_the_exact_canvas_below_every_layer() {
         let mut rng = ChaCha8Rng::seed_from_u64(0xc4e);
@@ -1054,13 +1329,30 @@ mod tests {
         let background = opaque(&mut rng);
         let mut worker = WorkerCtx::new(width as i32, height as i32, create_rng(1));
         let canvas = Buffer::new_from_color(width, height, background);
-        let checkpoints = Checkpoints::render(&canvas, &layers, 7, &mut worker);
-        assert_eq!(checkpoints.canvases.len(), 6);
-        let mut below = Buffer::new(width, height);
-        for index in (0..layers.len()).rev() {
-            checkpoints.below(index, &layers, &mut below, &mut worker);
-            let exact = render(width, height, background, &layers[..index], &mut worker);
-            assert_eq!(below.pixels(), exact.pixels(), "layer {index}");
+        let exact: Vec<Buffer> = (0..layers.len())
+            .map(|index| render(width, height, background, &layers[..index], &mut worker))
+            .collect();
+        // Whole segments, runs that end at a checkpoint, runs that do not,
+        // runs of one layer, and one segment of every layer.
+        for (interval, run) in [(7, 7), (7, 3), (7, 1), (6, 4), (1, 1), (37, 5), (37, 37)] {
+            let replay = Replay { interval, run };
+            let checkpoints = Checkpoints::render(&canvas, &layers, interval, &mut worker);
+            assert_eq!(checkpoints.canvases.len(), layers.len().div_ceil(interval));
+            let mut below = vec![Buffer::new(width, height); run];
+            let mut visited = Vec::new();
+            for (bottom, top) in replay.runs(layers.len()) {
+                assert!(0 < top - bottom && top - bottom <= run, "{bottom}..{top}");
+                assert_eq!(bottom / interval, (top - 1) / interval, "{bottom}..{top}");
+                checkpoints.replay(&layers, bottom..top, &mut below, &mut worker);
+                for index in (bottom..top).rev() {
+                    let replayed = below[index - bottom].pixels();
+                    let context = format!("{replay:?}, layer {index}");
+                    assert_eq!(replayed, exact[index].pixels(), "{context}");
+                    visited.push(index);
+                }
+            }
+            let top_down: Vec<usize> = (0..layers.len()).rev().collect();
+            assert_eq!(visited, top_down, "{replay:?}");
         }
     }
 }
