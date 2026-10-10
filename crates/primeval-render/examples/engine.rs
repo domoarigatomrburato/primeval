@@ -69,6 +69,17 @@
 //!                       multiples of each round's random candidates and
 //!                       climb age (default: the model's for the kind, 16
 //!                       rounds and 1 time the age, 2 for quadratics)
+//!   --search KEY=VALUE[,KEY=VALUE...]  the greedy search's settings per
+//!                       round (`Model::set_search`), each key left out
+//!                       keeping the kind's default: `climb=coarse|adapted`
+//!                       the climb's moves (default coarse; adapted sizes
+//!                       them by the 1/5th success rule, as the refit's
+//!                       climb does), `seeds=K` the best random candidates
+//!                       climbed in turn (default 1, 2 for quadratics),
+//!                       `candidates=N` the random candidates (default
+//!                       1000, 900 for quadratics), `age=A` the base climb
+//!                       age, which the kind's and `--effort`'s multiples
+//!                       still multiply (default 100); all numbers positive
 //!   --refine-effort R:A every refit pass's hill climbs per layer and the
 //!                       non-improving moves that stop a climb (default:
 //!                       the model's, 4 climbs of age 25)
@@ -225,7 +236,7 @@ mod common;
 
 use common::{ALL_SHAPES, BoxError, SEED, rgb_rmse};
 use image::{ImageFormat, RgbImage, imageops};
-use primeval_core::{Drawing, Geometry, LineCap, Model, ModelOptions, joint};
+use primeval_core::{Climb, Drawing, Geometry, LineCap, Model, ModelOptions, Search, joint};
 use primeval_render::lab::{Chosen, During, Guard, Pass, Pipeline, Refits};
 use primeval_render::{OutputFormat, RenderOptions, ShapeKind, lab};
 use std::path::{Path, PathBuf};
@@ -257,6 +268,8 @@ struct Config {
     curved: bool,
     /// `--effort`: rounds, candidate and age multiples.
     effort: Option<(u64, usize, usize)>,
+    /// `--search`: the keys given, `None` for the others.
+    search: Option<SearchArgs>,
     /// `--refine-effort`: climbs per layer and climb age of every refit
     /// pass.
     refine_effort: Option<(u64, usize)>,
@@ -362,6 +375,80 @@ fn parse_effort(value: &str) -> Result<(u64, usize, usize), BoxError> {
         return Err(invalid().into());
     }
     Ok(effort)
+}
+
+/// The keys of `--search`, each `None` when not given.
+#[derive(Clone, Copy, Debug, Default)]
+struct SearchArgs {
+    climb: Option<Climb>,
+    seeds: Option<usize>,
+    candidates: Option<usize>,
+    age: Option<usize>,
+}
+
+impl SearchArgs {
+    /// The model's setting: the climb given or the default.
+    fn setting(self) -> Search {
+        Search {
+            climb: self.climb.unwrap_or_default(),
+            seeds: self.seeds,
+            candidates: self.candidates,
+            age: self.age,
+        }
+    }
+
+    /// The keys given, as the header spells them.
+    fn describe(self) -> String {
+        let mut parts = Vec::new();
+        if let Some(climb) = self.climb {
+            let climb = match climb {
+                Climb::Coarse => "coarse",
+                Climb::Adapted => "adapted",
+            };
+            parts.push(format!("climb {climb}"));
+        }
+        for (key, value) in [
+            ("seeds", self.seeds),
+            ("candidates", self.candidates),
+            ("age", self.age),
+        ] {
+            if let Some(value) = value {
+                parts.push(format!("{key} {value}"));
+            }
+        }
+        parts.join(", ")
+    }
+}
+
+fn parse_search(value: &str) -> Result<SearchArgs, BoxError> {
+    let invalid = || {
+        format!(
+            "--search: expected KEY=VALUE[,KEY=VALUE...] with climb=coarse|adapted, \
+             seeds=K, candidates=N, age=A (positive), got {value}"
+        )
+    };
+    let mut search = SearchArgs::default();
+    for pair in value.split(',') {
+        let (key, value) = pair.split_once('=').ok_or_else(invalid)?;
+        let positive = || match value.parse::<usize>() {
+            Ok(number) if number > 0 => Ok(Some(number)),
+            _ => Err(invalid()),
+        };
+        match key {
+            "climb" => {
+                search.climb = Some(match value {
+                    "coarse" => Climb::Coarse,
+                    "adapted" => Climb::Adapted,
+                    _ => return Err(invalid().into()),
+                });
+            }
+            "seeds" => search.seeds = positive()?,
+            "candidates" => search.candidates = positive()?,
+            "age" => search.age = positive()?,
+            _ => return Err(invalid().into()),
+        }
+    }
+    Ok(search)
 }
 
 fn parse_refine_effort(value: &str) -> Result<(u64, usize), BoxError> {
@@ -649,6 +736,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
     let mut final_refits = None;
     let mut joint_scale = None;
     let mut effort = None;
+    let mut search = None;
     let mut refine_effort = None;
     let mut quadratic_width = None;
     let mut quadratic_cap = None;
@@ -697,6 +785,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
                 };
             }
             "--effort" => effort = Some(parse_effort(&value()?)?),
+            "--search" => search = Some(parse_search(&value()?)?),
             "--refine-effort" => refine_effort = Some(parse_refine_effort(&value()?)?),
             "--quadratic-width" => quadratic_width = Some(parse_quadratic_width(&value()?)?),
             "--quadratic-cap" => quadratic_cap = Some(parse_quadratic_cap(&value()?)?),
@@ -750,6 +839,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
         tuning,
         curved,
         effort,
+        search,
         refine_effort,
         quadratic_width,
         quadratic_cap,
@@ -804,6 +894,9 @@ fn search(
     let mut model = Model::new(target, background, options);
     if let Some((rounds, candidates, age)) = config.effort {
         model.set_search_effort(rounds, candidates, age);
+    }
+    if let Some(search) = config.search {
+        model.set_search(search.setting());
     }
     if let Some((rounds, age)) = config.refine_effort {
         model.set_refine_effort(rounds, age);
@@ -1030,6 +1123,9 @@ fn print_header(config: &Config) {
     }
     if let Some((rounds, candidates, age)) = config.effort {
         println!("- search effort: {rounds} rounds, candidates x{candidates}, climb age x{age}");
+    }
+    if let Some(search) = config.search {
+        println!("- search: {}", search.describe());
     }
     if let Some((rounds, age)) = config.refine_effort {
         println!("- refine effort: {rounds} climbs per layer, climb age {age}");

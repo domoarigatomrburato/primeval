@@ -2,11 +2,12 @@ use crate::alpha::Alpha;
 use crate::coarse::Coarse;
 use crate::drawing::{Drawing, DrawnShape, LineCap};
 use crate::error_grid::ErrorGrid;
+use crate::optimize::Climb;
 use crate::refine::RefineEffort;
 use crate::score;
 use crate::shapes::{Quadratic, Shape, ShapeKind};
 use crate::state::State;
-use crate::worker::{SearchRound, WorkerCtx};
+use crate::worker::{RoundEffort, SearchRound, WorkerCtx, default_seeds};
 use crate::{Buffer, Color};
 use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
@@ -44,7 +45,15 @@ impl Effort {
     /// ellipses 2.2 points for 90% more, so both went back to 16 rounds.
     /// Polygons had gone back before them: the doubled rounds were most of
     /// their pipeline's cost. For the other kinds, twice or four times the
-    /// rounds or the age never gained 0.5%.
+    /// rounds or the age never gained 0.5%. Climbing the best two or four
+    /// random candidates per round instead of one (the lab hook
+    /// `Model::set_search`) buys `any` and rotated ellipses 0.9 and 0.7
+    /// points at 1.1 times the time, and 2.4 points each at 1.3–1.6 times,
+    /// quadratics 2.1 points at 1.5 times with four; the refit's adapted
+    /// moves in place of the coarse ones lose on the per-image mean at every
+    /// age (`docs/algorithm-leap-review-2026-10-07.md`, section 18). Both
+    /// stay out: the seeds are a product choice of quality for time, left
+    /// open.
     const fn of(kind: ShapeKind) -> Self {
         let age = match kind {
             ShapeKind::Quadratic => 2,
@@ -56,6 +65,27 @@ impl Effort {
             age,
         }
     }
+}
+
+/// Lab only: the settings of each search round of [`Model::step`] that the
+/// lab hook `Model::set_search` overrides; `None` keeps the kind's
+/// default. Public only in the lab build. Not part of the supported API.
+#[cfg_attr(not(feature = "lab"), allow(unreachable_pub))]
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Search {
+    /// The climb's moves: coarse by default.
+    pub climb: Climb,
+    /// How many of the round's best random candidates are climbed, each in
+    /// turn, the lowest climb winning: by default 1, and 2 for quadratics.
+    pub seeds: Option<usize>,
+    /// The random candidates of the round: by default 1000, and 900 for
+    /// quadratics.
+    pub candidates: Option<usize>,
+    /// The base climb age, the consecutive rejected moves that stop a
+    /// climb, which the kind's multiple (2 for quadratics) or
+    /// `Model::set_search_effort`'s still multiplies: by default 100.
+    pub age: Option<usize>,
 }
 
 /// Search settings for a [`Model`].
@@ -113,6 +143,9 @@ pub struct Model {
     /// The search effort of [`Model::step`] for every kind, set only by
     /// the lab hook; otherwise each kind's [`Effort::of`].
     effort: Option<Effort>,
+    /// The settings of every search round of [`Model::step`]: each kind's
+    /// defaults unless the lab hook set others.
+    search: Search,
     /// The effort of every refit pass: [`RefineEffort::DEFAULT`] unless the
     /// lab hook set it.
     refine_effort: RefineEffort,
@@ -183,6 +216,7 @@ impl Model {
             passes: 0,
             scratch,
             effort: None,
+            search: Search::default(),
             refine_effort: RefineEffort::DEFAULT,
             quadratic_width: Quadratic::STROKE_WIDTHS,
             quadratic_cap: LineCap::Round,
@@ -223,13 +257,20 @@ impl Model {
         // Each step commits exactly one shape, so this is the step index.
         let step = self.history.len() as u64;
         let (candidate_count, hill_climb_age) = Self::search_params(kind);
+        let search = self.search;
+        let candidate_count = search.candidates.unwrap_or(candidate_count);
+        let hill_climb_age = search.age.unwrap_or(hill_climb_age);
         let Effort {
             rounds,
             candidates,
             age,
         } = self.effort.unwrap_or(Effort::of(kind));
-        let (candidate_count, hill_climb_age) =
-            (candidate_count * candidates, hill_climb_age * age);
+        let effort = RoundEffort {
+            candidates: candidate_count * candidates,
+            age: hill_climb_age * age,
+            seeds: search.seeds.unwrap_or(default_seeds(kind)),
+            climb: search.climb,
+        };
         let (quadratic_width, quadratic_cap) = (self.quadratic_width, self.quadratic_cap);
         #[cfg(test)]
         let pruning = self.pruning;
@@ -246,8 +287,7 @@ impl Model {
                         worker.pruning = pruning;
                     }
                     let evaluations_before = worker.evaluations;
-                    let state =
-                        worker.search_round(&round, kind, alpha, candidate_count, hill_climb_age);
+                    let state = worker.search_round(&round, kind, alpha, effort);
                     (state, worker.evaluations - evaluations_before)
                 },
             )
@@ -283,6 +323,22 @@ impl Model {
             candidates,
             age,
         });
+    }
+
+    /// Lab only: makes every later [`Model::step`] search with `search`:
+    /// its climb, seeds, and random candidates and base climb age per
+    /// round, each `None` keeping the kind's default; see [`Search`]. The
+    /// numbers given are at least 1. Not part of the supported API.
+    #[cfg(feature = "lab")]
+    #[doc(hidden)]
+    pub fn set_search(&mut self, search: Search) {
+        assert!(
+            [search.seeds, search.candidates, search.age]
+                .iter()
+                .all(|value| value.is_none_or(|value| value > 0)),
+            "search settings must be positive"
+        );
+        self.search = search;
     }
 
     /// Lab only: makes every later [`Model::refine`] run `rounds`
@@ -719,7 +775,21 @@ mod tests {
         steps: usize,
         kind: ShapeKind,
         pruning: bool,
+        size: (u32, u32),
+    ) -> Drawing {
+        seeded_drawing_with(seed, threads, steps, kind, size, |model| {
+            model.pruning = pruning;
+        })
+    }
+
+    /// [`seeded_drawing_of`] of a model that `configure` set up first.
+    fn seeded_drawing_with(
+        seed: u64,
+        threads: usize,
+        steps: usize,
+        kind: ShapeKind,
         (width, height): (u32, u32),
+        configure: impl FnOnce(&mut Model) + Send,
     ) -> Drawing {
         use rand::{RngExt, SeedableRng};
 
@@ -740,12 +810,108 @@ mod tests {
                     ..ModelOptions::default()
                 },
             );
-            model.pruning = pruning;
+            configure(&mut model);
             for _ in 0..steps {
                 model.step(kind, Alpha::Auto);
             }
             model.drawing()
         })
+    }
+
+    /// The greedy search with the adapted climb from two seeds per round
+    /// gives the same drawing on any number of threads, and another one
+    /// than the default search.
+    #[test]
+    fn an_adapted_search_from_two_seeds_is_independent_of_the_thread_count() {
+        let search = Search {
+            climb: Climb::Adapted,
+            seeds: Some(2),
+            ..Search::default()
+        };
+        for (kind, size) in [(ShapeKind::Any, COARSE), (ShapeKind::Quadratic, SMALL)] {
+            let drawing = |threads| {
+                seeded_drawing_with(42, threads, 2, kind, size, |model| model.search = search)
+            };
+            let reference = drawing(1);
+            assert_eq!(drawing(4), reference, "{kind:?}");
+            assert_ne!(
+                reference,
+                seeded_drawing_of(42, 1, 2, kind, true, size),
+                "{kind:?}: the search setting changed nothing"
+            );
+        }
+    }
+
+    /// The lab hook refuses a search setting of zero seeds, candidates or
+    /// climb age.
+    #[cfg(feature = "lab")]
+    #[test]
+    fn a_search_setting_of_zero_is_refused() {
+        let zero = [
+            Search {
+                seeds: Some(0),
+                ..Search::default()
+            },
+            Search {
+                candidates: Some(0),
+                ..Search::default()
+            },
+            Search {
+                age: Some(0),
+                ..Search::default()
+            },
+        ];
+        for search in zero {
+            let target = Buffer::new_from_color(8, 8, Color::new(255, 255, 255, 255));
+            let mut model = Model::new(target, Color::new(0, 0, 0, 255), ModelOptions::default());
+            let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                model.set_search(search);
+            }));
+            assert!(refused.is_err(), "{search:?}");
+        }
+        let target = Buffer::new_from_color(8, 8, Color::new(255, 255, 255, 255));
+        let mut model = Model::new(target, Color::new(0, 0, 0, 255), ModelOptions::default());
+        let search = Search {
+            climb: Climb::Adapted,
+            seeds: Some(1),
+            candidates: Some(1),
+            age: Some(1),
+        };
+        model.set_search(search);
+        assert_eq!(model.search, search);
+    }
+
+    /// The search setting's candidates and age are each round's, absolute:
+    /// a step samples `rounds × candidates` random candidates and climbs
+    /// each of its seeds for at least `age` evaluations, far fewer than
+    /// the default 1000 candidates per round.
+    #[test]
+    fn a_search_setting_sets_each_rounds_candidates_age_and_seeds() {
+        let target = Buffer::new_from_color(8, 8, Color::new(255, 255, 255, 255));
+        let mut model = Model::new(
+            target,
+            Color::new(0, 0, 0, 255),
+            ModelOptions {
+                seed: Some(7),
+                ..ModelOptions::default()
+            },
+        );
+        model.search = Search {
+            climb: Climb::Adapted,
+            seeds: Some(3),
+            candidates: Some(50),
+            age: Some(10),
+        };
+        let rounds = Effort::of(ShapeKind::Triangle).rounds;
+        let (default_candidates, _) = Model::search_params(ShapeKind::Triangle);
+
+        for step in 0..2 {
+            let evaluations = model.step(ShapeKind::Triangle, fixed_alpha(128));
+            assert!(
+                (rounds * (50 + 3 * 10)..rounds * default_candidates as u64).contains(&evaluations),
+                "step {step}: {evaluations}"
+            );
+        }
     }
 
     #[test]
