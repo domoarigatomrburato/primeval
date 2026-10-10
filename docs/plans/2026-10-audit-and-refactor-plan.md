@@ -581,7 +581,7 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
   - The engine covers each pixel by the exact share of its area under the stroke, as tiny-skia's anti-aliased stroke does.
   - Butt caps cut through pixels, and joins are round where the curve turns.
   - Flattening is finer (0.25 px).
-  - The width is 2 px. tiny-skia draws a stroke of 1 px or less as a hairline at the working size, so 1 px could not agree with the SVG and the larger PNGs.
+  - The width is 2 px. tiny-skia draws a stroke of 1 px or less as a hairline at the working size, so 1 px could not agree with the SVG and the larger PNG outputs.
 - **Effect** (median rmse256 against the 1 px stroke, refit pass included):
 
   | Shapes | Change |
