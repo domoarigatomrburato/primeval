@@ -1,13 +1,14 @@
 use crate::alpha::Alpha;
 use crate::coarse::Coarse;
-use crate::drawing::{Drawing, DrawnShape, LineCap};
+#[cfg(any(test, feature = "lab"))]
+use crate::drawing::LineCap;
+use crate::drawing::{Drawing, DrawnShape};
 use crate::error_grid::ErrorGrid;
-use crate::optimize::Climb;
 use crate::refine::RefineEffort;
 use crate::score;
-use crate::shapes::{Quadratic, Shape, ShapeKind};
+use crate::shapes::{Shape, ShapeKind};
 use crate::state::State;
-use crate::worker::{RoundEffort, SearchRound, WorkerCtx, default_seeds};
+use crate::worker::{BASE_AGE, RoundEffort, SearchRound, WorkerCtx};
 use crate::{Buffer, Color};
 use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
@@ -21,7 +22,7 @@ pub(crate) struct CommittedShape {
 
 /// How hard [`Model::step`] searches: its independent search rounds, of
 /// which the best is painted, and the multiples of each round's random
-/// candidates and climb age ([`Model::search_params`]).
+/// candidates and base climb age ([`RoundEffort::of`], [`BASE_AGE`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Effort {
     rounds: u64,
@@ -30,7 +31,8 @@ struct Effort {
 }
 
 impl Effort {
-    /// The effort for `kind`: 16 rounds, and twice the climb age for
+    /// The effort for `kind`: 16 rounds, and the multiple of the base climb
+    /// age that the kind's round climbs ([`RoundEffort::of`]): twice for
     /// quadratics.
     ///
     /// Measured with the engine runner on its corpus, with the passes and
@@ -55,14 +57,10 @@ impl Effort {
     /// stay out: the seeds are a product choice of quality for time, left
     /// open.
     const fn of(kind: ShapeKind) -> Self {
-        let age = match kind {
-            ShapeKind::Quadratic => 2,
-            _ => 1,
-        };
         Self {
             rounds: 16,
             candidates: 1,
-            age,
+            age: RoundEffort::of(kind).age / BASE_AGE,
         }
     }
 }
@@ -74,8 +72,6 @@ impl Effort {
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Search {
-    /// The climb's moves: coarse by default.
-    pub climb: Climb,
     /// How many of the round's best random candidates are climbed, each in
     /// turn, the lowest climb winning: by default 1, and 2 for quadratics.
     pub seeds: Option<usize>,
@@ -137,8 +133,11 @@ pub struct Model {
     /// Refit passes run so far, the pass index of the next
     /// [`Model::refine`]'s random streams.
     passes: u64,
-    /// Scratch for rasterizing the shape that [`Model::add`] paints; the
-    /// refit pass's workers take their quadratic width bounds and cap from it.
+    /// Scratch for rasterizing the shape that [`Model::add`] paints. Its
+    /// quadratic width bounds and cap, `Quadratic::STROKE_WIDTHS` and round
+    /// unless the lab hooks set others, are the model's: every worker of
+    /// the search and of the refit pass takes them from it
+    /// (`WorkerCtx::like`).
     scratch: WorkerCtx<ChaCha8Rng>,
     /// The search effort of [`Model::step`] for every kind, set only by
     /// the lab hook; otherwise each kind's [`Effort::of`].
@@ -149,15 +148,6 @@ pub struct Model {
     /// The effort of every refit pass: [`RefineEffort::DEFAULT`] unless the
     /// lab hook set it.
     refine_effort: RefineEffort,
-    /// The bounds of a quadratic curve's stroke width that every worker
-    /// of the search and of the refit pass gets (see
-    /// `WorkerCtx::quadratic_width`): `Quadratic::STROKE_WIDTHS` unless
-    /// the lab hook set them.
-    quadratic_width: (f64, f64),
-    /// How the stroke of every quadratic curve that the search draws ends
-    /// (see `WorkerCtx::quadratic_cap`): round unless the lab hook set
-    /// another.
-    quadratic_cap: LineCap,
     /// Whether the search may stop evaluations early; see
     /// `WorkerCtx::pruning`.
     #[cfg(test)]
@@ -168,13 +158,6 @@ pub struct Model {
 }
 
 impl Model {
-    fn search_params(kind: ShapeKind) -> (usize, usize) {
-        match kind {
-            ShapeKind::Quadratic => (900, 100),
-            _ => (1000, 100),
-        }
-    }
-
     /// Starts a search for `target` from a canvas filled with `background`.
     ///
     /// `target` is at least 2 x 2 pixels: [`Buffer::from_rgb`] rejects
@@ -218,8 +201,6 @@ impl Model {
             effort: None,
             search: Search::default(),
             refine_effort: RefineEffort::DEFAULT,
-            quadratic_width: Quadratic::STROKE_WIDTHS,
-            quadratic_cap: LineCap::Round,
             #[cfg(test)]
             pruning: true,
             #[cfg(test)]
@@ -252,43 +233,38 @@ impl Model {
             score: self.score,
             coarse: coarse_round.as_ref(),
         };
-        let (width, height) = (self.target.width() as i32, self.target.height() as i32);
         let seed = self.seed;
         // Each step commits exactly one shape, so this is the step index.
         let step = self.history.len() as u64;
-        let (candidate_count, hill_climb_age) = Self::search_params(kind);
+        // The kind's round, then the lab's settings: `Search`'s candidates
+        // and base age, and `Effort`'s multiples of them, which replace the
+        // kind's.
+        let default = RoundEffort::of(kind);
         let search = self.search;
-        let candidate_count = search.candidates.unwrap_or(candidate_count);
-        let hill_climb_age = search.age.unwrap_or(hill_climb_age);
         let Effort {
             rounds,
             candidates,
             age,
         } = self.effort.unwrap_or(Effort::of(kind));
         let effort = RoundEffort {
-            candidates: candidate_count * candidates,
-            age: hill_climb_age * age,
-            seeds: search.seeds.unwrap_or(default_seeds(kind)),
-            climb: search.climb,
+            candidates: search.candidates.unwrap_or(default.candidates) * candidates,
+            age: search.age.unwrap_or(BASE_AGE) * age,
+            seeds: search.seeds.unwrap_or(default.seeds),
         };
-        let (quadratic_width, quadratic_cap) = (self.quadratic_width, self.quadratic_cap);
+        let scratch = &self.scratch;
         #[cfg(test)]
         let pruning = self.pruning;
         let results: Vec<(State, u64)> = (0..rounds)
             .into_par_iter()
             .map_init(
-                || WorkerCtx::new(width, height, crate::rng::round_rng(seed, step, 0)),
+                || scratch.like(crate::rng::round_rng(seed, step, 0)),
                 |worker, index| {
                     worker.rng = crate::rng::round_rng(seed, step, index);
-                    worker.quadratic_width = quadratic_width;
-                    worker.quadratic_cap = quadratic_cap;
                     #[cfg(test)]
                     {
                         worker.pruning = pruning;
                     }
-                    let evaluations_before = worker.evaluations;
-                    let state = worker.search_round(&round, kind, alpha, effort);
-                    (state, worker.evaluations - evaluations_before)
+                    worker.counted(|worker| worker.search_round(&round, kind, alpha, effort))
                 },
             )
             .collect();
@@ -365,7 +341,6 @@ impl Model {
             1.0 <= min && min <= max,
             "quadratic width bounds must satisfy 1 <= min <= max"
         );
-        self.quadratic_width = (min, max);
         self.scratch.quadratic_width = (min, max);
     }
 
@@ -376,7 +351,6 @@ impl Model {
     #[cfg(feature = "lab")]
     #[doc(hidden)]
     pub fn set_quadratic_cap(&mut self, cap: LineCap) {
-        self.quadratic_cap = cap;
         self.scratch.quadratic_cap = cap;
     }
 
@@ -436,17 +410,10 @@ impl Model {
             .collect::<Option<Vec<_>>>()?;
 
         // The exact canvas decides, as in `refine_unless`.
-        let current =
-            crate::refine::render(width, height, self.background, &history, &mut self.scratch);
-        let score = score::difference_full_raw(&self.target, &current);
+        let (current, score) = self.repaint(&history);
         let kept = force || score < self.score;
         if kept {
-            self.history = history;
-            self.current = current;
-            self.score = score;
-            if let Some(coarse) = &mut self.coarse {
-                coarse.sync(&self.current);
-            }
+            self.commit(history, current, score);
         }
         Some(kept)
     }
@@ -517,21 +484,40 @@ impl Model {
         self.passes += 1;
 
         // The model only predicts; the exact canvas decides.
-        let (width, height) = (self.target.width(), self.target.height());
-        let current =
-            crate::refine::render(width, height, self.background, &history, &mut self.scratch);
-        let score = score::difference_full_raw(&self.target, &current);
+        let (current, score) = self.repaint(&history);
         #[cfg(test)]
         let score = if self.reject_passes { u64::MAX } else { score };
         if score < self.score {
-            self.history = history;
-            self.current = current;
-            self.score = score;
-            if let Some(coarse) = &mut self.coarse {
-                coarse.sync(&self.current);
-            }
+            self.commit(history, current, score);
         }
         Some(evaluations)
+    }
+
+    /// The exact canvas of `history`, painted from the background as the
+    /// model paints, and its score: how the model checks shapes it did not
+    /// paint itself.
+    fn repaint(&mut self, history: &[CommittedShape]) -> (Buffer, u64) {
+        let (width, height) = (self.target.width(), self.target.height());
+        let current =
+            crate::refine::render(width, height, self.background, history, &mut self.scratch);
+        let score = score::difference_full_raw(&self.target, &current);
+        (current, score)
+    }
+
+    /// Makes `history` the committed shapes, `current` their canvas and
+    /// `score` its score ([`Self::repaint`]).
+    fn commit(&mut self, history: Vec<CommittedShape>, current: Buffer, score: u64) {
+        self.history = history;
+        self.current = current;
+        self.score = score;
+        self.sync_coarse();
+    }
+
+    /// Brings the coarse canvas, if any, up to date with the canvas.
+    fn sync_coarse(&mut self) {
+        if let Some(coarse) = &mut self.coarse {
+            coarse.sync(&self.current);
+        }
     }
 
     /// Paints `shape` at `alpha`, which must be `1..=255`.
@@ -542,9 +528,7 @@ impl Model {
         let score = score::energy(&self.target, &self.current, lines, fit, self.score);
         score::draw_lines(&mut self.current, fit.color, lines);
         self.score = score;
-        if let Some(coarse) = &mut self.coarse {
-            coarse.sync(&self.current);
-        }
+        self.sync_coarse();
         self.history.push(CommittedShape {
             shape,
             color: fit.color,
@@ -610,10 +594,35 @@ mod tests {
     use crate::shapes::{Rectangle, Shape};
     use crate::test_util::fixed_alpha;
 
+    /// Every kind's round samples 1000 candidates and climbs one seed for
+    /// the base age; quadratics keep their budget near it with 900
+    /// candidates, and climb two seeds twice as long. A step runs 16 such
+    /// rounds, and the kind's multiple of the base age is the round's.
     #[test]
-    fn search_params_keeps_quadratic_budget_near_default() {
-        assert_eq!(Model::search_params(ShapeKind::Quadratic), (900, 100));
-        assert_eq!(Model::search_params(ShapeKind::Circle), (1000, 100));
+    fn each_kind_searches_its_default_round() {
+        let round = |candidates, age, seeds| RoundEffort {
+            candidates,
+            age,
+            seeds,
+        };
+        for kind in ShapeKind::all_kinds()
+            .iter()
+            .copied()
+            .chain([ShapeKind::Any])
+        {
+            let (expected, multiple) = if kind == ShapeKind::Quadratic {
+                (round(900, 200, 2), 2)
+            } else {
+                (round(1000, 100, 1), 1)
+            };
+            assert_eq!(RoundEffort::of(kind), expected, "{kind:?}");
+            let effort = Effort {
+                rounds: 16,
+                candidates: 1,
+                age: multiple,
+            };
+            assert_eq!(Effort::of(kind), effort, "{kind:?}");
+        }
     }
 
     #[test]
@@ -676,7 +685,9 @@ mod tests {
                 ..ModelOptions::default()
             },
         );
-        let (candidates, age) = Model::search_params(ShapeKind::Triangle);
+        let RoundEffort {
+            candidates, age, ..
+        } = RoundEffort::of(ShapeKind::Triangle);
         // Each round samples every candidate and then hill-climbs for at
         // least `age` evaluations.
         let minimum = Effort::of(ShapeKind::Triangle).rounds * (candidates + age) as u64;
@@ -818,17 +829,16 @@ mod tests {
         })
     }
 
-    /// The greedy search with the adapted climb from two seeds per round
-    /// gives the same drawing on any number of threads, and another one
-    /// than the default search.
+    /// The greedy search from two seeds per round gives the same drawing on
+    /// any number of threads, and another one than the default search from
+    /// one, with and without a coarse round.
     #[test]
-    fn an_adapted_search_from_two_seeds_is_independent_of_the_thread_count() {
+    fn a_search_from_two_seeds_is_independent_of_the_thread_count() {
         let search = Search {
-            climb: Climb::Adapted,
             seeds: Some(2),
             ..Search::default()
         };
-        for (kind, size) in [(ShapeKind::Any, COARSE), (ShapeKind::Quadratic, SMALL)] {
+        for (kind, size) in [(ShapeKind::Any, COARSE), (ShapeKind::Any, SMALL)] {
             let drawing = |threads| {
                 seeded_drawing_with(42, threads, 2, kind, size, |model| model.search = search)
             };
@@ -872,7 +882,6 @@ mod tests {
         let target = Buffer::new_from_color(8, 8, Color::new(255, 255, 255, 255));
         let mut model = Model::new(target, Color::new(0, 0, 0, 255), ModelOptions::default());
         let search = Search {
-            climb: Climb::Adapted,
             seeds: Some(1),
             candidates: Some(1),
             age: Some(1),
@@ -897,13 +906,12 @@ mod tests {
             },
         );
         model.search = Search {
-            climb: Climb::Adapted,
             seeds: Some(3),
             candidates: Some(50),
             age: Some(10),
         };
         let rounds = Effort::of(ShapeKind::Triangle).rounds;
-        let (default_candidates, _) = Model::search_params(ShapeKind::Triangle);
+        let default_candidates = RoundEffort::of(ShapeKind::Triangle).candidates;
 
         for step in 0..2 {
             let evaluations = model.step(ShapeKind::Triangle, fixed_alpha(128));
@@ -1010,10 +1018,10 @@ mod tests {
     /// not) again when axis-aligned rectangles got the same cap;
     /// `quadratic`, `rotated-ellipse` and `polygon` again when their steps
     /// got 32 search rounds, and quadratics and rotated ellipses twice the
-    /// climb age (`Effort::of`), the quality-first greedy effort. `any`,
-    /// which got 32 rounds too, kept its digests: on these targets no
-    /// round after the 16th found a better shape. `quadratic` and
-    /// `polygon` again when they went back to 16 rounds, quadratics
+    /// climb age (`Effort::of`, now `RoundEffort::of`), the quality-first
+    /// greedy effort. `any`, which got 32 rounds too, kept its digests: on
+    /// these targets no round after the 16th found a better shape.
+    /// `quadratic` and `polygon` again when they went back to 16 rounds, quadratics
     /// keeping twice the climb age; `polygon`'s digest is the one it had
     /// before the 32 rounds. `rotated-ellipse` again when it went back to
     /// 16 rounds and the climb age ×1; `any`, back to 16 rounds as well,
@@ -1448,7 +1456,6 @@ mod tests {
             ..ModelOptions::default()
         };
         let mut model = Model::new(target, Color::new(0, 0, 0, 255), options);
-        assert_eq!(model.quadratic_width, (2.0, 6.0));
         assert_eq!(model.scratch.quadratic_width, (2.0, 6.0));
         for _ in 0..8 {
             model.step(ShapeKind::Quadratic, Alpha::Auto);
@@ -1525,7 +1532,6 @@ mod tests {
         let worker = WorkerCtx::new(8, 8, crate::rng::create_rng(0));
         assert_eq!(worker.quadratic_cap, LineCap::Round);
         let model = stepped_model(5, (48, 36), ShapeKind::Quadratic, 4);
-        assert_eq!(model.quadratic_cap, LineCap::Round);
         assert_eq!(model.scratch.quadratic_cap, LineCap::Round);
         assert_eq!(quadratic_caps(&model.drawing()), [LineCap::Round; 4]);
     }

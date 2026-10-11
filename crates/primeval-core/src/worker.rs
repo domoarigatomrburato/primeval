@@ -9,7 +9,7 @@ use crate::alpha::Alpha;
 use crate::buffer::Buffer;
 use crate::drawing::LineCap;
 use crate::error_grid::ErrorGrid;
-use crate::optimize::{Climb, hill_climb};
+use crate::optimize::hill_climb;
 use crate::raster::{RowScratch, StrokeScratch};
 use crate::scanline::Scanline;
 use crate::score;
@@ -20,34 +20,46 @@ use rand::{Rng, RngExt};
 /// Fraction of samples drawn from the error-biased distribution.
 /// The remaining `1 - BIASED_SAMPLING_RATE` are drawn uniformly.
 const BIASED_SAMPLING_RATE: f64 = 0.8;
-/// The best random candidates of a quadratic search round that are each
-/// climbed, by default ([`default_seeds`]).
-const QUADRATIC_HILL_CLIMB_SEEDS: usize = 2;
 /// How many of the best candidates of a coarse random phase are rescored
 /// at full resolution, the best of which is hill-climbed. Rescoring only
 /// the best few lost quality at high step counts, where shapes are small
 /// and the half-resolution ranking is least reliable.
 const COARSE_RESCORED_SEEDS: usize = 128;
-
-/// How many of a search round's best random candidates are climbed by
-/// default: one, and [`QUADRATIC_HILL_CLIMB_SEEDS`] for quadratics.
-pub(crate) fn default_seeds(kind: ShapeKind) -> usize {
-    match kind {
-        ShapeKind::Quadratic => QUADRATIC_HILL_CLIMB_SEEDS,
-        _ => 1,
-    }
-}
+/// The base climb age of a search round, which a kind's multiple
+/// multiplies ([`RoundEffort::of`]).
+pub(crate) const BASE_AGE: usize = 100;
 
 /// What one search round ([`WorkerCtx::search_round`]) does: it samples
-/// `candidates` random candidates, climbs the best `seeds` of them in turn
-/// with the moves of `climb`, each until `age` moves in a row are not
-/// kept, and returns the best climb.
+/// `candidates` random candidates, climbs the best `seeds` of them in turn,
+/// each until `age` moves in a row are not kept, and returns the best
+/// climb.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RoundEffort {
     pub(crate) candidates: usize,
     pub(crate) age: usize,
     pub(crate) seeds: usize,
-    pub(crate) climb: Climb,
+}
+
+impl RoundEffort {
+    /// The default search round of `kind`, the one place a kind's greedy
+    /// search differs: 1000 random candidates, climbed from the best one
+    /// until [`BASE_AGE`] moves in a row are not kept. Quadratics sample
+    /// 900, which keeps their budget near the others', climb the best two
+    /// in turn, and climb twice as long.
+    pub(crate) const fn of(kind: ShapeKind) -> Self {
+        match kind {
+            ShapeKind::Quadratic => Self {
+                candidates: 900,
+                age: 2 * BASE_AGE,
+                seeds: 2,
+            },
+            _ => Self {
+                candidates: 1000,
+                age: BASE_AGE,
+                seeds: 1,
+            },
+        }
+    }
 }
 
 /// Per-thread scratch state for candidate evaluation.
@@ -126,6 +138,26 @@ impl<R: Rng> WorkerCtx<R> {
             #[cfg(test)]
             rejected: 0,
         }
+    }
+
+    /// A new worker of this one's size and quadratic stroke width bounds
+    /// and cap, on `rng`: how the search's and the refit pass's workers
+    /// take the model's settings from its scratch worker. Within a step or
+    /// a pass only their streams change, so a worker can be reused round
+    /// after round by resetting its `rng`; the rest is scratch space.
+    pub(crate) fn like<S: Rng>(&self, rng: S) -> WorkerCtx<S> {
+        let mut worker = WorkerCtx::new(self.width, self.height, rng);
+        worker.quadratic_width = self.quadratic_width;
+        worker.quadratic_cap = self.quadratic_cap;
+        worker
+    }
+
+    /// Runs `run` on this worker and returns its result with the number of
+    /// evaluations it made.
+    pub(crate) fn counted<T>(&mut self, run: impl FnOnce(&mut Self) -> T) -> (T, u64) {
+        let before = self.evaluations;
+        let result = run(self);
+        (result, self.evaluations - before)
     }
 }
 
@@ -448,7 +480,6 @@ impl<R: Rng> WorkerCtx<R> {
             candidates: n,
             age,
             seeds,
-            climb,
         } = effort;
         let seeds = if round.coarse.is_some() {
             self.best_rescored_states(round, kind, alpha, n, seeds)
@@ -464,7 +495,7 @@ impl<R: Rng> WorkerCtx<R> {
         let mut best_state: Option<State> = None;
         let mut best_energy = u64::MAX;
         for seed in seeds {
-            let mut state = hill_climb(&seed, self, round, age, climb);
+            let mut state = hill_climb(&seed, self, round, age);
             let energy = state.energy(self, round);
             if best_state.is_none() || energy < best_energy {
                 best_energy = energy;
@@ -506,6 +537,35 @@ mod tests {
         assert_eq!(w.height, 60);
         assert_eq!(w.evaluations, 0);
         assert!(w.lines.capacity() >= 4096);
+    }
+
+    /// A worker like another has its size and quadratic stroke, its own
+    /// stream and no evaluations.
+    #[test]
+    fn a_worker_like_another_takes_its_size_and_quadratic_stroke() {
+        let mut model = WorkerCtx::new(30, 20, ChaCha8Rng::seed_from_u64(1));
+        model.quadratic_width = (1.5, 4.0);
+        model.quadratic_cap = LineCap::Square;
+        model.evaluations = 9;
+        let worker = model.like(ChaCha8Rng::seed_from_u64(2));
+        assert_eq!((worker.width, worker.height), (30, 20));
+        assert_eq!(worker.rng, ChaCha8Rng::seed_from_u64(2));
+        assert_eq!(worker.quadratic_width, (1.5, 4.0));
+        assert_eq!(worker.quadratic_cap, LineCap::Square);
+        assert_eq!(worker.evaluations, 0);
+    }
+
+    /// `counted` returns its run's result and the evaluations the run
+    /// made, not the worker's running total.
+    #[test]
+    fn counted_returns_the_evaluations_of_its_run() {
+        let mut worker = WorkerCtx::new(8, 8, test_rng());
+        worker.evaluations = 5;
+        let (value, count) = worker.counted(|worker| {
+            worker.evaluations += 3;
+            "done"
+        });
+        assert_eq!((value, count, worker.evaluations), ("done", 3, 8));
     }
 
     #[test]
@@ -736,13 +796,12 @@ mod tests {
     }
 
     /// The settings of a search round of `kind` with `n` candidates and
-    /// climb age `age`, the kind's default seeds and coarse moves.
+    /// climb age `age`, and the kind's default seeds.
     fn effort(kind: ShapeKind, n: usize, age: usize) -> RoundEffort {
         RoundEffort {
             candidates: n,
             age,
-            seeds: default_seeds(kind),
-            climb: Climb::Coarse,
+            seeds: RoundEffort::of(kind).seeds,
         }
     }
 
@@ -754,8 +813,8 @@ mod tests {
     /// coarsely ranks by the coarse energy, and the best
     /// [`COARSE_RESCORED_SEEDS`] are rescored at full resolution in that
     /// order, the seeds being the lowest of them, ties in that order. Each
-    /// seed is climbed in turn with the moves of `effort.climb`, and the
-    /// lowest climb wins, ties going to the earlier seed.
+    /// seed is climbed in turn, and the lowest climb wins, ties going to the
+    /// earlier seed.
     fn reference_search_round(
         worker: &mut WorkerCtx<ChaCha8Rng>,
         round: &SearchRound<'_>,
@@ -768,30 +827,21 @@ mod tests {
             round: &SearchRound<'_>,
             state: &State,
             max_age: usize,
-            moves: Climb,
         ) -> State {
             let mut current = state.clone();
             let mut best_state = current.clone();
             let mut best_energy = current.energy(worker, round);
-            let mut scale = crate::refine::StepScale::START;
             let mut age = 0;
             while age < max_age {
-                let undo = match moves {
-                    Climb::Coarse => current.do_move(worker),
-                    Climb::Adapted => current.do_move_by(worker, scale.step()),
-                };
+                let undo = current.do_move(worker);
                 let energy = current.energy(worker, round);
-                let kept = energy < best_energy;
-                if kept {
+                if energy < best_energy {
                     best_energy = energy;
                     best_state = current.clone();
                     age = 0;
                 } else {
                     current.undo_move(undo);
                     age += 1;
-                }
-                if moves == Climb::Adapted {
-                    scale.update(kept);
                 }
             }
             best_state
@@ -811,7 +861,6 @@ mod tests {
             candidates: n,
             age,
             seeds,
-            climb: moves,
         } = effort;
         let seeds = match round.coarse {
             Some(_) => {
@@ -845,7 +894,7 @@ mod tests {
         };
         let (mut best_state, mut best_energy) = (None, u64::MAX);
         for seed in seeds {
-            let mut state = climb(worker, round, &seed, age, moves);
+            let mut state = climb(worker, round, &seed, age);
             let energy = state.energy(worker, round);
             if best_state.is_none() || energy < best_energy {
                 best_energy = energy;
@@ -858,7 +907,7 @@ mod tests {
     /// The early exit only skips work: every kind's search picks the same
     /// shape, alpha and energy, after the same number of evaluations, as
     /// the search without it, and candidates are rejected, with and without
-    /// a coarse random phase, with either climb and one to three seeds. A
+    /// a coarse random phase, with one to three seeds. A
     /// black canvas that already matches its black target gives every
     /// candidate the energy zero, so every comparison there is a tie.
     #[test]
@@ -886,15 +935,10 @@ mod tests {
                 std::iter::once(ShapeKind::Any).chain(ShapeKind::all_kinds().iter().copied());
             for kind in kinds {
                 let mut rejected = 0;
-                let efforts = [Climb::Coarse, Climb::Adapted]
-                    .into_iter()
-                    .flat_map(|climb| {
-                        [1, 2, 3].map(|seeds| RoundEffort {
-                            seeds,
-                            climb,
-                            ..effort(kind, 40, 30)
-                        })
-                    });
+                let efforts = [1, 2, 3].map(|seeds| RoundEffort {
+                    seeds,
+                    ..effort(kind, 40, 30)
+                });
                 for effort in efforts {
                     for seed in 0..4 {
                         let alpha = if seed % 2 == 0 {
@@ -927,7 +971,7 @@ mod tests {
     /// More seeds climb more and never end higher: the first seeds are the
     /// same and climb from the same random stream, so a round with `K + 1`
     /// seeds repeats the climbs of the round with `K` and keeps the lowest,
-    /// for either climb, with and without a coarse round.
+    /// with and without a coarse round.
     #[test]
     fn more_seeds_never_climb_to_a_higher_energy() {
         let (width, height) = (40, 32);
@@ -951,28 +995,22 @@ mod tests {
         let kinds = std::iter::once(ShapeKind::Any).chain(ShapeKind::all_kinds().iter().copied());
         for kind in kinds {
             for round in [&full, &with_coarse] {
-                for climb in [Climb::Coarse, Climb::Adapted] {
-                    let mut last: Option<(u64, u64)> = None;
-                    for seeds in 1..=3 {
-                        let effort = RoundEffort {
-                            seeds,
-                            climb,
-                            ..effort(kind, 40, 30)
-                        };
-                        let mut worker = WorkerCtx::new(
-                            width as i32,
-                            height as i32,
-                            ChaCha8Rng::seed_from_u64(5),
-                        );
-                        let state = worker.search_round(round, kind, Alpha::Auto, effort);
-                        let energy = state.cached_energy.expect("a cached energy");
-                        let case = format!("{kind:?} {climb:?} coarse {}", round.coarse.is_some());
-                        if let Some((lowest, evaluations)) = last {
-                            assert!(energy <= lowest, "{case}: {seeds} seeds");
-                            assert!(worker.evaluations > evaluations, "{case}: {seeds} seeds");
-                        }
-                        last = Some((energy, worker.evaluations));
+                let mut last: Option<(u64, u64)> = None;
+                for seeds in 1..=3 {
+                    let effort = RoundEffort {
+                        seeds,
+                        ..effort(kind, 40, 30)
+                    };
+                    let mut worker =
+                        WorkerCtx::new(width as i32, height as i32, ChaCha8Rng::seed_from_u64(5));
+                    let state = worker.search_round(round, kind, Alpha::Auto, effort);
+                    let energy = state.cached_energy.expect("a cached energy");
+                    let case = format!("{kind:?} coarse {}", round.coarse.is_some());
+                    if let Some((lowest, evaluations)) = last {
+                        assert!(energy <= lowest, "{case}: {seeds} seeds");
+                        assert!(worker.evaluations > evaluations, "{case}: {seeds} seeds");
                     }
+                    last = Some((energy, worker.evaluations));
                 }
             }
         }

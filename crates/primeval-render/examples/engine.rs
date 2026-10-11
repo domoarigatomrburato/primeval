@@ -71,15 +71,13 @@
 //!                       rounds and 1 time the age, 2 for quadratics)
 //!   --search KEY=VALUE[,KEY=VALUE...]  the greedy search's settings per
 //!                       round (`Model::set_search`), each key left out
-//!                       keeping the kind's default: `climb=coarse|adapted`
-//!                       the climb's moves (default coarse; adapted sizes
-//!                       them by the 1/5th success rule, as the refit's
-//!                       climb does), `seeds=K` the best random candidates
-//!                       climbed in turn (default 1, 2 for quadratics),
-//!                       `candidates=N` the random candidates (default
-//!                       1000, 900 for quadratics), `age=A` the base climb
-//!                       age, which the kind's and `--effort`'s multiples
-//!                       still multiply (default 100); all numbers positive
+//!                       keeping the kind's default: `seeds=K` the best
+//!                       random candidates climbed in turn (default 1, 2
+//!                       for quadratics), `candidates=N` the random
+//!                       candidates (default 1000, 900 for quadratics),
+//!                       `age=A` the base climb age, which the kind's and
+//!                       `--effort`'s multiples still multiply (default
+//!                       100); all numbers positive
 //!   --refine-effort R:A every refit pass's hill climbs per layer and the
 //!                       non-improving moves that stop a climb (default:
 //!                       the model's, 4 climbs of age 25)
@@ -147,9 +145,10 @@
 //! Terms used below:
 //!
 //! - the *working target* is the thumbnail the engine optimises, with the
-//!   default `resize_input` of 256 (`lab::working_target`; the runner reads
-//!   its pixels through `lab::working_image`, which shares its code path). Its longer side is 256 px for every input of the default
-//!   corpus; an input already smaller than that is used at its own size.
+//!   default `resize_input` of 256 (`lab::working_image`, which shares
+//!   `approximate`'s code path). Its longer side is 256 px for every input
+//!   of the default corpus; an input already smaller than that is used at
+//!   its own size.
 //! - *normalised RGB RMSE* between two images of the same size is
 //!   `sqrt(Σ Δ² / (w · h · 3)) / 255`, over the RGB channels of every
 //!   pixel, as in the `quality` runner. Lower is better.
@@ -236,7 +235,7 @@ mod common;
 
 use common::{ALL_SHAPES, BoxError, SEED, rgb_rmse};
 use image::{ImageFormat, RgbImage, imageops};
-use primeval_core::{Climb, Drawing, Geometry, LineCap, Model, ModelOptions, Search, joint};
+use primeval_core::{Buffer, Drawing, Geometry, LineCap, Model, ModelOptions, Search, joint};
 use primeval_render::lab::{Chosen, During, Guard, Pass, Pipeline, Refits};
 use primeval_render::{OutputFormat, RenderOptions, ShapeKind, lab};
 use std::path::{Path, PathBuf};
@@ -260,12 +259,10 @@ struct Config {
     during: Option<During>,
     final_refits: Option<Refits>,
     joint_scale: Option<u32>,
-    /// `--joint-warmup`, `--joint-step` and `--joint-step-rel`: the step
-    /// sizes of every joint optimisation, applied to the default tuning.
-    tuning: joint::Tuning,
-    /// `--joint-curved`: whether every joint optimisation moves the curved
-    /// shapes.
-    curved: bool,
+    /// `--joint-warmup`, `--joint-step`, `--joint-step-rel` and
+    /// `--joint-curved` applied to the default settings of every joint
+    /// optimisation: its step sizes and whether it moves the curved shapes.
+    joint_settings: joint::Settings,
     /// `--effort`: rounds, candidate and age multiples.
     effort: Option<(u64, usize, usize)>,
     /// `--search`: the keys given, `None` for the others.
@@ -306,8 +303,7 @@ impl Config {
         if let Some(scale) = self.joint_scale {
             pipeline.joint = (scale > 0).then_some(scale);
         }
-        pipeline.tuning = self.tuning;
-        pipeline.curved = self.curved;
+        pipeline.joint_settings = self.joint_settings;
         pipeline
     }
 }
@@ -360,37 +356,51 @@ fn parse_refits(value: &str) -> Result<Refits, BoxError> {
     Ok(Refits::Passes(value.parse().map_err(|_| invalid())?))
 }
 
+/// The error of a value of `flag` that is not `expected`.
+fn invalid(flag: &str, value: &str, expected: &str) -> BoxError {
+    format!("{flag}: expected {expected}, got {value}").into()
+}
+
+/// The `N` colon-separated fields of `value`, the value of `flag`, each
+/// parsed as a `T`, or [`invalid`] if there are not `N` or one does not
+/// parse.
+fn parse_fields<T: std::str::FromStr, const N: usize>(
+    flag: &str,
+    value: &str,
+    expected: &str,
+) -> Result<[T; N], BoxError> {
+    let fields: Vec<T> = value
+        .split(':')
+        .map(str::parse)
+        .collect::<Result<_, _>>()
+        .map_err(|_| invalid(flag, value, expected))?;
+    fields
+        .try_into()
+        .map_err(|_| invalid(flag, value, expected))
+}
+
 fn parse_effort(value: &str) -> Result<(u64, usize, usize), BoxError> {
-    let invalid = || format!("--effort: expected R:C:A, all positive, got {value}");
-    let parts: Vec<&str> = value.split(':').collect();
-    let [rounds, candidates, age] = parts.as_slice() else {
-        return Err(invalid().into());
-    };
-    let effort = (
-        rounds.parse().map_err(|_| invalid())?,
-        candidates.parse().map_err(|_| invalid())?,
-        age.parse().map_err(|_| invalid())?,
-    );
-    if effort.0 == 0 || effort.1 == 0 || effort.2 == 0 {
-        return Err(invalid().into());
+    let (flag, expected) = ("--effort", "R:C:A, all positive");
+    let fields: [usize; 3] = parse_fields(flag, value, expected)?;
+    if fields.contains(&0) {
+        return Err(invalid(flag, value, expected));
     }
-    Ok(effort)
+    let [rounds, candidates, age] = fields;
+    Ok((rounds as u64, candidates, age))
 }
 
 /// The keys of `--search`, each `None` when not given.
 #[derive(Clone, Copy, Debug, Default)]
 struct SearchArgs {
-    climb: Option<Climb>,
     seeds: Option<usize>,
     candidates: Option<usize>,
     age: Option<usize>,
 }
 
 impl SearchArgs {
-    /// The model's setting: the climb given or the default.
+    /// The model's setting.
     fn setting(self) -> Search {
         Search {
-            climb: self.climb.unwrap_or_default(),
             seeds: self.seeds,
             candidates: self.candidates,
             age: self.age,
@@ -400,13 +410,6 @@ impl SearchArgs {
     /// The keys given, as the header spells them.
     fn describe(self) -> String {
         let mut parts = Vec::new();
-        if let Some(climb) = self.climb {
-            let climb = match climb {
-                Climb::Coarse => "coarse",
-                Climb::Adapted => "adapted",
-            };
-            parts.push(format!("climb {climb}"));
-        }
         for (key, value) in [
             ("seeds", self.seeds),
             ("candidates", self.candidates),
@@ -423,8 +426,8 @@ impl SearchArgs {
 fn parse_search(value: &str) -> Result<SearchArgs, BoxError> {
     let invalid = || {
         format!(
-            "--search: expected KEY=VALUE[,KEY=VALUE...] with climb=coarse|adapted, \
-             seeds=K, candidates=N, age=A (positive), got {value}"
+            "--search: expected KEY=VALUE[,KEY=VALUE...] with seeds=K, candidates=N, \
+             age=A (positive), got {value}"
         )
     };
     let mut search = SearchArgs::default();
@@ -435,13 +438,6 @@ fn parse_search(value: &str) -> Result<SearchArgs, BoxError> {
             _ => Err(invalid()),
         };
         match key {
-            "climb" => {
-                search.climb = Some(match value {
-                    "coarse" => Climb::Coarse,
-                    "adapted" => Climb::Adapted,
-                    _ => return Err(invalid().into()),
-                });
-            }
             "seeds" => search.seeds = positive()?,
             "candidates" => search.candidates = positive()?,
             "age" => search.age = positive()?,
@@ -452,53 +448,28 @@ fn parse_search(value: &str) -> Result<SearchArgs, BoxError> {
 }
 
 fn parse_refine_effort(value: &str) -> Result<(u64, usize), BoxError> {
-    let invalid = || format!("--refine-effort: expected R:A, both positive, got {value}");
-    let parts: Vec<&str> = value.split(':').collect();
-    let [rounds, age] = parts.as_slice() else {
-        return Err(invalid().into());
-    };
-    let effort = (
-        rounds.parse().map_err(|_| invalid())?,
-        age.parse().map_err(|_| invalid())?,
-    );
-    if effort.0 == 0 || effort.1 == 0 {
-        return Err(invalid().into());
+    let (flag, expected) = ("--refine-effort", "R:A, both positive");
+    let fields: [usize; 2] = parse_fields(flag, value, expected)?;
+    if fields.contains(&0) {
+        return Err(invalid(flag, value, expected));
     }
-    Ok(effort)
+    let [rounds, age] = fields;
+    Ok((rounds as u64, age))
 }
 
 fn parse_quadratic_width(value: &str) -> Result<(f64, f64), BoxError> {
-    let invalid =
-        || format!("--quadratic-width: expected MIN:MAX with 1 <= MIN <= MAX, got {value}");
-    let parts: Vec<&str> = value.split(':').collect();
-    let [min, max] = parts.as_slice() else {
-        return Err(invalid().into());
-    };
-    let (min, max): (f64, f64) = (
-        min.parse().map_err(|_| invalid())?,
-        max.parse().map_err(|_| invalid())?,
-    );
+    let (flag, expected) = ("--quadratic-width", "MIN:MAX with 1 <= MIN <= MAX");
+    let [min, max]: [f64; 2] = parse_fields(flag, value, expected)?;
     if !(min >= 1.0 && min <= max && max.is_finite()) {
-        return Err(invalid().into());
+        return Err(invalid(flag, value, expected));
     }
     Ok((min, max))
 }
 
 fn parse_quadratic_cap(value: &str) -> Result<LineCap, BoxError> {
-    match value {
-        "butt" => Ok(LineCap::Butt),
-        "round" => Ok(LineCap::Round),
-        "square" => Ok(LineCap::Square),
-        _ => Err(format!("--quadratic-cap: expected butt, round or square, got {value}").into()),
-    }
-}
-
-fn describe_cap(cap: LineCap) -> &'static str {
-    match cap {
-        LineCap::Butt => "butt",
-        LineCap::Round => "round",
-        LineCap::Square => "square",
-    }
+    value
+        .parse()
+        .map_err(|_| invalid("--quadratic-cap", value, "butt, round or square"))
 }
 
 /// A positive, finite value of `flag`.
@@ -535,17 +506,18 @@ fn describe_pipeline(pipeline: Pipeline) -> String {
         .joint
         .map_or_else(|| "none".to_owned(), |scale| format!("x{scale}"));
     let default = joint::Tuning::default();
+    let settings = pipeline.joint_settings;
     let mut tuning = String::new();
-    if pipeline.tuning.warmup != default.warmup {
-        tuning += &format!(", warmup {}", pipeline.tuning.warmup);
+    if settings.tuning.warmup != default.warmup {
+        tuning += &format!(", warmup {}", settings.tuning.warmup);
     }
-    if pipeline.tuning.step != default.step {
-        tuning += &format!(", step {}", pipeline.tuning.step);
+    if settings.tuning.step != default.step {
+        tuning += &format!(", step {}", settings.tuning.step);
     }
-    if let Some(fraction) = pipeline.tuning.relative_step {
+    if let Some(fraction) = settings.tuning.relative_step {
         tuning += &format!(", step-rel {fraction}");
     }
-    if !pipeline.curved {
+    if !settings.curved {
         tuning += ", fixed curved";
     }
     format!("during {during}, final refits {refits}, joint {joint}{tuning}")
@@ -741,8 +713,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
     let mut quadratic_width = None;
     let mut quadratic_cap = None;
     let mut save = None;
-    let mut tuning = joint::Tuning::default();
-    let mut curved = true;
+    let mut joint_settings = joint::Settings::default();
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{arg} needs a value"));
         match arg.as_str() {
@@ -770,13 +741,13 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
             "--during" => during = Some(parse_during(&value()?)?),
             "--final-refits" => final_refits = Some(parse_refits(&value()?)?),
             "--joint-scale" => joint_scale = Some(value()?.parse()?),
-            "--joint-warmup" => tuning.warmup = value()?.parse()?,
-            "--joint-step" => tuning.step = parse_positive(&arg, &value()?)?,
+            "--joint-warmup" => joint_settings.tuning.warmup = value()?.parse()?,
+            "--joint-step" => joint_settings.tuning.step = parse_positive(&arg, &value()?)?,
             "--joint-step-rel" => {
-                tuning.relative_step = Some(parse_positive(&arg, &value()?)?);
+                joint_settings.tuning.relative_step = Some(parse_positive(&arg, &value()?)?);
             }
             "--joint-curved" => {
-                curved = match value()?.as_str() {
+                joint_settings.curved = match value()?.as_str() {
                     "on" => true,
                     "off" => false,
                     other => {
@@ -836,8 +807,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
         during,
         final_refits,
         joint_scale,
-        tuning,
-        curved,
+        joint_settings,
         effort,
         search,
         refine_effort,
@@ -886,8 +856,9 @@ fn search(
     render.shape = shape;
     render.seed = Some(SEED);
 
-    let (target, background) = lab::working_target(input, &render)?;
-    let working = lab::working_image(input, &render)?;
+    let (working, background) = lab::working_image(input, &render)?;
+    let target = Buffer::from_rgb(working.width(), working.height(), working.as_raw().clone())
+        .ok_or("the working image has an invalid pixel length")?;
     let working_size = working.width().max(working.height());
     let mut options = ModelOptions::default();
     options.seed = render.seed;
@@ -1134,7 +1105,7 @@ fn print_header(config: &Config) {
         println!("- quadratic width: {min} to {max} px");
     }
     if let Some(cap) = config.quadratic_cap {
-        println!("- quadratic cap: {}", describe_cap(cap));
+        println!("- quadratic cap: {}", cap.as_str());
     }
     println!();
 }

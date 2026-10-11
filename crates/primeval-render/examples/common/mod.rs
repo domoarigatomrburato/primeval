@@ -1,4 +1,5 @@
-//! The corpus and run header shared by the `quality` and `engine` runners.
+//! The corpus and run header shared by the `quality` and `engine` runners,
+//! whose header helpers `versus_go` uses too.
 //!
 //! Cargo does not build `examples/common/` as an example of its own; each
 //! runner includes it with `mod common;`.
@@ -89,7 +90,8 @@ pub(crate) fn print_commit_and_machine() {
     );
 }
 
-fn git(args: &[&str]) -> Option<String> {
+/// The trimmed output of `git args` in this crate, if it succeeds.
+pub(crate) fn git(args: &[&str]) -> Option<String> {
     let output = Command::new("git")
         .args(args)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
@@ -101,7 +103,8 @@ fn git(args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-fn cpu_model() -> Option<String> {
+/// The CPU's model name, if the platform reports one.
+pub(crate) fn cpu_model() -> Option<String> {
     if cfg!(target_os = "macos") {
         let output = Command::new("sysctl")
             .args(["-n", "machdep.cpu.brand_string"])

@@ -46,6 +46,4 @@ pub use error::ParseError;
 #[cfg(feature = "lab")]
 pub use model::Search;
 pub use model::{Model, ModelOptions};
-#[cfg(feature = "lab")]
-pub use optimize::Climb;
 pub use shapes::ShapeKind;

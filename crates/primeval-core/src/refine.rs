@@ -330,7 +330,8 @@ impl Layer<'_> {
     /// The model's energy of the shape drawn along `lines` at `alpha` in
     /// `rgb`, minus the energy with the layer removed:
     /// `Σ_covered (q − g · s)² − r²`.
-    pub(crate) fn delta(&self, lines: &[Scanline], alpha: u8, rgb: [u8; 3]) -> f64 {
+    #[cfg(test)]
+    fn delta(&self, lines: &[Scanline], alpha: u8, rgb: [u8; 3]) -> f64 {
         self.sums(lines, alpha).delta(rgb)
     }
 
@@ -342,17 +343,7 @@ impl Layer<'_> {
         alpha: u8,
         fallback: [u8; 3],
     ) -> (f64, Color) {
-        let sums = self.sums(lines, alpha);
-        match sums.fit() {
-            Some(rgb) => {
-                let color = Color::new(rgb[0], rgb[1], rgb[2], alpha);
-                (sums.delta(rgb), color)
-            }
-            None => {
-                let [r, g, b] = fallback;
-                (0.0, Color::new(r, g, b, alpha))
-            }
-        }
+        self.sums(lines, alpha).evaluate(alpha, fallback)
     }
 }
 
@@ -378,6 +369,20 @@ impl Sums {
             self.numerators
                 .map(|numerator| (numerator / self.weights).round().clamp(0.0, 255.0) as u8)
         })
+    }
+
+    /// [`Layer::evaluate`] from these sums of a shape drawn at `alpha`.
+    fn evaluate(&self, alpha: u8, fallback: [u8; 3]) -> (f64, Color) {
+        match self.fit() {
+            Some(rgb) => {
+                let color = Color::new(rgb[0], rgb[1], rgb[2], alpha);
+                (self.delta(rgb), color)
+            }
+            None => {
+                let [r, g, b] = fallback;
+                (0.0, Color::new(r, g, b, alpha))
+            }
+        }
     }
 
     /// `Σ (q − g · s)² − r²` for the colour `rgb`.
@@ -596,7 +601,7 @@ fn pass_with<R: Rng>(
     let checkpoints = Checkpoints::render(&canvas, layers, replay.interval, scratch);
     let mut below = vec![canvas; replay.run];
     let mut above = Above::new(width, height);
-    let mut workers = climbers(width as i32, height as i32, streams.effort);
+    let mut workers = climbers(scratch, streams.effort);
     let mut refitted = layers.to_vec();
     let mut changed = false;
     let mut evaluations = 0;
@@ -613,81 +618,80 @@ fn pass_with<R: Rng>(
                 above: &above,
             };
             let committed = &layers[index];
+            let lines = committed.shape.rasterize(scratch);
             let (refit, count) = refine_layer(
                 &layer,
                 committed,
+                lines,
                 index,
                 alpha,
                 streams,
-                scratch,
                 &mut workers,
             );
             evaluations += count;
-            if let Some(refit) = refit {
-                refitted[index] = refit;
-                changed = true;
+            // The climbs run on their own workers, so an unchanged layer
+            // folds in from the lines it was rasterized into for its bar.
+            match refit {
+                Some(refit) => {
+                    above.fold(refit.shape.rasterize(scratch), refit.color);
+                    refitted[index] = refit;
+                    changed = true;
+                }
+                None => above.fold(lines, committed.color),
             }
-            let decided = &refitted[index];
-            above.fold(decided.shape.rasterize(scratch), decided.color);
         }
     }
 
     Some((changed.then_some(refitted), evaluations))
 }
 
-/// The workers of a pass's climbs, one per climb of `effort`, which every
-/// layer of the pass reuses: each climb resets its worker's random stream
-/// and evaluation settings, and the rest of a worker is scratch space.
-fn climbers(width: i32, height: i32, effort: RefineEffort) -> Vec<WorkerCtx<ChaCha8Rng>> {
+/// The workers of a pass's climbs, one per climb of `effort`, like
+/// `scratch` ([`WorkerCtx::like`]), which every layer of the pass reuses:
+/// each climb resets its worker's random stream, and the rest of a worker
+/// is scratch space.
+fn climbers<R: Rng>(scratch: &WorkerCtx<R>, effort: RefineEffort) -> Vec<WorkerCtx<ChaCha8Rng>> {
     (0..effort.rounds)
-        .map(|_| WorkerCtx::new(width, height, refine_rng(0, 0, 0, 0)))
+        .map(|_| scratch.like(refine_rng(0, 0, 0, 0)))
         .collect()
 }
 
-/// Refits layer `index`, `committed`, under `layer`: the replacement if one
-/// is strictly below the committed shape in its current colour, and the
-/// number of evaluations. Climb `round` runs on `workers[round]`
-/// ([`climbers`]).
-fn refine_layer<R: Rng>(
+/// Refits layer `index`, `committed`, whose shape rasterizes to `lines`,
+/// under `layer`: the replacement if one is strictly below the committed
+/// shape in its current colour, and the number of evaluations. Climb
+/// `round` runs on `workers[round]` ([`climbers`]).
+fn refine_layer(
     layer: &Layer<'_>,
     committed: &CommittedShape,
+    lines: &[Scanline],
     index: usize,
     alpha: Alpha,
     streams: Streams,
-    scratch: &mut WorkerCtx<R>,
     workers: &mut [WorkerCtx<ChaCha8Rng>],
 ) -> (Option<CommittedShape>, u64) {
     let color = committed.color;
     let rgb = [color.r, color.g, color.b];
-    let lines = committed.shape.rasterize(scratch);
-    let bar = layer.delta(lines, color.a, rgb);
-    let start = layer.evaluate(lines, color.a, rgb);
+    // One sum over the committed shape's pixels gives both the bar, in its
+    // current colour, and the climbs' start, in its fitted colour.
+    let sums = layer.sums(lines, color.a);
+    let bar = sums.delta(rgb);
+    let start = sums.evaluate(color.a, rgb);
     let state = State::committed(committed.shape.clone(), alpha, color.a);
 
-    let (quadratic_width, quadratic_cap) = (scratch.quadratic_width, scratch.quadratic_cap);
     let (seed, pass, index) = (streams.seed, streams.pass, index as u64);
     let RefineEffort { rounds, age } = streams.effort;
     debug_assert_eq!(workers.len() as u64, rounds, "one worker per climb");
-    let results: Vec<(State, f64, Color, u64)> = workers
+    let results: Vec<((State, f64, Color), u64)> = workers
         .par_iter_mut()
         .enumerate()
         .map(|(round, worker)| {
             worker.rng = refine_rng(seed, pass, index, round as u64);
-            worker.quadratic_width = quadratic_width;
-            worker.quadratic_cap = quadratic_cap;
-            let evaluations_before = worker.evaluations;
-            let (state, energy, color) =
+            worker.counted(|worker| {
                 climb(state.clone(), start, worker, age, |state, worker| {
                     worker.evaluations += 1;
                     let lines = state.shape.rasterize(worker);
                     layer.evaluate(lines, state.alpha, rgb)
-                });
-            (
-                state,
-                energy,
-                color,
-                worker.evaluations - evaluations_before,
-            )
+                })
+            })
         })
         .collect();
 
@@ -696,7 +700,7 @@ fn refine_layer<R: Rng>(
     let mut best: Option<(State, f64, Color)> = None;
     // `collect` keeps round order, and only a strictly lower energy
     // replaces the best, so ties go to the lowest round.
-    for (state, energy, color, count) in results {
+    for ((state, energy, color), count) in results {
         evaluations += count;
         if best.as_ref().is_none_or(|(_, best, _)| energy < *best) {
             best = Some((state, energy, color));
@@ -1114,14 +1118,15 @@ mod tests {
                         effort,
                     };
                     let committed = &layers[index];
-                    let mut workers = climbers(width as i32, height as i32, effort);
+                    let mut workers = climbers(&worker, effort);
+                    let lines = committed.shape.rasterize(&mut worker);
                     refine_layer(
                         &layer,
                         committed,
+                        lines,
                         index,
                         Alpha::Auto,
                         streams,
-                        &mut worker,
                         &mut workers,
                     )
                 };
@@ -1198,15 +1203,16 @@ mod tests {
                 above: &above,
             };
             // Fresh workers for every layer's climbs.
-            let mut workers = climbers(width as i32, height as i32, streams.effort);
+            let mut workers = climbers(worker, streams.effort);
             let committed = &layers[index];
+            let lines = committed.shape.rasterize(worker);
             let (refit, count) = refine_layer(
                 &layer,
                 committed,
+                lines,
                 index,
                 alpha,
                 streams,
-                worker,
                 &mut workers,
             );
             evaluations += count;

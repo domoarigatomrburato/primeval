@@ -10,6 +10,8 @@ use crate::{ApproximateError, ApproximateResult, OutputFormat, RenderOptions, Sh
 use image::RgbImage;
 use primeval_core::{Alpha, Buffer, Color, Drawing, Model, joint};
 
+pub use crate::pipeline::{Chosen, During, Guard, Pass, Pipeline, Refits};
+
 /// The working-resolution target and the resolved background for `input`:
 /// option validation, decoding, background resolution, flattening and the
 /// thumbnail, exactly as [`crate::approximate`] runs them before it creates
@@ -26,226 +28,40 @@ pub fn working_target(
     crate::working_target(input, render, || Ok(()))
 }
 
-/// The pixels of the target [`working_target`] returns, as an image, from
-/// the same steps: [`primeval_core::Buffer`] does not expose its pixels.
+/// The target [`working_target`] returns, as an image, and the resolved
+/// background, from the same steps: [`primeval_core::Buffer`] does not
+/// expose its pixels, and [`primeval_core::Buffer::from_rgb`] of the
+/// image's dimensions and pixels is that target.
 ///
 /// # Errors
 ///
 /// The errors of [`working_target`].
-pub fn working_image(input: &[u8], render: &RenderOptions) -> Result<RgbImage, ApproximateError> {
-    crate::working_image(input, render, || Ok(())).map(|(image, _)| image)
-}
-
-/// The stages around the greedy steps of a search: what
-/// [`crate::approximate`] runs for a shape kind ([`pipeline`]), or a
-/// variant to measure. The same as the crate's own pipeline type, which is
-/// not public.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Pipeline {
-    /// Refit passes of the model during the search.
-    pub during: During,
-    /// Refit passes of the model after the last step.
-    pub refits: Refits,
-    /// After the refit passes, the joint optimisation with this multiple of
-    /// its default iteration count ([`joint::default_iterations`]), or
-    /// `None` for none.
-    pub joint: Option<u32>,
-    /// The step sizes of every joint optimisation, in the search and in
-    /// the final stage.
-    pub tuning: joint::Tuning,
-    /// Whether every joint optimisation, in the search and in the final
-    /// stage, moves the ellipses, circles and rotated ellipses too
-    /// ([`joint::Settings::curved`]); `true` in [`pipeline`].
-    pub curved: bool,
-}
-
-/// When the search runs a refit pass of the model itself, after a step.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum During {
-    /// Never.
-    Never,
-    /// After every step whose number (from 1) is a multiple of this, which
-    /// is positive.
-    Every(u32),
-    /// After step `interval`, then each `max(interval, s / divisor)` steps
-    /// after the previous pass, at step `s`. Both are positive.
-    Spaced {
-        /// The smallest number of steps between two passes.
-        interval: u32,
-        /// The divisor of the step number.
-        divisor: u32,
-    },
-    /// On [`During::Spaced`]'s schedule, the joint optimisation of the
-    /// model in place of the refit pass, its result adopted into the model
-    /// ([`Model::adopt`]) if `guard` keeps it. All three numbers are
-    /// positive.
-    Joint {
-        /// The smallest number of steps between two passes.
-        interval: u32,
-        /// The divisor of the step number.
-        divisor: u32,
-        /// The Adam iterations of every pass.
-        iterations: u32,
-        /// What decides whether a pass's result is kept.
-        guard: Guard,
-    },
-}
-
-/// What keeps the result of a joint pass in the search ([`During::Joint`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Guard {
-    /// The model's exact canvas, repainted with the adopted shapes, scores
-    /// strictly lower.
-    Canvas,
-    /// The joint result's PNG export at the working size is strictly closer
-    /// to the target than the model's drawing's, the final stage's rule.
-    Export,
-}
-
-/// What [`after_step`] ran.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Pass {
-    /// No pass was due.
-    Skipped,
-    /// A refit pass.
-    Refit,
-    /// A joint pass ([`During::Joint`]), and whether its result was kept.
-    Joint {
-        /// Whether the model adopted the joint result.
-        kept: bool,
-    },
-}
-
-impl Pass {
-    /// Whether a pass ran.
-    #[must_use]
-    pub fn ran(self) -> bool {
-        self != Self::Skipped
-    }
-}
-
-/// Which drawing [`final_stage`] returned.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Chosen {
-    /// The refitted model's: the pipeline has no joint optimisation.
-    Refitted,
-    /// The joint optimisation's result, which exports closer to the target
-    /// than its input.
-    Joint,
-    /// The refitted model's, the joint optimisation's input: its result
-    /// exports no closer to the target, and the guard kept the input.
-    Input,
-}
-
-/// The refit passes of the final stage.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Refits {
-    /// This many passes.
-    Passes(u32),
-    /// Passes until one lowers the model's score by less than `min_gain`
-    /// ten-thousandths of its score before the pass, at most `cap`.
-    Until {
-        /// In ten-thousandths: 50 is 0.5%.
-        min_gain: u32,
-        /// The most passes.
-        cap: u32,
-    },
-}
-
-impl From<crate::pipeline::Pipeline> for Pipeline {
-    fn from(pipeline: crate::pipeline::Pipeline) -> Self {
-        use crate::pipeline::{During as D, Refits as R};
-        Self {
-            during: match pipeline.during {
-                D::Never => During::Never,
-                D::Every(every) => During::Every(every),
-                D::Spaced { interval, divisor } => During::Spaced { interval, divisor },
-                D::Joint {
-                    interval,
-                    divisor,
-                    iterations,
-                    guard,
-                } => During::Joint {
-                    interval,
-                    divisor,
-                    iterations,
-                    guard: match guard {
-                        crate::pipeline::Guard::Canvas => Guard::Canvas,
-                        crate::pipeline::Guard::Export => Guard::Export,
-                    },
-                },
-            },
-            refits: match pipeline.refits {
-                R::Passes(passes) => Refits::Passes(passes),
-                R::Until { min_gain, cap } => Refits::Until { min_gain, cap },
-            },
-            joint: pipeline.joint,
-            tuning: pipeline.tuning,
-            curved: pipeline.curved,
-        }
-    }
-}
-
-impl From<Pipeline> for crate::pipeline::Pipeline {
-    fn from(pipeline: Pipeline) -> Self {
-        use crate::pipeline::{During as D, Refits as R};
-        Self {
-            during: match pipeline.during {
-                During::Never => D::Never,
-                During::Every(every) => D::Every(every),
-                During::Spaced { interval, divisor } => D::Spaced { interval, divisor },
-                During::Joint {
-                    interval,
-                    divisor,
-                    iterations,
-                    guard,
-                } => D::Joint {
-                    interval,
-                    divisor,
-                    iterations,
-                    guard: match guard {
-                        Guard::Canvas => crate::pipeline::Guard::Canvas,
-                        Guard::Export => crate::pipeline::Guard::Export,
-                    },
-                },
-            },
-            refits: match pipeline.refits {
-                Refits::Passes(passes) => R::Passes(passes),
-                Refits::Until { min_gain, cap } => R::Until { min_gain, cap },
-            },
-            joint: pipeline.joint,
-            tuning: pipeline.tuning,
-            curved: pipeline.curved,
-        }
-    }
+pub fn working_image(
+    input: &[u8],
+    render: &RenderOptions,
+) -> Result<(RgbImage, Color), ApproximateError> {
+    crate::working_image(input, render, || Ok(()))
 }
 
 /// [`crate::approximate`]'s pipeline for `shape`.
 #[must_use]
 pub fn pipeline(shape: ShapeKind) -> Pipeline {
-    crate::pipeline::pipeline(shape).into()
+    crate::pipeline::pipeline(shape)
 }
 
 /// Runs the pass `pipeline` schedules after step `step` (from 1) of
 /// `model`, if any, exactly as [`crate::approximate`] runs it, and returns
 /// what ran.
 pub fn after_step(model: &mut Model, pipeline: Pipeline, step: u32, alpha: Alpha) -> Pass {
-    let pipeline = crate::pipeline::Pipeline::from(pipeline);
-    let pass = crate::pipeline::after_step(
+    crate::pipeline::after_step(
         model,
         pipeline.during,
-        pipeline.tuning,
-        pipeline.curved,
+        pipeline.joint_settings,
         step,
         alpha,
         || false,
     )
-    .expect("a pass that is never cancelled finishes");
-    match pass {
-        crate::pipeline::Pass::Skipped => Pass::Skipped,
-        crate::pipeline::Pass::Refit => Pass::Refit,
-        crate::pipeline::Pass::Joint { kept } => Pass::Joint { kept },
-    }
+    .expect("a pass that is never cancelled finishes")
 }
 
 /// Runs the final stage of `pipeline` on `model`, a search after its last
@@ -265,13 +81,8 @@ pub fn final_stage(
     iterations: Option<u32>,
 ) -> (Drawing, f64, Chosen) {
     let (drawing, chosen) =
-        crate::pipeline::final_stage(model, pipeline.into(), render.alpha, iterations, || false)
+        crate::pipeline::final_stage(model, pipeline, render.alpha, iterations, || false)
             .expect("a stage that is never cancelled finishes");
-    let chosen = match chosen {
-        crate::pipeline::Chosen::Refitted => Chosen::Refitted,
-        crate::pipeline::Chosen::Joint => Chosen::Joint,
-        crate::pipeline::Chosen::Input => Chosen::Input,
-    };
     let score = if pipeline.joint.is_some() {
         joint::score(model, &drawing)
     } else {

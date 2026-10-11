@@ -150,14 +150,11 @@ fn write_shape(svg: &mut String, geometry: &Geometry, color: Color, root_cap: Li
 
 /// ` stroke-linecap="…"` for `cap`, or nothing when the element inherits
 /// it: when it is `inherited`.
-fn linecap(cap: LineCap, inherited: LineCap) -> &'static str {
+fn linecap(cap: LineCap, inherited: LineCap) -> String {
     if cap == inherited {
-        return "";
-    }
-    match cap {
-        LineCap::Butt => " stroke-linecap=\"butt\"",
-        LineCap::Round => " stroke-linecap=\"round\"",
-        LineCap::Square => " stroke-linecap=\"square\"",
+        String::new()
+    } else {
+        format!(" stroke-linecap=\"{}\"", cap.as_str())
     }
 }
 

@@ -60,6 +60,13 @@
 //!
 //! Go's files go to a temporary directory that is removed afterwards.
 
+#[allow(
+    dead_code,
+    reason = "versus_go uses only the seed, the kinds and the header helpers"
+)]
+mod common;
+
+use common::{ALL_SHAPES, BoxError, SEED, cpu_model, git};
 use image::{ImageFormat, RgbImage, imageops};
 use primeval_render::{
     Alpha, ApproximateRequest, ApproximateResult, Execution, OutputFormat, RenderOptions,
@@ -70,26 +77,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-/// The seed of every primeval render.
-const SEED: u64 = 42;
 /// The fixed alpha of both tools: Go's default.
 const ALPHA: u8 = 128;
 /// The working size of both tools.
 const RESIZE_INPUT: u32 = 256;
 /// The output size of both tools.
 const OUTPUT_SIZE: u32 = 1024;
-/// The shape kinds compared by default.
-const ALL_SHAPES: [ShapeKind; 9] = [
-    ShapeKind::Any,
-    ShapeKind::Triangle,
-    ShapeKind::Rectangle,
-    ShapeKind::Ellipse,
-    ShapeKind::Circle,
-    ShapeKind::RotatedRectangle,
-    ShapeKind::Quadratic,
-    ShapeKind::RotatedEllipse,
-    ShapeKind::Polygon,
-];
 /// The default corpus: the two paintings in `docs/readme/originals/`, in
 /// file-name order. A fixed list, so adding a gallery image does not change
 /// the benchmark.
@@ -97,8 +90,6 @@ const DEFAULT_IMAGES: [&str; 2] = ["americangothic.jpg", "monalisa.jpg"];
 /// How to install the Go tool, for the error when it is missing.
 const INSTALL_HINT: &str = "install it with `go install github.com/fogleman/primitive@latest` \
                             or pass --primitive PATH";
-
-type BoxError = Box<dyn std::error::Error>;
 
 /// The parsed command line.
 struct Config {
@@ -590,32 +581,4 @@ fn primitive_version(primitive: &Path) -> Option<String> {
         (fields.next() == Some("mod")).then(|| fields.take(2).collect::<Vec<_>>().join(" "))
     })?;
     Some(format!("{module}, built with {go}"))
-}
-
-fn git(args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-}
-
-fn cpu_model() -> Option<String> {
-    if cfg!(target_os = "macos") {
-        let output = Command::new("sysctl")
-            .args(["-n", "machdep.cpu.brand_string"])
-            .output()
-            .ok()?;
-        let model = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        return (!model.is_empty()).then_some(model);
-    }
-    let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").ok()?;
-    cpuinfo
-        .lines()
-        .find_map(|line| line.strip_prefix("model name")?.split_once(':'))
-        .map(|(_, model)| model.trim().to_owned())
 }

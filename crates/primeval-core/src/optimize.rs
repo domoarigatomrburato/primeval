@@ -3,25 +3,6 @@ use crate::state::State;
 use crate::worker::{SearchRound, WorkerCtx};
 use rand::Rng;
 
-/// The moves of the greedy search's climb (`hill_climb`).
-///
-/// The default is [`Climb::Coarse`]; only the lab hook `Model::set_search`
-/// chooses [`Climb::Adapted`], to measure it with the engine runner. Public
-/// only in the lab build, which exports it for that hook.
-#[cfg_attr(not(feature = "lab"), allow(unreachable_pub, dead_code))]
-#[doc(hidden)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Climb {
-    /// Coarse moves (`Step::Coarse`): normal offsets with
-    /// `σ` of 16 px and 32°, the alpha by up to 10 either way.
-    #[default]
-    Coarse,
-    /// Moves whose size adapts by the 1/5th success rule, as in the refit's
-    /// climb (`climb`, `StepScale`): they start at the coarse scale and
-    /// shrink to one- and two-pixel moves while moves are rejected.
-    Adapted,
-}
-
 /// The greedy search's climb from `state`: a move is kept only if its
 /// energy on `round` is strictly lower than the best so far, and the climb
 /// stops after `max_age` consecutive moves that are not. Each move is
@@ -33,55 +14,39 @@ pub(crate) fn hill_climb<R: Rng>(
     worker: &mut WorkerCtx<R>,
     round: &SearchRound<'_>,
     max_age: usize,
-    climb: Climb,
 ) -> State {
     let mut start = state.clone();
     let energy = start.energy(worker, round);
-    bounded_climb(
-        &start,
-        energy,
-        worker,
-        max_age,
-        climb,
-        |state, worker, bound| state.energy_below(worker, round, bound),
-    )
+    bounded_climb(&start, energy, worker, max_age, |state, worker, bound| {
+        state.energy_below(worker, round, bound)
+    })
 }
 
 /// [`hill_climb`] from `start`, whose energy is `start_energy`, with the
-/// moves of `climb` and the evaluation `below`, which returns a moved
-/// state's energy if it is below the bound it gets, `None` otherwise.
+/// evaluation `below`, which returns a moved state's energy if it is below
+/// the bound it gets, `None` otherwise.
 fn bounded_climb<R: Rng>(
     start: &State,
     start_energy: u64,
     worker: &mut WorkerCtx<R>,
     max_age: usize,
-    climb: Climb,
     mut below: impl FnMut(&mut State, &mut WorkerCtx<R>, u64) -> Option<u64>,
 ) -> State {
     let mut current = start.clone();
     let mut best_state = current.clone();
     let mut best_energy = start_energy;
-    let mut scale = StepScale::START;
     let mut age = 0;
 
     while age < max_age {
-        let undo = match climb {
-            Climb::Coarse => current.do_move(worker),
-            Climb::Adapted => current.do_move_by(worker, scale.step()),
-        };
+        let undo = current.do_move(worker);
         // Only a strictly lower energy is a move forward.
-        let kept = if let Some(energy) = below(&mut current, worker, best_energy) {
+        if let Some(energy) = below(&mut current, worker, best_energy) {
             best_energy = energy;
             best_state = current.clone();
             age = 0;
-            true
         } else {
             current.undo_move(undo);
             age += 1;
-            false
-        };
-        if climb == Climb::Adapted {
-            scale.update(kept);
         }
     }
 
@@ -146,99 +111,46 @@ mod tests {
 
     #[test]
     fn hill_climb_with_zero_age_returns_equivalent_state() {
-        for climb in [Climb::Coarse, Climb::Adapted] {
-            let (mut worker, round) = round(16, 16);
-            let state = State::new(Shape::Circle(Circle { x: 5, y: 5, r: 3 }), fixed_alpha(128));
+        let (mut worker, round) = round(16, 16);
+        let state = State::new(Shape::Circle(Circle { x: 5, y: 5, r: 3 }), fixed_alpha(128));
 
-            let result = hill_climb(&state, &mut worker, &round, 0, climb);
+        let result = hill_climb(&state, &mut worker, &round, 0);
 
-            assert_eq!(result.shape, state.shape, "{climb:?}");
-            assert_eq!(result.alpha, state.alpha, "{climb:?}");
-        }
+        assert_eq!(result.shape, state.shape);
+        assert_eq!(result.alpha, state.alpha);
     }
 
-    /// The largest change of a move of a circle from `(128, 128, 40)`.
-    fn circle_move(state: &State) -> i32 {
-        let Shape::Circle(circle) = state.shape else {
-            panic!("expected a circle");
-        };
-        let distance = (circle.x - 128).abs().max((circle.y - 128).abs());
-        distance.max((circle.r - 40).abs())
-    }
-
-    /// The moves of a greedy climb of `climb` that rejects all of its 200
-    /// moves.
-    fn rejected_moves(climb: Climb) -> Vec<i32> {
-        let (mut worker, _round) = round(256, 256);
-        let start = State::new(
-            Shape::Circle(Circle {
-                x: 128,
-                y: 128,
-                r: 40,
-            }),
-            fixed_alpha(128),
-        );
-        let mut moves = Vec::new();
-        let _ = bounded_climb(&start, 0, &mut worker, 200, climb, |state, _, _| {
-            moves.push(circle_move(state));
-            None
-        });
-        moves
-    }
-
-    /// The greedy search's adapted climb shrinks its moves while every move
-    /// is rejected, as the refit's climb does, and never makes a move that
-    /// goes nowhere; the coarse climb keeps its coarse moves.
-    #[test]
-    fn adapted_hill_climb_moves_shrink_while_rejected() {
-        let moves = rejected_moves(Climb::Adapted);
-        assert_eq!(moves.len(), 200);
-        assert!(moves[..8].iter().any(|&size| size > 8), "{:?}", &moves[..8]);
-        assert!(moves.iter().all(|&size| size > 0), "a move went nowhere");
-        assert!(
-            moves[16..].iter().all(|&size| size <= 6),
-            "{:?}",
-            &moves[16..]
-        );
-
-        let moves = rejected_moves(Climb::Coarse);
-        assert_eq!(moves.len(), 200);
-        assert!(moves[16..].iter().any(|&size| size > 6), "{moves:?}");
-    }
-
-    /// Either climb keeps only a strictly lower energy, which restarts its
+    /// The climb keeps only a strictly lower energy, which restarts its
     /// age, offers every move the best energy so far as its bound, and
     /// stops after `max_age` moves in a row are not kept.
     #[test]
     fn hill_climb_keeps_the_last_strictly_lower_state_and_restarts_its_age() {
-        for climb in [Climb::Coarse, Climb::Adapted] {
-            let (mut worker, _round) = round(16, 16);
-            let start = State::new(Shape::Circle(Circle { x: 5, y: 5, r: 3 }), Alpha::Auto);
-            let mut calls = 0;
-            let mut bounds = Vec::new();
-            let mut improved = None;
+        let (mut worker, _round) = round(16, 16);
+        let start = State::new(Shape::Circle(Circle { x: 5, y: 5, r: 3 }), Alpha::Auto);
+        let mut calls = 0;
+        let mut bounds = Vec::new();
+        let mut improved = None;
 
-            // Moves 3 and 7 improve, move 5 ties; after move 7 the climb
-            // runs `max_age` more moves.
-            let best = bounded_climb(&start, 10, &mut worker, 5, climb, |state, _, bound| {
-                calls += 1;
-                bounds.push(bound);
-                let energy = match calls {
-                    3 => 5,
-                    5 => 5,
-                    7 => {
-                        improved = Some(state.clone());
-                        4
-                    }
-                    _ => 10,
-                };
-                (energy < bound).then_some(energy)
-            });
+        // Moves 3 and 7 improve, move 5 ties; after move 7 the climb runs
+        // `max_age` more moves.
+        let best = bounded_climb(&start, 10, &mut worker, 5, |state, _, bound| {
+            calls += 1;
+            bounds.push(bound);
+            let energy = match calls {
+                3 => 5,
+                5 => 5,
+                7 => {
+                    improved = Some(state.clone());
+                    4
+                }
+                _ => 10,
+            };
+            (energy < bound).then_some(energy)
+        });
 
-            assert_eq!(calls, 12, "{climb:?}");
-            assert_eq!(bounds, [10, 10, 10, 5, 5, 5, 5, 4, 4, 4, 4, 4], "{climb:?}");
-            assert_eq!(Some(best), improved, "{climb:?}");
-        }
+        assert_eq!(calls, 12);
+        assert_eq!(bounds, [10, 10, 10, 5, 5, 5, 5, 4, 4, 4, 4, 4]);
+        assert_eq!(Some(best), improved);
     }
 
     #[test]

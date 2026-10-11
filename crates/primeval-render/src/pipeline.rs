@@ -2,38 +2,42 @@
 //! kind: refit or joint passes during the search, and the final stage.
 //!
 //! `lab` drives the same functions, so the engine runner cannot drift from
-//! [`crate::approximate`]. Every rule depends only on the request and on
+//! [`crate::approximate`], and re-exports the types, which are public only
+//! in the lab build. Every rule depends only on the request and on
 //! deterministic scores, never on elapsed time or on the number of threads.
 
 use crate::{ShapeKind, raster};
 use primeval_core::{Alpha, Buffer, Drawing, Model, joint};
 
-/// The stages around the greedy steps of one shape kind.
+/// The stages around the greedy steps of one shape kind: what
+/// [`crate::approximate`] runs (`pipeline`), or a variant the lab
+/// measures.
+#[cfg_attr(not(feature = "lab"), allow(unreachable_pub))]
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Pipeline {
+pub struct Pipeline {
     /// The passes of the model during the search: refit passes, or joint
     /// passes.
-    pub(crate) during: During,
+    pub during: During,
     /// Refit passes of the model after the last step.
-    pub(crate) refits: Refits,
+    pub refits: Refits,
     /// After the refit passes, the joint optimisation
     /// ([`joint::optimise`]) with this multiple of its default iteration
     /// count ([`joint::default_iterations`]), or `None` for none.
-    pub(crate) joint: Option<u32>,
-    /// The step sizes of every joint optimisation, in the search and in the
-    /// final stage ([`joint::Settings::tuning`]).
-    pub(crate) tuning: joint::Tuning,
-    /// Whether every joint optimisation, in the search and in the final
-    /// stage, moves the ellipses, circles and rotated ellipses too
-    /// ([`joint::Settings::curved`]); `true` in every kind's pipeline.
-    pub(crate) curved: bool,
+    pub joint: Option<u32>,
+    /// The settings of every joint optimisation, in the search and in the
+    /// final stage, whose iterations each sets: the step sizes
+    /// ([`joint::Settings::tuning`]) and whether the ellipses, circles and
+    /// rotated ellipses move too ([`joint::Settings::curved`]). The
+    /// default in every kind's pipeline.
+    pub joint_settings: joint::Settings,
 }
 
 /// When the search runs a pass over the model itself after a step, and
 /// which: a refit pass ([`Model::refine`]), or a joint pass. Later steps
 /// build on the revised shapes.
+#[cfg_attr(not(feature = "lab"), allow(unreachable_pub))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum During {
+pub enum During {
     /// Never.
     #[cfg(any(test, feature = "lab"))]
     Never,
@@ -69,15 +73,16 @@ pub(crate) enum During {
 }
 
 /// What keeps the result of a joint pass in the search ([`During::Joint`]).
+#[cfg_attr(not(feature = "lab"), allow(unreachable_pub))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Guard {
+pub enum Guard {
     /// The model's exact canvas, repainted with the adopted shapes, scores
     /// strictly lower ([`Model::adopt`] without `force`), as a refit pass
     /// is checked; otherwise the model is left as it was.
     Canvas,
     /// Lab only: the model's own PNG export at the working size, after
     /// adopting the joint result, is strictly closer to the target than
-    /// before ([`exports_closer`]): it also sees the rounding of the
+    /// before (`exports_closer`): it also sees the rounding of the
     /// rectangles that adopting converts. Costs a clone of the model and
     /// two exports per pass, on top of the repaint.
     #[cfg(any(test, feature = "lab"))]
@@ -110,9 +115,10 @@ fn spaced_due(interval: u32, divisor: u32, step: u32) -> bool {
     next == step
 }
 
-/// What [`after_step`] ran.
+/// What `after_step` ran.
+#[cfg_attr(not(feature = "lab"), allow(unreachable_pub))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Pass {
+pub enum Pass {
     /// No pass was due.
     Skipped,
     /// A refit pass.
@@ -124,9 +130,19 @@ pub(crate) enum Pass {
     },
 }
 
+impl Pass {
+    /// Whether a pass ran.
+    #[cfg(any(test, feature = "lab"))]
+    #[must_use]
+    pub fn ran(self) -> bool {
+        self != Self::Skipped
+    }
+}
+
 /// The refit passes of the final stage.
+#[cfg_attr(not(feature = "lab"), allow(unreachable_pub))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Refits {
+pub enum Refits {
     /// This many passes.
     Passes(u32),
     /// Passes until one lowers the model's score ([`Model::score_f64`]) by
@@ -274,20 +290,18 @@ pub(crate) fn pipeline(shape: ShapeKind) -> Pipeline {
         during,
         refits,
         joint,
-        tuning: joint::Tuning::default(),
-        curved: true,
+        joint_settings: joint::Settings::default(),
     }
 }
 
 /// Runs the pass that `during` schedules after step `step` (from 1), if
-/// any, a joint pass with the step sizes of `tuning` and the curved shapes
-/// moving with `curved`, and returns what ran. Returns `None` once
-/// `cancelled` returns true, with the model as it was before the pass.
+/// any, a joint pass with `settings` and its own iterations, and returns
+/// what ran. Returns `None` once `cancelled` returns true, with the model
+/// as it was before the pass.
 pub(crate) fn after_step(
     model: &mut Model,
     during: During,
-    tuning: joint::Tuning,
-    curved: bool,
+    settings: joint::Settings,
     step: u32,
     alpha: Alpha,
     mut cancelled: impl FnMut() -> bool,
@@ -299,17 +313,15 @@ pub(crate) fn after_step(
         iterations, guard, ..
     } = during
     {
-        let kept = joint_pass(model, iterations, tuning, curved, guard, alpha, cancelled)?;
+        let kept = joint_pass(model, iterations, settings, guard, alpha, cancelled)?;
         return Some(Pass::Joint { kept });
     }
     model.refine_unless(alpha, &mut cancelled)?;
     Some(Pass::Refit)
 }
 
-/// A joint pass of `iterations` iterations with the step sizes of `tuning`,
-/// and the curved shapes moving with `curved`, on `model`, its result
-/// adopted
-/// if `guard` keeps it; returns whether it was kept. With
+/// A joint pass of `iterations` iterations with `settings` on `model`, its
+/// result adopted if `guard` keeps it; returns whether it was kept. With
 /// [`Guard::Canvas`] the model's exact canvas decides ([`Model::adopt`]
 /// without `force`); with the lab's `Guard::Export` the result is adopted
 /// by force into the model, whose own export after adopting must then be
@@ -322,16 +334,12 @@ pub(crate) fn after_step(
 fn joint_pass(
     model: &mut Model,
     iterations: u32,
-    tuning: joint::Tuning,
-    curved: bool,
+    mut settings: joint::Settings,
     guard: Guard,
     alpha: Alpha,
     mut cancelled: impl FnMut() -> bool,
 ) -> Option<bool> {
-    let mut settings = joint::Settings::default();
     settings.iterations = Some(iterations);
-    settings.tuning = tuning;
-    settings.curved = curved;
     let optimised = joint::optimise(model, alpha, settings, &mut cancelled)?;
     if cancelled() {
         return None;
@@ -353,16 +361,17 @@ fn joint_pass(
     Some(kept)
 }
 
-/// Which drawing [`final_stage`] returned.
+/// Which drawing `final_stage` returned.
+#[cfg_attr(not(feature = "lab"), allow(unreachable_pub))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Chosen {
+pub enum Chosen {
     /// The refitted model's: the pipeline has no joint optimisation.
     Refitted,
     /// The joint optimisation's result, which exports closer to the target
     /// than its input.
     Joint,
     /// The refitted model's, the joint optimisation's input: its result
-    /// exports no closer to the target ([`better_export`]).
+    /// exports no closer to the target (`better_export`).
     Input,
 }
 
@@ -399,12 +408,10 @@ pub(crate) fn final_stage(
     let Some(scale) = pipeline.joint else {
         return Some((model.drawing(), Chosen::Refitted));
     };
-    let mut settings = joint::Settings::default();
+    let mut settings = pipeline.joint_settings;
     settings.iterations = Some(iterations.unwrap_or_else(|| {
         joint::default_iterations(model.drawing().shapes.len()).saturating_mul(scale)
     }));
-    settings.tuning = pipeline.tuning;
-    settings.curved = pipeline.curved;
     let optimised = joint::optimise(model, alpha, settings, cancelled)?;
     Some(better_export(model.target(), model.drawing(), optimised))
 }
@@ -519,8 +526,7 @@ mod tests {
             after_step(
                 &mut model,
                 During::Every(5),
-                joint::Tuning::default(),
-                false,
+                curves_fixed(),
                 step,
                 Alpha::Auto,
                 || false,
@@ -567,9 +573,22 @@ mod tests {
             during: During::Never,
             refits,
             joint,
-            tuning: joint::Tuning::default(),
-            curved: true,
+            joint_settings: joint::Settings::default(),
         }
+    }
+
+    /// The default joint settings with `tuning` and the curved shapes kept
+    /// fixed.
+    fn curves_fixed_with(tuning: joint::Tuning) -> joint::Settings {
+        let mut settings = joint::Settings::default();
+        settings.tuning = tuning;
+        settings.curved = false;
+        settings
+    }
+
+    /// The default joint settings with the curved shapes kept fixed.
+    fn curves_fixed() -> joint::Settings {
+        curves_fixed_with(joint::Tuning::default())
     }
 
     fn due_steps(during: During, last: u32) -> Vec<u32> {
@@ -648,8 +667,7 @@ mod tests {
                     after_step(
                         &mut model,
                         During::Every(3),
-                        joint::Tuning::default(),
-                        false,
+                        curves_fixed(),
                         3,
                         Alpha::Auto,
                         || false,
@@ -692,7 +710,7 @@ mod tests {
             "the joint optimisation no longer worsens this case"
         );
         let mut pipeline = stages(Refits::Passes(0), Some(1));
-        pipeline.tuning = tuning;
+        pipeline.joint_settings.tuning = tuning;
         let kept = final_stage(&mut model.clone(), pipeline, Alpha::Auto, None, || false);
         assert_eq!(kept, Some((input, Chosen::Input)));
     }
@@ -839,8 +857,7 @@ mod tests {
         let finished = after_step(
             &mut refitted,
             during,
-            joint::Tuning::default(),
-            false,
+            curves_fixed(),
             10,
             Alpha::Auto,
             || {
@@ -858,18 +875,10 @@ mod tests {
         for cancel_at in [1, polls / 2, polls] {
             let mut model = greedy.clone();
             let mut count = 0;
-            let stopped = after_step(
-                &mut model,
-                during,
-                joint::Tuning::default(),
-                false,
-                10,
-                Alpha::Auto,
-                || {
-                    count += 1;
-                    count >= cancel_at
-                },
-            );
+            let stopped = after_step(&mut model, during, curves_fixed(), 10, Alpha::Auto, || {
+                count += 1;
+                count >= cancel_at
+            });
             assert_eq!(stopped, None, "cancelled at poll {cancel_at}");
             assert_eq!(model.drawing(), greedy.drawing());
         }
@@ -878,8 +887,7 @@ mod tests {
             after_step(
                 &mut model,
                 during,
-                joint::Tuning::default(),
-                false,
+                curves_fixed(),
                 9,
                 Alpha::Auto,
                 || panic!("polled")
@@ -1027,8 +1035,7 @@ mod tests {
                 after_step(
                     &mut model,
                     during,
-                    joint::Tuning::default(),
-                    false,
+                    curves_fixed(),
                     step,
                     Alpha::Auto,
                     || false,
@@ -1054,8 +1061,7 @@ mod tests {
                 let pass = after_step(
                     &mut model,
                     during,
-                    joint::Tuning::default(),
-                    false,
+                    curves_fixed(),
                     step,
                     Alpha::Auto,
                     || false,
@@ -1104,8 +1110,7 @@ mod tests {
                 let pass = after_step(
                     &mut model,
                     during,
-                    joint::Tuning::default(),
-                    false,
+                    curves_fixed(),
                     step,
                     Alpha::Auto,
                     || false,
@@ -1147,8 +1152,7 @@ mod tests {
             let finished = after_step(
                 &mut adopted,
                 during,
-                joint::Tuning::default(),
-                false,
+                curves_fixed(),
                 10,
                 Alpha::Auto,
                 || {
@@ -1163,18 +1167,11 @@ mod tests {
             for cancel_at in 1..=polls {
                 let mut model = greedy.clone();
                 let mut count = 0;
-                let stopped = after_step(
-                    &mut model,
-                    during,
-                    joint::Tuning::default(),
-                    false,
-                    10,
-                    Alpha::Auto,
-                    || {
+                let stopped =
+                    after_step(&mut model, during, curves_fixed(), 10, Alpha::Auto, || {
                         count += 1;
                         count >= cancel_at
-                    },
-                );
+                    });
                 assert_eq!(stopped, None, "{guard:?}: cancelled at poll {cancel_at}");
                 assert_eq!(model.drawing(), greedy.drawing(), "{guard:?}");
                 assert_eq!(model.score_f64(), greedy.score_f64(), "{guard:?}");
@@ -1212,8 +1209,7 @@ mod tests {
                             after_step(
                                 &mut model,
                                 during,
-                                joint::Tuning::default(),
-                                false,
+                                curves_fixed(),
                                 step,
                                 Alpha::Auto,
                                 || false,
@@ -1280,7 +1276,7 @@ mod tests {
     fn the_pipeline_carries_its_tuning_to_both_joint_stages() {
         for shape in KINDS {
             assert_eq!(
-                pipeline(shape).tuning,
+                pipeline(shape).joint_settings.tuning,
                 joint::Tuning::default(),
                 "{shape:?}"
             );
@@ -1294,7 +1290,7 @@ mod tests {
         assert_ne!(tuned, joint_result(&hard, 1));
         let expected = better_export(hard.target(), hard.drawing(), tuned.clone());
         let mut tuned_stages = stages(Refits::Passes(0), Some(1));
-        tuned_stages.tuning = tuning;
+        tuned_stages.joint_settings.tuning = tuning;
         let kept = final_stage(&mut hard.clone(), tuned_stages, Alpha::Auto, None, || false);
         assert_eq!(kept, Some(expected));
 
@@ -1308,19 +1304,20 @@ mod tests {
             joint::optimise(&expected, Alpha::Auto, settings, || false).expect("not cancelled");
         let adopted = expected.adopt(&optimised, false) == Some(true);
         let mut passed = model.clone();
-        let pass = after_step(&mut passed, during, tuning, false, 5, Alpha::Auto, || false);
-        assert_eq!(pass, Some(Pass::Joint { kept: adopted }));
-        assert_eq!(passed.drawing(), expected.drawing());
-        let mut untuned = model.clone();
-        after_step(
-            &mut untuned,
+        let pass = after_step(
+            &mut passed,
             during,
-            joint::Tuning::default(),
-            false,
+            curves_fixed_with(tuning),
             5,
             Alpha::Auto,
             || false,
-        )
+        );
+        assert_eq!(pass, Some(Pass::Joint { kept: adopted }));
+        assert_eq!(passed.drawing(), expected.drawing());
+        let mut untuned = model.clone();
+        after_step(&mut untuned, during, curves_fixed(), 5, Alpha::Auto, || {
+            false
+        })
         .expect("not cancelled");
         assert!(adopted, "the tuned pass is not kept, so it shows nothing");
         assert_ne!(passed.drawing(), untuned.drawing());
@@ -1332,7 +1329,7 @@ mod tests {
     #[test]
     fn the_pipeline_carries_its_curved_switch_to_both_joint_stages() {
         for shape in KINDS {
-            assert!(pipeline(shape).curved, "{shape:?}");
+            assert!(pipeline(shape).joint_settings.curved, "{shape:?}");
         }
         let curved = |iterations| {
             let mut settings = joint::Settings::default();
@@ -1351,7 +1348,7 @@ mod tests {
         for (switch, optimised) in [(true, moved), (false, fixed)] {
             let expected = better_export(hard.target(), hard.drawing(), optimised);
             let mut switched_stages = stages(Refits::Passes(0), Some(1));
-            switched_stages.curved = switch;
+            switched_stages.joint_settings.curved = switch;
             let kept = final_stage(
                 &mut hard.clone(),
                 switched_stages,
@@ -1372,27 +1369,20 @@ mod tests {
         let pass = after_step(
             &mut passed,
             during,
-            joint::Tuning::default(),
-            true,
+            joint::Settings::default(),
             5,
             Alpha::Auto,
             || false,
         );
         assert_eq!(pass, Some(Pass::Joint { kept: adopted }));
         assert_eq!(passed.drawing(), expected.drawing());
-        let mut fixed = model.clone();
-        let fixed_pass = after_step(
-            &mut fixed,
-            during,
-            joint::Tuning::default(),
-            false,
-            5,
-            Alpha::Auto,
-            || false,
-        );
+        let mut unmoved = model.clone();
+        let fixed_pass = after_step(&mut unmoved, during, curves_fixed(), 5, Alpha::Auto, || {
+            false
+        });
         assert_ne!(
             (pass, passed.drawing()),
-            (fixed_pass, fixed.drawing()),
+            (fixed_pass, unmoved.drawing()),
             "the switch changed nothing"
         );
     }

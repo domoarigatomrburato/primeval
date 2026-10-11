@@ -526,8 +526,7 @@ pub fn approximate(
         pipeline::after_step(
             &mut model,
             pipeline.during,
-            pipeline.tuning,
-            pipeline.curved,
+            pipeline.joint_settings,
             step + 1,
             render.alpha,
             || execution.is_cancelled(),

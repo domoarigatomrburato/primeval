@@ -8,7 +8,8 @@
 //! Coordinates are continuous canvas coordinates at working resolution: pixel
 //! `(i, j)` is the unit square `[i, i + 1) × [j, j + 1)`.
 
-use crate::Color;
+use crate::{Color, ParseError};
+use std::str::FromStr;
 
 /// A point in continuous canvas coordinates.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -95,6 +96,38 @@ pub enum LineCap {
     Square,
 }
 
+/// Every [`LineCap`] with its name, in declaration order, so
+/// `CAP_NAMES[cap as usize]` is `cap`'s row: [`LineCap::as_str`] and
+/// [`FromStr`] both read it.
+const CAP_NAMES: [(LineCap, &str); 3] = [
+    (LineCap::Butt, "butt"),
+    (LineCap::Round, "round"),
+    (LineCap::Square, "square"),
+];
+
+impl LineCap {
+    /// The name, SVG's `stroke-linecap` value: `"butt"`, `"round"` or
+    /// `"square"`. [`FromStr`] parses it back.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        CAP_NAMES[self as usize].1
+    }
+}
+
+impl FromStr for LineCap {
+    type Err = ParseError;
+
+    /// Parses a name (see [`LineCap::as_str`]); anything else is an error
+    /// whose message lists the names.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        CAP_NAMES
+            .iter()
+            .find(|(_, name)| *name == value)
+            .map(|&(cap, _)| cap)
+            .ok_or_else(|| ParseError::new("cap must be one of: butt, round, square"))
+    }
+}
+
 /// One committed shape: its geometry and its colour. `color.a` is the opacity.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DrawnShape {
@@ -115,4 +148,22 @@ pub struct Drawing {
     pub background: Color,
     /// Shapes in paint order.
     pub shapes: Vec<DrawnShape>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every cap's name is SVG's `stroke-linecap` value and parses back;
+    /// anything else is refused with the accepted names.
+    #[test]
+    fn line_cap_names_are_svgs_and_parse_back() {
+        let caps = [LineCap::Butt, LineCap::Round, LineCap::Square];
+        assert_eq!(caps.map(LineCap::as_str), ["butt", "round", "square"]);
+        for cap in caps {
+            assert_eq!(cap.as_str().parse(), Ok(cap));
+        }
+        let refused = "bevel".parse::<LineCap>().expect_err("not a cap");
+        assert_eq!(refused.message(), "cap must be one of: butt, round, square");
+    }
 }
