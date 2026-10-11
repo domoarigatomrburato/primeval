@@ -897,7 +897,7 @@ Search times are from an idle machine. Greedy score falls roughly as `shapes^-0.
   Also still open: experiment 6 (memory guard at `resizeInput` 1024 / 2048), the manual demo check below, and the review of the merged change.
 
 **After the merge** (the branch was squash-merged as `16877bb` on 2026-10-07 before these were done; status as of 2026-10-08):
-- a full review of the merged change (user request), with the `/simplify` and `/code-review` skills: **open**;
+- a full review of the merged change (user request), with the `/simplify` and `/code-review` skills: **done 2026-10-11** (review, section 19): four cleanup and five correctness reviewers, fixes in three commits (`dd7a7bb`, `df2f9ef`, `0695772`) with the output unchanged and one (`152311a`) that changes it: the joint gradient at axis-aligned kinks, the quadratic stroke's joins and caps, and a portable Gaussian sampler; every digest re-pinned on both targets;
 - regenerate the gallery, the README comparison images and the versus-Go numbers (`CONTRIBUTING.md`): **done** at `646252c`, after the retune;
 - check by hand in the demo that "Refining" stays visible during a long single-threaded pass, and that Stop during it keeps the preview: **open**.
 
