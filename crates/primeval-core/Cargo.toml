@@ -31,8 +31,9 @@ tiny-skia = { version = "0.12", default-features = false, features = ["std", "si
 # Compiles the in-crate Divan benchmarks (`src/benches.rs`) so they can reach
 # crate-private items. Never enabled by dependents; see CONTRIBUTING.md.
 bench = ["dep:divan"]
-# Exposes lab-only hooks (`Model::set_search_effort` and
-# `Model::set_refine_effort`) for the engine evaluation runner of
+# Exposes lab-only hooks (`Model::set_search_effort`, `Model::set_refine_effort`,
+# `Model::set_search`, `Model::set_quadratic_width`, `Model::set_quadratic_cap`)
+# and the `Search` re-export for the engine evaluation runner of
 # `primeval-render`. Never enabled by dependents.
 lab = []
 

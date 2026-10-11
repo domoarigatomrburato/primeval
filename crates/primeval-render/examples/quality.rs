@@ -28,11 +28,13 @@
 //! Columns:
 //!
 //! - `search_s`: wall time from the start of the call to the last step's
-//!   progress report (decode, thumbnail and search).
+//!   progress report (decode, thumbnail, greedy steps and earlier in-search
+//!   passes). It excludes the last step's in-search pass and the final stage.
 //! - `total_s`: wall time of the whole call, including the PNG render and
-//!   encode at the output size.
-//! - `score`: the engine's final score, the normalised RMSE between the
-//!   canvas and the target at working resolution, over the RGB channels:
+//!   encode at the output size, the last in-search pass and the final stage.
+//! - `score`: the score at the last greedy step's progress report, before
+//!   that step's in-search pass and the final stage: the normalised RMSE
+//!   between the canvas and the target at working resolution, over the RGB channels:
 //!   `sqrt(Σ Δ² / (w · h · 3)) / 255`, the same definition as `png_rmse`.
 //!   Tables from before the engine became RGB-only measured four RGBA
 //!   channels, which gives this value times `sqrt(3 / 4)`.
@@ -210,6 +212,8 @@ fn run(input: &[u8], shape: ShapeKind, steps: u32) -> Result<Run, BoxError> {
         Execution::new().progress(&mut on_progress),
     )?;
     let total = start.elapsed();
+    // These columns stop at the last progress report; only `total`
+    // includes the last in-search pass, final stage and encoding.
     let (search, score) = last.ok_or("the render reported no steps")?;
     let ApproximateResult::Png { data, .. } = result else {
         return Err("requested PNG output".into());

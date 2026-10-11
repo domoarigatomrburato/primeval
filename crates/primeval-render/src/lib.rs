@@ -275,7 +275,7 @@ pub struct ProgressInfo {
     /// The number of steps the render runs, [`RenderOptions::count`].
     pub total: u32,
     /// The difference between the canvas and the working-resolution target
-    /// after this step and the refit passes before it: the RMSE over the
+    /// after this step and the in-search passes before it: the RMSE over the
     /// RGB channels divided by 255, from `0.0` (identical) to `1.0`.
     /// The final stage can lower it further, so the result can score lower
     /// than the last step.
@@ -290,7 +290,11 @@ pub struct ProgressInfo {
     /// pass, which re-optimises one shape at a time, can move, resize and
     /// recolour any shape so far, and after the last step a final stage
     /// can revise every shape, so the result's shape lines can differ from
-    /// the preview. For triangles, polygons, rectangles, rotated
+    /// the preview. For triangles the in-search pass instead jointly
+    /// optimises every shape at once, kept only when the working canvas
+    /// gets closer to the target; previously reported coordinates can
+    /// become multiples of a quarter of a working pixel before the final
+    /// stage. For triangles, polygons, rectangles, rotated
     /// rectangles, ellipses and circles the final stage is a joint gradient
     /// optimisation of every shape at once, whose coordinates are multiples
     /// of a quarter of a working pixel, and of half a pixel for rectangles,
@@ -316,9 +320,9 @@ pub struct ProgressInfo {
 /// A cheap-to-clone handle that cancels a running [`approximate`] call.
 ///
 /// Clones share the same flag. The render checks it before and after
-/// decoding, before every step, during the final stage (between the layers
-/// of a refit pass, or before every iteration of the joint optimisation and
-/// before its snap), and before encoding.
+/// decoding, before every step, between the layers of every refit pass,
+/// inside in-search and final joint passes (before every iteration and
+/// before the snap), and before encoding.
 #[derive(Clone, Debug, Default)]
 pub struct CancellationToken(Arc<AtomicBool>);
 
@@ -459,8 +463,12 @@ impl ApproximateResult {
 /// callback. After some of the steps it runs a refit pass that
 /// re-optimises every shape so far at its own layer, with the others
 /// fixed, and keeps the result only if it lowers the score, so later steps
-/// build on the revised shapes; the passes are spaced so that their cost
-/// grows linearly with the count. A final stage then revises every shape
+/// build on the revised shapes. For triangles those in-search passes
+/// instead jointly optimise every shape at once, kept only when the working
+/// canvas gets closer to the target; previously reported coordinates can
+/// become multiples of a quarter of a working pixel before the final stage.
+/// The passes are spaced so that their cost grows linearly with the count.
+/// A final stage then revises every shape
 /// and reports no progress. For [`ShapeKind::Triangle`],
 /// [`ShapeKind::Polygon`], [`ShapeKind::Rectangle`],
 /// [`ShapeKind::RotatedRectangle`], [`ShapeKind::Ellipse`] and

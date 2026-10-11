@@ -27,7 +27,9 @@
 //!   --iterations K      with `--refine final` or `joint:R`: the joint
 //!                       optimisation's iteration count (default:
 //!                       `approximate`'s, which grows with the shape
-//!                       count: 80 up to 50 shapes, 160 from 500)
+//!                       count: 80 up to 50 shapes, 160 from 500); replaces
+//!                       the kind's scaled default, ignored if it has no
+//!                       joint stage
 //!   --during SCHEDULE   refit passes of the search itself, combined with
 //!                       any `--refine` but `every:K`: `none`, `every:K`
 //!                       one pass after every K-th step, `spaced:K:C`
@@ -99,18 +101,24 @@
 //!                       creating DIR if needed (default: none)
 //! ```
 //!
+//! The joint tuning flags (`--joint-warmup`, `--joint-step`, `--joint-step-rel`
+//! and `--joint-curved`) require `--refine final`, `joint:R`, or a joint
+//! `--during` schedule.
+//!
 //! For every image × shape kind it runs one greedy search to the largest
 //! checkpoint, with seed 42 and default options otherwise. It drives
 //! [`primeval_core::Model`] itself through `primeval_render::lab`, which
 //! reproduces `approximate`'s search and encoding exactly. `approximate`
 //! runs the pipeline of its kind (`lab::pipeline`): refit passes during the
-//! search, then its final stage: for triangles, polygons, rectangles and
-//! rotated rectangles the joint gradient optimisation of every shape
+//! search (joint passes for triangles), then its final stage: for triangles,
+//! polygons, rectangles, rotated rectangles, ellipses and circles the joint
+//! gradient optimisation of every shape, with no refit pass
 //! (`primeval_core::joint`), for `any` one refit pass then the joint
 //! optimisation, whose result is kept only if its PNG at the working size
 //! is closer to the target than its input, for quadratics refit passes
-//! until one gains less than 1%, at most four, for every other kind one
-//! refit pass. The rows of
+//! until one gains less than 1%, at most four, for rotated ellipses one
+//! refit pass. The joint optimisation moves curved shapes by default;
+//! quadratics keep their geometry. The rows of
 //! `--refine final` are what it returns for that step count; rows without
 //! `--refine` are the greedy search alone. At each checkpoint it records
 //! one row.
@@ -118,7 +126,7 @@
 //! With `--refine end:P`, each checkpoint clones the model, runs `P` refit
 //! passes on the clone and records the clone, while the search itself goes
 //! on greedily: each row is "greedy to n steps, then P passes". With
-//! `--refine final`, the search itself runs the pipeline's refit passes
+//! `--refine final`, the search itself runs the pipeline's in-search passes
 //! (`lab::after_step`), and each checkpoint runs its final stage on a clone
 //! (`lab::final_stage`) and records its drawing, in the same way. With
 //! `--refine every:K` the search itself runs one pass after every `K`-th
@@ -193,7 +201,8 @@
 //!   column of earlier runs).
 //! - `svg_bytes`: the length in bytes of the SVG output at the default
 //!   output size.
-//! - `adopted`, with `--during joint:K:C:I` or `joint-export:K:C:I`: the
+//! - `adopted`, for triangles with `--refine final`, or with
+//!   `--during joint:K:C:I` or `joint-export:K:C:I`: the
 //!   joint passes during the search up to this checkpoint whose result the
 //!   model adopted, over those that ran, as `kept/ran`; empty for a
 //!   schedule without joint passes. Their time is in `search_s` and
@@ -480,7 +489,7 @@ fn parse_positive(flag: &str, value: &str) -> Result<f64, BoxError> {
     }
 }
 
-fn describe_pipeline(pipeline: Pipeline) -> String {
+fn describe_pipeline(pipeline: Pipeline, iterations: Option<u32>) -> String {
     let during = match pipeline.during {
         During::Never => "none".to_owned(),
         During::Every(every) => format!("every:{every}"),
@@ -502,9 +511,12 @@ fn describe_pipeline(pipeline: Pipeline) -> String {
         Refits::Passes(passes) => format!("{passes}"),
         Refits::Until { min_gain, cap } => format!("until:{min_gain}:{cap}"),
     };
-    let joint = pipeline
-        .joint
-        .map_or_else(|| "none".to_owned(), |scale| format!("x{scale}"));
+    let joint = match (pipeline.joint, iterations) {
+        (Some(_), Some(iterations)) => format!("{iterations} iterations"),
+        (Some(scale), None) => format!("x{scale}"),
+        (None, Some(_)) => "none (--iterations ignored)".to_owned(),
+        (None, None) => "none".to_owned(),
+    };
     let default = joint::Tuning::default();
     let settings = pipeline.joint_settings;
     let mut tuning = String::new();
@@ -573,7 +585,8 @@ impl Refine {
             }
             Self::Joint(refits) => format!(
                 "joint:{refits} ({refits} refit passes, then the joint optimisation of the \
-                 triangles, polygons and rectangles, at each checkpoint)"
+                 shapes (curved shapes move by default; quadratics keep their geometry), \
+                 at each checkpoint)"
             ),
         }
     }
@@ -714,8 +727,15 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
     let mut quadratic_cap = None;
     let mut save = None;
     let mut joint_settings = joint::Settings::default();
+    let mut joint_option = None;
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{arg} needs a value"));
+        if matches!(
+            arg.as_str(),
+            "--joint-warmup" | "--joint-step" | "--joint-step-rel" | "--joint-curved"
+        ) {
+            joint_option = Some(arg.clone());
+        }
         match arg.as_str() {
             "--quick" => quick = true,
             "--no-synthetic" => synthetic = false,
@@ -793,6 +813,15 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
         && !matches!(refine, Refine::Final | Refine::Joint(_))
     {
         return Err("--final-refits and --joint-scale need --refine final or joint:R".into());
+    }
+    if let Some(option) = joint_option
+        && !matches!(refine, Refine::Final | Refine::Joint(_))
+        && !matches!(during, Some(During::Joint { .. }))
+    {
+        return Err(format!(
+            "{option} needs --refine final or joint:R or --during joint:K:C:I or joint-export:K:C:I"
+        )
+        .into());
     }
     if during.is_some() && matches!(refine, Refine::Every(_)) {
         return Err("--during cannot be combined with --refine every:K".into());
@@ -1082,14 +1111,21 @@ fn print_header(config: &Config) {
     if refine != Refine::None {
         println!("- refine: {}", refine.describe());
     }
-    if let Some(iterations) = iterations {
-        println!("- joint optimisation: {iterations} iterations");
-    }
     for &shape in &config.shapes {
         println!(
             "- pipeline of {}: {}",
             shape.as_str(),
-            describe_pipeline(config.pipeline(shape))
+            describe_pipeline(
+                {
+                    let mut pipeline = config.pipeline(shape);
+                    if !matches!(refine, Refine::Final | Refine::Joint(_)) {
+                        pipeline.refits = Refits::Passes(0);
+                        pipeline.joint = None;
+                    }
+                    pipeline
+                },
+                iterations
+            )
         );
     }
     if let Some((rounds, candidates, age)) = config.effort {

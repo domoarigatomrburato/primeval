@@ -29,9 +29,9 @@ pub fn working_target(
 }
 
 /// The target [`working_target`] returns, as an image, and the resolved
-/// background, from the same steps: [`primeval_core::Buffer`] does not
-/// expose its pixels, and [`primeval_core::Buffer::from_rgb`] of the
-/// image's dimensions and pixels is that target.
+/// background, from the same steps. This image convenience helper gives
+/// the same dimensions and pixels as [`primeval_core::Buffer::pixels`] of
+/// that target; [`primeval_core::Buffer::from_rgb`] converts it back.
 ///
 /// # Errors
 ///

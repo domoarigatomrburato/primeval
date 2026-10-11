@@ -7,6 +7,9 @@ use rand::{Rng, RngExt};
 use rand_distr::{Distribution, StandardNormal};
 use std::str::FromStr;
 
+/// The off-canvas position margin shared by moves, adoption and joint optimisation.
+pub(crate) const MARGIN: i32 = 16;
+
 const POSITION_SIGMA: f64 = 16.0;
 const ANGLE_SIGMA: f64 = 32.0;
 /// The `σ` in pixels of a coarse move of a quadratic curve's stroke width,
@@ -429,8 +432,41 @@ impl Shape {
     /// the rotation, which the joint optimisation's export computes by
     /// [`atan2_degrees`]; a radius under 1 is `None`. An unmoved quadratic
     /// keeps its geometry.
-    pub(crate) fn adopted(&self, geometry: &Geometry) -> Option<Self> {
-        match (self, geometry) {
+    pub(crate) fn adopted(
+        &self,
+        geometry: &Geometry,
+        canvas_width: u32,
+        canvas_height: u32,
+    ) -> Option<Self> {
+        let finite = match geometry {
+            Geometry::Polygon(points) => points.iter().all(|p| p.x.is_finite() && p.y.is_finite()),
+            Geometry::Rect {
+                x,
+                y,
+                width,
+                height,
+            } => [x, y, width, height].iter().all(|v| v.is_finite()),
+            Geometry::Ellipse {
+                cx,
+                cy,
+                rx,
+                ry,
+                rotation,
+            } => [cx, cy, rx, ry, rotation].iter().all(|v| v.is_finite()),
+            Geometry::Quadratic {
+                start,
+                control,
+                end,
+                width,
+                ..
+            } => [start.x, start.y, control.x, control.y, end.x, end.y, *width]
+                .iter()
+                .all(|v| v.is_finite()),
+        };
+        if !finite {
+            return None;
+        }
+        let shape = match (self, geometry) {
             (Self::Triangle(_), Geometry::Polygon(points)) if points.len() == 3 => {
                 Polygon::through(points).map(Self::Polygon)
             }
@@ -457,11 +493,16 @@ impl Shape {
                 };
                 (rectangle.x2 >= rectangle.x1
                     && rectangle.y2 >= rectangle.y1
+                    && Self::Rectangle(rectangle).in_domain(canvas_width, canvas_height)
                     && rectangle.is_valid())
                 .then_some(Self::Rectangle(rectangle))
             }
             (Self::RotatedRectangle(_), Geometry::Polygon(points)) if points.len() == 4 => {
-                RotatedRectangle::from_corners(points).map(Self::RotatedRectangle)
+                RotatedRectangle::from_corners(
+                    points,
+                    f64::from(canvas_width.max(canvas_height)) + f64::from(MARGIN),
+                )
+                .map(Self::RotatedRectangle)
             }
             // The integer centre is a pixel centre, 0.5 below the
             // geometry's ([`ellipse_geometry`]).
@@ -518,6 +559,61 @@ impl Shape {
             })),
             (Self::Quadratic(_), geometry) => (*geometry == self.geometry()).then(|| self.clone()),
             _ => None,
+        }?;
+        shape
+            .in_domain(canvas_width, canvas_height)
+            .then_some(shape)
+    }
+
+    /// Whether the converted shape stays within the canvas's move domain.
+    fn in_domain(&self, width: u32, height: u32) -> bool {
+        let margin = f64::from(MARGIN);
+        let position = |x: f64, y: f64| {
+            (-margin..=f64::from(width - 1) + margin).contains(&x)
+                && (-margin..=f64::from(height - 1) + margin).contains(&y)
+        };
+        // Joint positions use pixel-centre coordinates, 0.5 below their
+        // exported continuous coordinates. Keep the union with the
+        // continuous moves' bounds, which can reach -MARGIN themselves.
+        let continuous_position = |x: f64, y: f64| {
+            (-margin..=f64::from(width - 1) + margin + 0.5).contains(&x)
+                && (-margin..=f64::from(height - 1) + margin + 0.5).contains(&y)
+        };
+        // Well above any size the moves produce (a random start of at most
+        // 33 px, moves clamped to the side), far below what overflows the
+        // rasterizers.
+        let size =
+            |value: f64| (0.0..=4.0 * (f64::from(width.max(height)) + margin)).contains(&value);
+        match self {
+            Self::Triangle(t) => [(t.x1, t.y1), (t.x2, t.y2), (t.x3, t.y3)]
+                .iter()
+                .all(|&(x, y)| position(f64::from(x), f64::from(y))),
+            Self::Polygon(p) => (0..p.order).all(|i| continuous_position(p.x[i], p.y[i])),
+            Self::Rectangle(r) => {
+                let (x1, y1, x2, y2) = r.bounds();
+                position(f64::from(x1), f64::from(y1))
+                    && position(f64::from(x2), f64::from(y2))
+                    && size(f64::from(x2 - x1 + 1))
+                    && size(f64::from(y2 - y1 + 1))
+            }
+            Self::RotatedRectangle(r) => {
+                position(f64::from(r.x), f64::from(r.y))
+                    && size(f64::from(r.sx))
+                    && size(f64::from(r.sy))
+            }
+            Self::Ellipse(e) => {
+                position(f64::from(e.x), f64::from(e.y))
+                    && size(f64::from(e.rx))
+                    && size(f64::from(e.ry))
+            }
+            Self::Circle(c) => position(f64::from(c.x), f64::from(c.y)) && size(f64::from(c.r)),
+            Self::RotatedEllipse(e) => continuous_position(e.x, e.y) && size(e.rx) && size(e.ry),
+            Self::Quadratic(q) => {
+                [(q.x1, q.y1), (q.x2, q.y2), (q.x3, q.y3)]
+                    .iter()
+                    .all(|&(x, y)| position(x, y))
+                    && size(q.width)
+            }
         }
     }
 }
@@ -633,7 +729,6 @@ impl Triangle {
     }
 
     fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>, step: Step) {
-        const MARGIN: i32 = 16;
         loop {
             match worker.rng.random_range(0..3) {
                 0 => {
@@ -885,7 +980,7 @@ impl RotatedRectangle {
     /// The angle comes from [`atan2_degrees`] and the sides from `sqrt`,
     /// never from the platform's `atan2` or `hypot`, whose last bit can
     /// differ between platforms.
-    fn from_corners(corners: &[Point]) -> Option<Self> {
+    fn from_corners(corners: &[Point], max_side: f64) -> Option<Self> {
         let [a, b, c, d] = corners else {
             return None;
         };
@@ -901,7 +996,12 @@ impl RotatedRectangle {
             sy: lattice(side(b, c))?,
             angle: lattice(angle)?.rem_euclid(360),
         };
-        (rectangle.sx >= 1 && rectangle.sy >= 1 && rectangle.is_valid()).then_some(rectangle)
+        (rectangle.sx >= 1
+            && rectangle.sy >= 1
+            && f64::from(rectangle.sx) <= max_side
+            && f64::from(rectangle.sy) <= max_side
+            && rectangle.is_valid())
+        .then_some(rectangle)
     }
 
     fn rasterize<'a, R>(&self, worker: &'a mut WorkerCtx<R>) -> &'a [Scanline] {
@@ -946,7 +1046,7 @@ impl RotatedRectangle {
 }
 
 impl Quadratic {
-    const MUTATE_MARGIN: f64 = 16.0;
+    const MUTATE_MARGIN: f64 = MARGIN as f64;
     const MAX_MUTATE_ATTEMPTS: u32 = 6;
     /// The bounds `(min, max)` of the stroke width in working pixels, within
     /// which the search chooses each curve's width: a random curve draws
@@ -1404,15 +1504,15 @@ impl Polygon {
     /// strictly convex quad, swapping two neighbours always crosses it and
     /// swapping opposite vertices leaves its outline unchanged.
     fn mutate<R: Rng>(&mut self, worker: &mut WorkerCtx<R>, step: Step) {
-        const MARGIN: f64 = 16.0;
+        let margin = f64::from(MARGIN);
         debug_assert!(self.is_valid(), "{self:?}");
         let start = *self;
         loop {
             let i = worker.rng.random_range(0..self.order);
             self.x[i] = (self.x[i] + step.offset_f64(&mut worker.rng, POSITION_SIGMA))
-                .clamp(-MARGIN, f64::from(worker.width - 1) + MARGIN);
+                .clamp(-margin, f64::from(worker.width - 1) + margin);
             self.y[i] = (self.y[i] + step.offset_f64(&mut worker.rng, POSITION_SIGMA))
-                .clamp(-MARGIN, f64::from(worker.height - 1) + MARGIN);
+                .clamp(-margin, f64::from(worker.height - 1) + margin);
             if self.is_valid() {
                 return;
             }
@@ -1593,6 +1693,9 @@ fn rasterize_ellipse<R>(
         let span = ellipse_half_span(rx, ry, dy);
         let x1 = (x - span).max(0);
         let x2 = (x + span).min(worker.width - 1);
+        if x1 > x2 {
+            continue;
+        }
         if y1 >= 0 && y1 < worker.height {
             worker.lines.push(Scanline {
                 y: y1,
@@ -2549,6 +2652,42 @@ mod tests {
                     let lines = shape.rasterize(&mut worker).to_vec();
                     let context = format!("{kind:?} sample {sample} last step");
                     assert_lines_well_formed(&lines, width as i32, height as i32, &context);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn curved_rasterizers_are_well_formed_at_every_margin_edge_and_corner() {
+        let (width, height) = (24, 18);
+        let (mut worker, _) = make_test_round(width, height, 7);
+        for x in [-MARGIN, 0, width as i32 - 1, width as i32 - 1 + MARGIN] {
+            for y in [-MARGIN, 0, height as i32 - 1, height as i32 - 1 + MARGIN] {
+                for radius in [3, 20] {
+                    for shape in [
+                        Shape::Ellipse(Ellipse {
+                            x,
+                            y,
+                            rx: radius,
+                            ry: 3,
+                        }),
+                        Shape::Circle(Circle { x, y, r: radius }),
+                        Shape::RotatedEllipse(RotatedEllipse {
+                            x: f64::from(x),
+                            y: f64::from(y),
+                            rx: f64::from(radius),
+                            ry: 3.0,
+                            angle: 37.0,
+                        }),
+                    ] {
+                        let context = format!("{shape:?}");
+                        assert_lines_well_formed(
+                            shape.rasterize(&mut worker),
+                            width as i32,
+                            height as i32,
+                            &context,
+                        );
+                    }
                 }
             }
         }

@@ -75,7 +75,7 @@ export type ProgressInfo = {
   /** The total number of steps, equal to the `count` option. */
   total: number;
   /**
-   * The current fit, after this step and the refit passes before it: the
+   * The current fit, after this step and the in-search passes before it: the
    * RMSE between the working canvas and the resized input over the RGB
    * channels, divided by 255, from 0 (exact) to 1; lower is better. The
    * final stage can lower it further, so the result can fit better than the
@@ -93,6 +93,10 @@ export type ProgressInfo = {
    * which re-optimises one shape at a time, can move, resize and recolour
    * any shape so far, and after the last step a final stage can revise
    * every shape, so the result's shape lines can differ from the preview.
+   * For triangles the in-search pass instead jointly optimises every shape
+   * at once, kept only when the working canvas gets closer to the resized
+   * input; previously reported coordinates can become multiples of a
+   * quarter of a `viewBox` unit before the final stage.
    * For triangles, polygons, rectangles, rotated rectangles, ellipses and
    * circles the final stage is a joint gradient optimisation of every shape
    * at once, whose coordinates are multiples of a quarter of a `viewBox`

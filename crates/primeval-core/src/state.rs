@@ -18,7 +18,8 @@ pub(crate) struct State {
     pub(crate) shape: Shape,
     /// Whether moves mutate `alpha` too.
     auto_alpha: bool,
-    /// Always `1..=255`.
+    /// `1..=255` during search; a committed shape covering no pixel can
+    /// have alpha 0.
     pub(crate) alpha: u8,
     pub(crate) cached_energy: Option<u64>,
 }

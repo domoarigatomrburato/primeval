@@ -61,8 +61,12 @@
 //! - constants written as literals.
 //!
 //! Never `hypot`, `atan2`, `acos`, `cos`, `sin`, `tan`, `exp`, `ln`,
-//! `powi`, `powf` or `mul_add`, whose results can differ in the last bit
-//! between platforms. Tests may use them. The masks of the fixed layers
+//! `powi` or `powf`, whose results can differ in the last bit between
+//! platforms. Tests may use them. `mul_add` is portable and correctly
+//! rounded, but slow without hardware FMA (x86 builds without `+fma` and
+//! wasm): prefer plain arithmetic where the rounding does not matter,
+//! and keep `mul_add` where it does, as in the rasterizer.
+//! The masks of the fixed layers
 //! are not computed here: they are the scanlines of the engine's
 //! rasterizers, which the greedy search's own output already depends on,
 //! and which the native–wasm tripwire test covers. A rotated rectangle's
@@ -319,7 +323,7 @@ const BETA1: f64 = 0.9;
 const BETA2: f64 = 0.999;
 const EPSILON: f64 = 1e-8;
 /// How far outside the canvas the vertices may go, as the engine's.
-const MARGIN: f64 = 16.0;
+const MARGIN: f64 = crate::shapes::MARGIN as f64;
 
 /// The forward model's scene of a drawing on `target` and `background`,
 /// its layers, and the geometry of its fixed layers, in the order of their

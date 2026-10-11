@@ -147,7 +147,8 @@ pub enum Refits {
     Passes(u32),
     /// Passes until one lowers the model's score ([`Model::score_f64`]) by
     /// less than `min_gain` ten-thousandths of its score before the pass,
-    /// at most `cap` passes. A pass that is not kept lowers it by nothing.
+    /// at most `cap` passes, stopping before a pass if the score is zero.
+    /// A pass that is not kept lowers it by nothing.
     Until {
         /// In ten-thousandths: 50 is 0.5%.
         min_gain: u32,
@@ -397,6 +398,9 @@ pub(crate) fn final_stage(
         Refits::Until { min_gain, cap } => {
             for _ in 0..cap {
                 let before = model.score_f64();
+                if before == 0.0 {
+                    break;
+                }
                 model.refine_unless(alpha, &mut cancelled)?;
                 let gain = before - model.score_f64();
                 if gain * 10_000.0 < before * f64::from(min_gain) {
@@ -767,6 +771,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn refits_until_run_no_passes_at_zero_score() {
+        let color = Color::new(23, 45, 67, 255);
+        let target = Buffer::from_rgb(8, 8, [23, 45, 67].repeat(64)).expect("target");
+        let mut options = ModelOptions::default();
+        options.seed = Some(3);
+        let mut model = Model::new(target, color, options);
+        model.step(ShapeKind::Ellipse, Alpha::Auto);
+        assert_eq!(model.score_f64(), 0.0);
+        for min_gain in [0, 100] {
+            let mut polls = 0;
+            let result = final_stage(
+                &mut model,
+                stages(Refits::Until { min_gain, cap: 20 }, None),
+                Alpha::Auto,
+                None,
+                || {
+                    polls += 1;
+                    false
+                },
+            );
+            assert!(result.is_some());
+            assert_eq!(polls, 0, "no refit pass should run at zero score");
+        }
+    }
+
     /// `Until` runs passes until the first whose relative gain in the
     /// model's score is below the threshold, that pass included, or the
     /// cap: the same drawing as that many plain passes.
@@ -1082,11 +1112,9 @@ mod tests {
                 }
             }
         }
-        // An `any` stack usually holds rotated rectangles or curved shapes,
-        // which `Model::adopt` refuses in the production build, so its
-        // joint passes are kept only in the lab build: the floor counts the
-        // four concrete kinds' passes, 9 of their 12 (rotated rectangles
-        // adopt only in the lab build too).
+        // Count the four concrete kinds' passes: at least 9 of their 12
+        // must improve enough to be adopted. `any` adopts too, but its
+        // mixture is not part of this fixture's lower bound.
         assert!(kept >= 9, "only {kept} passes kept");
     }
 
@@ -1131,11 +1159,9 @@ mod tests {
                 }
             }
         }
-        // An `any` stack usually holds rotated rectangles or curved shapes,
-        // which `Model::adopt` refuses in the production build, so its
-        // joint passes are kept only in the lab build: the floor counts the
-        // four concrete kinds' passes, 9 of their 12 (rotated rectangles
-        // adopt only in the lab build too).
+        // Count the four concrete kinds' passes: at least 9 of their 12
+        // must improve enough to be adopted. `any` adopts too, but its
+        // mixture is not part of this fixture's lower bound.
         assert!(kept >= 9, "only {kept} passes kept");
     }
 
@@ -1240,10 +1266,8 @@ mod tests {
     /// now polygons: every step still lowers the score or keeps it.
     #[test]
     fn greedy_steps_continue_after_an_adopted_joint_pass() {
-        // Not `any`: its stack usually holds rotated rectangles or curved
-        // shapes, which `Model::adopt` refuses in the production build, so
-        // its joint passes are kept only in the lab build. Polygons adopt
-        // exactly.
+        // Triangles become continuous polygons, and polygons adopt
+        // exactly; later greedy steps must build on both.
         for shape in [ShapeKind::Triangle, ShapeKind::Polygon] {
             let (mut model, passes) = joint_model(shape, joint(5, 1, 10, Guard::Canvas), 5);
             assert_eq!(

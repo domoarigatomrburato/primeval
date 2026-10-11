@@ -74,6 +74,9 @@ impl Effort {
 pub struct Search {
     /// How many of the round's best random candidates are climbed, each in
     /// turn, the lowest climb winning: by default 1, and 2 for quadratics.
+    /// Capped at 128 for kinds that rank coarsely (`any`, ellipses, circles,
+    /// rotated ellipses and polygons), since only that many are rescored
+    /// at full resolution.
     pub seeds: Option<usize>,
     /// The random candidates of the round: by default 1000, and 900 for
     /// quadratics.
@@ -302,9 +305,10 @@ impl Model {
     }
 
     /// Lab only: makes every later [`Model::step`] search with `search`:
-    /// its climb, seeds, and random candidates and base climb age per
-    /// round, each `None` keeping the kind's default; see [`Search`]. The
-    /// numbers given are at least 1. Not part of the supported API.
+    /// its seeds, random candidates and base climb age per round, each
+    /// `None` keeping the kind's default; see [`Search`]. The numbers given
+    /// are at least 1. Kinds that rank coarsely cap seeds at 128, the number
+    /// rescored at full resolution. Not part of the supported API.
     #[cfg(feature = "lab")]
     #[doc(hidden)]
     pub fn set_search(&mut self, search: Search) {
@@ -362,7 +366,11 @@ impl Model {
     /// model unchanged, if `drawing` is not one this model can take: it
     /// has another size, background or number of shapes, moves a shape
     /// the joint optimisation keeps fixed, or has a shape that does not
-    /// convert into a valid one of its kind.
+    /// convert into a valid one of its kind. Converted positions must be
+    /// within 16 px of the canvas, and sides, radii and stroke widths at
+    /// most four times the canvas's longer side plus that margin, which no
+    /// move produces; all values must be finite. Continuous polygons and rotated ellipses also take joint
+    /// positions exported 0.5 px above those pixel-centre bounds.
     ///
     /// Every colour, opacity included, comes from `drawing`, and every
     /// shape is converted back into the engine's own:
@@ -401,7 +409,7 @@ impl Model {
             .zip(&drawing.shapes)
             .map(|(committed, drawn)| {
                 Some(CommittedShape {
-                    shape: committed.shape.adopted(&drawn.geometry)?,
+                    shape: committed.shape.adopted(&drawn.geometry, width, height)?,
                     color: drawn.color,
                 })
             })
@@ -1025,9 +1033,11 @@ mod tests {
     /// 16 rounds and the climb age ×1; `any`, back to 16 rounds as well,
     /// kept its digests. `quadratic` and `any` (both coarse and not) again
     /// when the search began to draw and move each quadratic curve's
-    /// stroke width, between 2 and 6 px, instead of fixing it at 2 px;
-    /// and again when quadratic curves got round caps, which the digest
-    /// spells. `rotated-rectangle` and `any` again when rotated rectangles'
+    /// stroke width, between 2 and 6 px, instead of fixing it at 2 px
+    /// (6803045, the coarse `any` digest 0x82420a134976eb5b).
+    /// `quadratic` and non-coarse `any` again when quadratic curves got
+    /// round caps, which the digest spells; coarse `any` kept its digest.
+    /// `rotated-rectangle` and `any` again when rotated rectangles'
     /// corners and rotated ellipses' coverage took their sine and cosine
     /// from `util::sin_cos_degrees` instead of the platform's `sin_cos`,
     /// whose last bit differs between libms: before, x86_64 (glibc, and
@@ -1638,10 +1648,16 @@ mod tests {
                     shape.sx >= 1 && shape.sy >= 1 && shape.is_valid()
                 }
                 Shape::Polygon(shape) => shape.is_valid(),
-                Shape::Ellipse(_)
-                | Shape::Circle(_)
-                | Shape::Quadratic(_)
-                | Shape::RotatedEllipse(_) => true,
+                Shape::Ellipse(shape) => shape.rx >= 1 && shape.ry >= 1,
+                Shape::Circle(shape) => shape.r >= 1,
+                Shape::Quadratic(shape) => shape.is_valid(),
+                Shape::RotatedEllipse(shape) => {
+                    shape.rx >= 1.0
+                        && shape.ry >= 1.0
+                        && [shape.x, shape.y, shape.rx, shape.ry, shape.angle]
+                            .iter()
+                            .all(|value| value.is_finite())
+                }
             })
     }
 
@@ -1817,8 +1833,8 @@ mod tests {
     /// not kept, and the model is left exactly as it was.
     #[test]
     fn adopt_keeps_the_model_when_the_drawing_repaints_worse() {
-        // Not `any`: its stack holds shapes the production build cannot adopt.
         for kind in [
+            ShapeKind::Any,
             ShapeKind::Triangle,
             ShapeKind::Rectangle,
             ShapeKind::Polygon,
@@ -1915,6 +1931,150 @@ mod tests {
             };
             (*rx, *ry) = (0.4, 0.4);
             refused(&model, &thin, &format!("{kind:?}: a radius under 1"));
+        }
+    }
+
+    #[test]
+    fn adopt_refuses_non_finite_and_out_of_domain_geometry() {
+        use crate::{Geometry, Point};
+
+        let ellipse = |cx, cy, rx, ry, rotation| Geometry::Ellipse {
+            cx,
+            cy,
+            rx,
+            ry,
+            rotation,
+        };
+        let mut cases = vec![
+            (
+                ShapeKind::RotatedEllipse,
+                ellipse(f64::NAN, 4.0, 3.0, 3.0, 0.0),
+            ),
+            (ShapeKind::Ellipse, ellipse(4.5, 4.5, 1e6, 1e6, 0.0)),
+            (
+                ShapeKind::Rectangle,
+                Geometry::Rect {
+                    x: -1.0,
+                    y: -1.0,
+                    width: f64::from(1 << 30),
+                    height: f64::from(1 << 30),
+                },
+            ),
+            (
+                ShapeKind::Triangle,
+                Geometry::Polygon(vec![
+                    Point::new(-1000.0, 0.0),
+                    Point::new(-1000.0, 100.0),
+                    Point::new(-900.0, 50.0),
+                ]),
+            ),
+        ];
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for field in 0..5 {
+                let mut params = [4.0, 4.0, 3.0, 3.0, 0.0];
+                params[field] = value;
+                cases.push((
+                    ShapeKind::RotatedEllipse,
+                    ellipse(params[0], params[1], params[2], params[3], params[4]),
+                ));
+            }
+        }
+        for (kind, geometry) in cases {
+            let before = stepped_model(2, SMALL, kind, 2);
+            let mut drawing = before.drawing();
+            drawing.shapes[0].geometry = geometry;
+            for force in [false, true] {
+                let mut model = before.clone();
+                assert_eq!(
+                    model.adopt(&drawing, force),
+                    None,
+                    "{kind:?}, force {force}"
+                );
+                assert_unchanged(&model, &before, &format!("{kind:?}"));
+            }
+        }
+    }
+
+    #[test]
+    fn adopt_accounts_for_joint_pixel_centre_positions() {
+        use crate::{Geometry, Point};
+        let margin = f64::from(crate::shapes::MARGIN);
+        let max_x = f64::from(SMALL.0 - 1) + margin + 0.5;
+        let max_y = f64::from(SMALL.1 - 1) + margin + 0.5;
+        for kind in [
+            ShapeKind::Triangle,
+            ShapeKind::Polygon,
+            ShapeKind::RotatedEllipse,
+        ] {
+            let before = stepped_model(2, SMALL, kind, 1);
+            let mut drawing = before.drawing();
+            drawing.shapes[0].geometry = if kind == ShapeKind::RotatedEllipse {
+                Geometry::Ellipse {
+                    cx: max_x,
+                    cy: max_y,
+                    rx: 3.0,
+                    ry: 3.0,
+                    rotation: 37.0,
+                }
+            } else {
+                let mut points = vec![Point::new(-margin, -margin), Point::new(max_x, -margin)];
+                if kind == ShapeKind::Polygon {
+                    points.push(Point::new(max_x, max_y));
+                }
+                points.push(Point::new(-margin, max_y));
+                Geometry::Polygon(points)
+            };
+            let mut model = before.clone();
+            assert_eq!(
+                model.adopt(&drawing, true),
+                Some(true),
+                "{kind:?}: boundary"
+            );
+            assert!(every_shape_is_valid(&model), "{kind:?}");
+            let accepted = model.clone();
+            match &mut drawing.shapes[0].geometry {
+                Geometry::Ellipse { cx, .. } => *cx += 0.25,
+                Geometry::Polygon(points) => points[1].x += 0.25,
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                model.adopt(&drawing, true),
+                None,
+                "{kind:?}: beyond boundary"
+            );
+            assert_unchanged(&model, &accepted, &format!("{kind:?}"));
+        }
+    }
+
+    #[test]
+    fn adopted_rotated_and_moved_curved_shapes_can_step_and_refine() {
+        use crate::Geometry;
+
+        for kind in [
+            ShapeKind::RotatedRectangle,
+            ShapeKind::Ellipse,
+            ShapeKind::Circle,
+            ShapeKind::RotatedEllipse,
+        ] {
+            let mut model = stepped_model(2, SMALL, kind, 4);
+            let mut drawing = snapped_curved(&model);
+            for shape in &mut drawing.shapes {
+                match &mut shape.geometry {
+                    Geometry::Ellipse { cx, .. } => *cx += 1.0,
+                    Geometry::Polygon(points) => {
+                        for point in points {
+                            point.x += 1.0;
+                        }
+                    }
+                    _ => panic!("unexpected geometry"),
+                }
+            }
+            assert_eq!(model.adopt(&drawing, true), Some(true), "{kind:?}");
+            model.step(kind, Alpha::Auto);
+            assert!(every_shape_is_valid(&model), "{kind:?} after step");
+            model.refine(Alpha::Auto);
+            assert!(every_shape_is_valid(&model), "{kind:?} after refine");
+            assert_consistent(&model, &format!("{kind:?}"));
         }
     }
 

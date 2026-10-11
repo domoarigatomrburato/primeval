@@ -21,7 +21,8 @@ use rand::{Rng, RngExt};
 /// The remaining `1 - BIASED_SAMPLING_RATE` are drawn uniformly.
 const BIASED_SAMPLING_RATE: f64 = 0.8;
 /// How many of the best candidates of a coarse random phase are rescored
-/// at full resolution, the best of which is hill-climbed. Rescoring only
+/// at full resolution, then the best `seeds` of those are hill-climbed
+/// (at most 128, even if `Search.seeds` is larger). Rescoring only
 /// the best few lost quality at high step counts, where shapes are small
 /// and the half-resolution ranking is least reliable.
 const COARSE_RESCORED_SEEDS: usize = 128;
