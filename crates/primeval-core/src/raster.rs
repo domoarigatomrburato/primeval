@@ -13,11 +13,15 @@ use rand::Rng;
 pub(crate) struct StrokeScratch {
     /// The flattened curve.
     points: Vec<(f64, f64)>,
+    /// Prepared once per segment, shared by the owner and its neighbours.
+    segments: Vec<Segment>,
     /// The coverage of the curve's bounding box, row by row; all zeros
     /// between calls, since emitting a row zeroes it again.
     grid: Vec<u32>,
     /// The leftmost and rightmost covered column of each bounding-box row.
     rows: Vec<(i32, i32)>,
+    #[cfg(test)]
+    visits: Vec<(i32, i32)>,
 }
 
 /// Rasterises a stroked quadratic Bézier directly into `worker.lines` as
@@ -34,9 +38,12 @@ pub(crate) struct StrokeScratch {
 /// pixel past the end by its share within `half_width` of the end point,
 /// across the line through the end point perpendicular to the pixel
 /// centre's direction from it ([`End::RoundCap`]). Consecutive segments
-/// along the same major axis share it half-open; where the major axis
-/// changes, both run on past the join with a round end, so that no pixel
-/// on the outside of the turn is missed. A
+/// share half-open major spans at shallow same-axis turns. A centre whose
+/// foot passes its owner's end uses the neighbouring finite segment;
+/// ordinary interior pixels evaluate only their owner. Sharper turns and
+/// major-axis changes overlap round ends to cover the outside wedge.
+/// Butt and square cap half-planes clip the curve body and join discs;
+/// square caps add rectangles along the curve's true end tangents. A
 /// pixel two segments reach keeps the larger coverage, and each row then
 /// emits runs of equal coverage, so no pixel appears twice.
 pub(crate) fn stroke_quadratic_direct<R: Rng>(
@@ -54,39 +61,58 @@ pub(crate) fn stroke_quadratic_direct<R: Rng>(
     scratch.points.clear();
     scratch.points.push((x1, y1));
     flatten_quadratic(&mut scratch.points, x1, y1, cx, cy, x2, y2);
+    if scratch.points.len() < 2 {
+        worker.lines.clear();
+        return &worker.lines;
+    }
+    let mut caps = (cap != LineCap::Round).then(|| {
+        let points = &scratch.points;
+        let last = points.len() - 1;
+        let next = |point: (f64, f64), fallback: (f64, f64)| {
+            if point == (cx, cy) {
+                fallback
+            } else {
+                (cx, cy)
+            }
+        };
+        [
+            CapPlane::new(points[0], next(points[0], points[1])),
+            CapPlane::new(points[last], next(points[last], points[last - 1])),
+        ]
+    });
     if cap == LineCap::Square {
-        lengthen_ends(&mut scratch.points, half_width);
+        lengthen_ends(
+            &mut scratch.points,
+            caps.as_mut().expect("square caps"),
+            half_width,
+        );
     }
     worker.lines.clear();
     stroke_polyline(
         &mut worker.lines,
         scratch,
         half_width,
-        if cap == LineCap::Round {
-            End::RoundCap
-        } else {
-            End::Cap
-        },
+        cap,
+        caps,
         worker.width,
         worker.height,
     );
     &worker.lines
 }
 
-/// Moves the two ends of the polyline `points` outward by `distance`,
-/// each along its own segment, so that butt caps there are the square caps
-/// of the polyline as it was.
-fn lengthen_ends(points: &mut [(f64, f64)], distance: f64) {
-    let last = points.len() - 1;
-    if last == 0 {
-        return;
+/// Adds extensions of `distance` along the curve's end tangents, and
+/// moves the cap half-planes there to form square caps.
+fn lengthen_ends(points: &mut Vec<(f64, f64)>, caps: &mut [CapPlane; 2], distance: f64) {
+    for cap in caps.iter_mut() {
+        cap.point = (
+            (-distance).mul_add(cap.inward.0, cap.point.0),
+            (-distance).mul_add(cap.inward.1, cap.point.1),
+        );
     }
-    for (end, next) in [(0, 1), (last, last - 1)] {
-        let ((ex, ey), (nx, ny)) = (points[end], points[next]);
-        let (dx, dy) = (ex - nx, ey - ny);
-        let scale = distance / (dx * dx + dy * dy).sqrt();
-        points[end] = (dx.mul_add(scale, ex), dy.mul_add(scale, ey));
-    }
+    // Keep the original first and last chords: extending those chords
+    // would rotate a short end segment away from the true end tangent.
+    points.insert(0, caps[0].point);
+    points.push(caps[1].point);
 }
 
 /// Appends the end points of the flat pieces of a quadratic Bézier to
@@ -145,12 +171,54 @@ struct CoverageGrid<'a> {
     stride: usize,
     cells: &'a mut [u32],
     rows: &'a mut [(i32, i32)],
+    caps: Option<[CapPlane; 2]>,
+    #[cfg(test)]
+    visits: &'a mut Vec<(i32, i32)>,
+}
+
+/// An inward cap half-plane for the curve body and join discs.
+struct CapPlane {
+    point: (f64, f64),
+    inward: (f64, f64),
+    filter: Trapezoid,
+}
+
+impl CapPlane {
+    fn new(point: (f64, f64), next: (f64, f64)) -> Self {
+        let (dx, dy) = (next.0 - point.0, next.1 - point.1);
+        let length = (dx * dx + dy * dy).sqrt();
+        let inward = (dx / length, dy / length);
+        Self {
+            point,
+            inward,
+            filter: Trapezoid::across(inward),
+        }
+    }
+
+    fn coverage(&self, x: i32, y: i32) -> f64 {
+        let offset = (f64::from(x) + 0.5 - self.point.0).mul_add(
+            self.inward.0,
+            (f64::from(y) + 0.5 - self.point.1) * self.inward.1,
+        );
+        self.filter.inside(offset)
+    }
 }
 
 impl CoverageGrid<'_> {
     /// Raises the coverage of pixel `(x, y)`, inside the grid, to `alpha`.
     #[inline]
-    fn raise(&mut self, x: i32, y: i32, alpha: u32) {
+    fn raise(&mut self, x: i32, y: i32, mut alpha: u32, clip: [bool; 2]) {
+        #[cfg(test)]
+        self.visits.push((x, y));
+        if let Some(caps) = &self.caps {
+            let mut share = f64::from(alpha);
+            for (cap, active) in caps.iter().zip(clip) {
+                if active {
+                    share *= cap.coverage(x, y);
+                }
+            }
+            alpha = share as u32;
+        }
         let index = (y - self.y0) as usize * self.stride + (x - self.x0) as usize;
         let cell = &mut self.cells[index];
         *cell = (*cell).max(alpha);
@@ -166,17 +234,27 @@ impl CoverageGrid<'_> {
 }
 
 /// Strokes the polyline in `scratch.points` with the given half-width into
-/// `lines`, its two ends `cap` ([`End::Cap`] or [`End::RoundCap`]),
+/// `lines`, with the specified endpoint caps,
 /// sampling every pixel of a `w`×`h` canvas at its centre.
 fn stroke_polyline(
     lines: &mut Vec<Scanline>,
     scratch: &mut StrokeScratch,
     half_width: f64,
-    cap: End,
+    cap: LineCap,
+    caps: Option<[CapPlane; 2]>,
     w: i32,
     h: i32,
 ) {
-    let StrokeScratch { points, grid, rows } = scratch;
+    let StrokeScratch {
+        points,
+        segments,
+        grid,
+        rows,
+        #[cfg(test)]
+        visits,
+    } = scratch;
+    #[cfg(test)]
+    visits.clear();
     if points.len() < 2 {
         return;
     }
@@ -218,30 +296,73 @@ fn stroke_polyline(
         stride,
         cells: grid,
         rows,
+        caps,
+        #[cfg(test)]
+        visits,
     };
 
-    let steep = |a: (f64, f64), b: (f64, f64)| (b.1 - a.1).abs() > (b.0 - a.0).abs();
+    segments.clear();
+    segments.extend(points.windows(2).map(|p| Segment::new(p[0], p[1])));
+    // A shared major span avoids evaluating the same pixel twice at a
+    // shallow turn. Compare tan² of the turn using cross and dot products.
+    // The oracle at widths 2–6 px selects 1/8: worst pixel error 0.153558,
+    // aggregate 2.0159%, retaining the 0.2 and 2.5% bounds.
     let join = |before: (f64, f64), at: (f64, f64), after: (f64, f64)| {
-        if steep(before, at) == steep(at, after) {
+        let a = (at.0 - before.0, at.1 - before.1);
+        let b = (after.0 - at.0, after.1 - at.1);
+        let cross = a.0 * b.1 - a.1 * b.0;
+        let dot = a.0 * b.0 + a.1 * b.1;
+        let same_axis = (a.1.abs() > a.0.abs()) == (b.1.abs() > b.0.abs());
+        if same_axis && dot > 0.0 && cross * cross <= 0.125 * dot * dot {
             End::Shared
         } else {
             End::Round
         }
     };
     let last = points.len() - 1;
+    let end_cap = if cap == LineCap::Round {
+        End::RoundCap
+    } else {
+        End::Cap
+    };
     for index in 0..last {
         let (a, b) = (points[index], points[index + 1]);
         let end_a = if index == 0 {
-            cap
-        } else {
+            end_cap
+        } else if cap == LineCap::Round {
             join(points[index - 1], a, b)
+        } else {
+            End::Round
         };
         let end_b = if index + 1 == last {
-            cap
-        } else {
+            end_cap
+        } else if cap == LineCap::Round {
             join(a, b, points[index + 2])
+        } else {
+            End::Round
         };
-        stroke_segment(&mut coverage, a, b, half_width, [end_a, end_b]);
+        // Square-cap rectangles are separate extensions, and may cross
+        // the opposite cap plane on a very short curve. The curve body
+        // and every join disc stay clipped by both endpoint planes.
+        let band_clip = if cap == LineCap::Square && index == 0 {
+            [true, false]
+        } else if cap == LineCap::Square && index + 1 == last {
+            [false, true]
+        } else {
+            [true; 2]
+        };
+        let neighbours = [
+            (end_a == End::Shared).then(|| &segments[index - 1]),
+            (end_b == End::Shared).then(|| &segments[index + 1]),
+        ];
+        stroke_segment(
+            &mut coverage,
+            &segments[index],
+            half_width,
+            [end_a, end_b],
+            band_clip,
+            neighbours,
+        );
     }
 
     let CoverageGrid { cells, rows, .. } = coverage;
@@ -372,14 +493,68 @@ enum End {
     /// from it ([`Trapezoid::band`] along that direction). The disc's
     /// curvature within the pixel is not modelled.
     RoundCap,
-    /// A join with a segment along the other major axis: the band runs on
-    /// past it, and the end point is the nearest point there, which rounds
-    /// the outside of the join. Without it, the two segments' spans along
-    /// different axes leave pixels on the outside of the turn to neither.
+    /// A round join: spans overlap, and a pixel whose foot is past this
+    /// end uses its distance to the vertex. Taking the larger coverage
+    /// of the neighbours covers the union of their finite bands.
     Round,
-    /// A join with a segment along the same major axis: the two segments
-    /// share the major coordinates half-open, as their spans tile them.
+    /// A shallow same-axis join: neighbours own half-open major spans.
+    /// Past its own end, a pixel consults the neighbour's finite band;
+    /// past both neighbours it uses the vertex disc.
     Shared,
+}
+
+/// A prepared finite segment. Its owner and shared neighbours reuse the
+/// same normalisation and box-filtered band.
+#[derive(Clone)]
+struct Segment {
+    point: (f64, f64),
+    end: (f64, f64),
+    direction: (f64, f64),
+    length: f64,
+    steep: bool,
+    gradient: f64,
+    cos_theta: f64,
+    filter: Trapezoid,
+}
+
+impl Segment {
+    fn new(point: (f64, f64), end: (f64, f64)) -> Self {
+        let (dx, dy) = (end.0 - point.0, end.1 - point.1);
+        let steep = dy.abs() > dx.abs();
+        let (major, minor) = if steep { (dy, dx) } else { (dx, dy) };
+        let gradient = minor / major;
+        let cos_theta = 1.0 / gradient.mul_add(gradient, 1.0).sqrt();
+        let along_major = cos_theta.copysign(major);
+        let along_minor = gradient * along_major;
+        let direction = if steep {
+            (along_minor, along_major)
+        } else {
+            (along_major, along_minor)
+        };
+        Self {
+            point,
+            end,
+            direction,
+            length: major.abs() / cos_theta,
+            steep,
+            gradient,
+            cos_theta,
+            filter: Trapezoid::across((cos_theta, gradient * cos_theta)),
+        }
+    }
+
+    fn coverage(&self, x: f64, y: f64, half_width: f64) -> f64 {
+        let (dx, dy) = (x - self.point.0, y - self.point.1);
+        let along = dx.mul_add(self.direction.0, dy * self.direction.1);
+        if along <= 0.0 {
+            round_cap(half_width, dx, dy)
+        } else if along >= self.length {
+            round_cap(half_width, x - self.end.0, y - self.end.1)
+        } else {
+            let across = dx.mul_add(-self.direction.1, dy * self.direction.0);
+            self.filter.band(half_width, across.abs())
+        }
+    }
 }
 
 /// Covers the pixels near one flat segment from `a` to `b` with the share of
@@ -387,12 +562,13 @@ enum End {
 /// its [`End`] describes. Pixels off the grid are off the canvas.
 fn stroke_segment(
     grid: &mut CoverageGrid<'_>,
-    a: (f64, f64),
-    b: (f64, f64),
+    segment: &Segment,
     half_width: f64,
     [end_a, end_b]: [End; 2],
+    band_clip: [bool; 2],
+    neighbours: [Option<&Segment>; 2],
 ) {
-    let steep = (b.1 - a.1).abs() > (b.0 - a.0).abs();
+    let (a, b, steep) = (segment.point, segment.end, segment.steep);
     // Major and minor coordinates, and the grid's bounds along each.
     let (a_major, a_minor, b_major, b_minor) = if steep {
         (a.1, a.0, b.1, b.0)
@@ -404,23 +580,16 @@ fn stroke_segment(
     } else {
         (grid.x0, grid.x1, grid.y0, grid.y1)
     };
-    let gradient = (b_minor - a_minor) / (b_major - a_major);
-    // cos(θ) converts a distance along the minor axis to a perpendicular one.
-    let cos_theta = 1.0 / gradient.mul_add(gradient, 1.0).sqrt();
-    let trapezoid = Trapezoid::across((cos_theta, gradient * cos_theta));
-    // Coverage is positive strictly within `reach` of the segment, and a
-    // centre within `reach` of its line is within `half_band` of it along
-    // the minor axis.
+    let (gradient, cos_theta, trapezoid) = (segment.gradient, segment.cos_theta, segment.filter);
+    // Coverage is positive strictly within `reach` of the segment.
     let reach = half_width + trapezoid.end;
     let half_band = reach / cos_theta;
-    let length = (b_major - a_major).abs() / cos_theta;
-    // The unit direction from `a` to `b`, in major and minor coordinates.
-    let along_major = if b_major > a_major {
-        cos_theta
+    let length = segment.length;
+    let (along_major, along_minor) = if steep {
+        (segment.direction.1, segment.direction.0)
     } else {
-        -cos_theta
+        segment.direction
     };
-    let along_minor = gradient * along_major;
     // How far the span runs on past an end, along the major axis: a
     // covered centre past a cap is within `trapezoid.end` of it along the
     // segment and `reach` across it, and one past a round cap within
@@ -461,9 +630,9 @@ fn stroke_segment(
                 let across = (f64::from(j) + 0.5 - minor) * cos_theta;
                 let alpha = (trapezoid.band(half_width, across.abs()) * f64::from(M)) as u32;
                 if steep {
-                    grid.raise(j, i, alpha);
+                    grid.raise(j, i, alpha, band_clip);
                 } else {
-                    grid.raise(i, j, alpha);
+                    grid.raise(i, j, alpha, band_clip);
                     grid.extend_row(j, i, i);
                 }
             }
@@ -479,29 +648,43 @@ fn stroke_segment(
             let across = (minor_centre - minor) * cos_theta;
             let along =
                 (centre - a_major).mul_add(along_major, (minor_centre - a_minor) * along_minor);
-            let mut share = if along < 0.0 && end_a == End::RoundCap {
+            let neighbour = if along < 0.0 {
+                &neighbours[0]
+            } else if along > length {
+                &neighbours[1]
+            } else {
+                &None
+            };
+            let share = if let Some(neighbour) = neighbour {
+                let (x, y) = if steep {
+                    (minor_centre, centre)
+                } else {
+                    (centre, minor_centre)
+                };
+                neighbour.coverage(x, y, half_width)
+            } else if along < 0.0 && end_a == End::RoundCap {
                 round_cap(half_width, centre - a_major, minor_centre - a_minor)
             } else if along > length && end_b == End::RoundCap {
                 round_cap(half_width, centre - b_major, minor_centre - b_minor)
-            } else if along < 0.0 && end_a == End::Round {
-                trapezoid.band(half_width, (along * along + across * across).sqrt())
-            } else if along > length && end_b == End::Round {
-                let past = along - length;
-                trapezoid.band(half_width, (past * past + across * across).sqrt())
+            } else if along < 0.0 && matches!(end_a, End::Round | End::Shared) {
+                round_cap(half_width, centre - a_major, minor_centre - a_minor)
+            } else if along > length && matches!(end_b, End::Round | End::Shared) {
+                round_cap(half_width, centre - b_major, minor_centre - b_minor)
             } else {
                 trapezoid.band(half_width, across.abs())
             };
-            if end_a == End::Cap {
-                share *= trapezoid.inside(along);
-            }
-            if end_b == End::Cap {
-                share *= trapezoid.inside(length - along);
-            }
             let alpha = (share * f64::from(M)) as u32;
-            if steep {
-                grid.raise(j, i, alpha);
+            let clip = if (along < 0.0 && end_a == End::Round)
+                || (along > length && end_b == End::Round)
+            {
+                [true; 2]
             } else {
-                grid.raise(i, j, alpha);
+                band_clip
+            };
+            if steep {
+                grid.raise(j, i, alpha, clip);
+            } else {
+                grid.raise(i, j, alpha, clip);
                 grid.extend_row(j, i, i);
             }
         }
@@ -1108,8 +1291,8 @@ mod tests {
     /// parameter, with discs at the joins between them, cut by the lines
     /// across the curve's two ends, and the cap at each end along the
     /// curve's tangent there, a disc for a round cap and a rectangle half
-    /// the width long for a square one. The cut assumes that no other part
-    /// of the stroke reaches past an end, as on the test curves.
+    /// the width long for a square one. Round strokes keep the entire
+    /// union; butt and square bodies are clipped by the end half-planes.
     fn supersampled_stroke(curve: [f64; 6], half_width: f64, cap: LineCap) -> Vec<f64> {
         const CHORDS: usize = 64;
         const SAMPLES: usize = 16;
@@ -1138,7 +1321,7 @@ mod tests {
             let before_ends = caps
                 .iter()
                 .all(|&((ex, ey), (tx, ty))| (px - ex) * tx + (py - ey) * ty <= 0.0);
-            let body = before_ends
+            let body = (cap == LineCap::Round || before_ends)
                 && (points.windows(2).any(|chord| {
                     let ((ax, ay), (bx, by)) = (chord[0], chord[1]);
                     let (dx, dy) = (bx - ax, by - ay);
@@ -1239,14 +1422,139 @@ mod tests {
         (worst, difference / total)
     }
 
-    /// The round and square caps against the supersampled stroke, with the
-    /// butt cap, unchanged, as the yardstick. Measured ([`cap_errors`]):
-    /// the worst pixel near an end differs by 0.123 with round caps, 0.142
-    /// with square ones and 0.189 with butt ones, the sum over the stroke
-    /// by 1.62%, 1.72% and 1.83% of the reference's. The worst pixels of
-    /// all three are on the two arches, where the end segment's direction,
-    /// along which the caps are cut or lengthened, strays from the curve's
-    /// tangent, and on their bodies, which the caps share.
+    /// Shallow same-axis joins own disjoint major spans. Round endpoint
+    /// caps are outside the interior interval inspected here.
+    #[test]
+    fn quadratic_shallow_joins_evaluate_each_interior_pixel_once() {
+        for steep in [false, true] {
+            let mut worker = WorkerCtx::new(128, 128, ChaCha8Rng::seed_from_u64(5));
+            let (x1, y1, cx, cy, x2, y2) = if steep {
+                (40.0, 4.0, 44.0, 64.0, 40.0, 124.0)
+            } else {
+                (4.0, 40.0, 64.0, 44.0, 124.0, 40.0)
+            };
+            stroke_quadratic_direct(&mut worker, x1, y1, cx, cy, x2, y2, 1.5, LineCap::Round);
+            assert!(worker.stroke.points.len() > 2);
+            let mut visits = std::collections::HashMap::new();
+            for &(x, y) in &worker.stroke.visits {
+                let major = if steep { y } else { x };
+                if (30..95).contains(&major) {
+                    *visits.entry((x, y)).or_insert(0) += 1;
+                }
+            }
+            assert!(!visits.is_empty());
+            for (pixel, count) in visits {
+                assert_eq!(count, 1, "steep {steep}, pixel {pixel:?}");
+            }
+        }
+    }
+
+    /// Every pixel on valid random curves at widths spanning 2–6 px,
+    /// including the reported same-axis turn. The exact inner band is
+    /// retained; the total bound is tighter than the export comparison.
+    #[test]
+    fn quadratic_same_axis_joins_match_supersampled_strokes() {
+        use rand::RngExt;
+        let mut rng = ChaCha8Rng::seed_from_u64(300);
+        let mut curves = vec![[13.83, 35.75, 17.33, 31.03, 28.72, 42.81]];
+        while curves.len() < 21 {
+            let curve = std::array::from_fn(|_| rng.random_range(6.0..34.0));
+            let [x1, y1, x2, y2, x3, y3] = curve;
+            if (crate::shapes::Quadratic {
+                x1,
+                y1,
+                x2,
+                y2,
+                x3,
+                y3,
+                width: 2.0,
+                cap: LineCap::Round,
+            })
+            .is_valid()
+            {
+                curves.push(curve);
+            }
+        }
+        let (mut worst, mut difference, mut total) = (0.0_f64, 0.0, 0.0);
+        let mut worst_pixel = String::new();
+        for curve in curves {
+            for half_width in [1.0, 1.5, 2.0, 2.5, 2.777, 3.0] {
+                let engine = engine_stroke(curve, half_width, LineCap::Round);
+                let reference = supersampled_stroke(curve, half_width, LineCap::Round);
+                for (index, (a, b)) in engine.iter().zip(&reference).enumerate() {
+                    let error = (a - b).abs();
+                    if error > worst {
+                        worst = error;
+                        worst_pixel = format!(
+                            "{curve:?}, half width {half_width}, pixel ({}, {}): {a:.4} against {b:.4}",
+                            index as i32 % CAP_W,
+                            index as i32 / CAP_W
+                        );
+                    }
+                    difference += error;
+                    total += b;
+                }
+            }
+        }
+        eprintln!(
+            "join oracle: worst {worst:.6}, aggregate {:.6}",
+            difference / total
+        );
+        assert!(worst <= 0.2, "{worst_pixel}; error {worst:.6}");
+        assert!(
+            difference / total < 0.025,
+            "worst {worst:.4}, aggregate {:.5}",
+            difference / total
+        );
+    }
+
+    #[test]
+    fn quadratic_short_end_segments_respect_butt_and_square_caps() {
+        for (curve, half_width, cap, pixel) in [
+            (
+                [26.58, 14.07, 26.83, 15.6, 30.58, 15.29],
+                2.429,
+                LineCap::Butt,
+                (26, 13),
+            ),
+            (
+                [12.44, 29.48, 13.95, 27.97, 12.81, 26.96],
+                2.8,
+                LineCap::Square,
+                (9, 27),
+            ),
+            (
+                [20.0, 20.0, 20.25, 20.4, 20.5, 20.0],
+                3.0,
+                LineCap::Square,
+                (21, 16),
+            ),
+        ] {
+            let engine = engine_stroke(curve, half_width, cap);
+            let reference = supersampled_stroke(curve, half_width, cap);
+            let index = (pixel.1 * CAP_W + pixel.0) as usize;
+            assert!(
+                (engine[index] - reference[index]).abs() < 0.15,
+                "{cap:?} pixel {pixel:?}: {} against {}",
+                engine[index],
+                reference[index]
+            );
+            let difference: f64 = engine
+                .iter()
+                .zip(&reference)
+                .map(|(a, b)| (a - b).abs())
+                .sum();
+            let total: f64 = reference.iter().sum();
+            assert!(
+                difference / total < 0.05,
+                "{cap:?}: aggregate {}",
+                difference / total
+            );
+        }
+    }
+
+    /// Retain the original worst-pixel and aggregate cap bounds after
+    /// fixing joins and clipping by the curve's true endpoint tangents.
     #[test]
     fn stroke_quadratic_direct_covers_round_and_square_caps() {
         for (cap, worst_bound, total_bound) in [

@@ -449,6 +449,8 @@ struct Conic<F> {
     cy: F,
     ux: F,
     uy: F,
+    ra: F,
+    b: F,
     inv_ra: F,
     inv_b: F,
     shorter: F,
@@ -535,7 +537,8 @@ impl<F: Real> Edge<F> {
         self.nx * x + self.ny * y + self.c
     }
 
-    /// `F(d)`: piecewise quadratic, `C¹`.
+    /// `F(d)`: piecewise quadratic, `C¹` except at the two endpoints
+    /// of an axis-aligned linear ramp.
     #[inline]
     fn cdf(&self, d: F) -> F {
         let (h, k) = (self.half_sum, self.half_diff);
@@ -558,7 +561,16 @@ impl<F: Real> Edge<F> {
     fn cdf_grad(&self, d: F) -> EdgeValue<F> {
         let (h, k) = (self.half_sum, self.half_diff);
         let zero = F::of(0.0);
-        if d <= -h {
+        if self.inv_narrow == zero && (d == -h || d == h) {
+            // At an axis-aligned ramp's kink use the mean of its two
+            // one-sided derivatives, keeping the forward value exact.
+            EdgeValue {
+                f: if d == -h { zero } else { F::of(1.0) },
+                fd: F::of(0.5) * self.inv_wide,
+                fa: -F::of(0.5) * d * self.inv_wide * self.inv_wide,
+                fb: zero,
+            }
+        } else if d <= -h {
             EdgeValue {
                 f: zero,
                 fd: zero,
@@ -828,6 +840,8 @@ impl<'a, F: Real> Prepared<'a, F> {
                 cy: F::of(cy),
                 ux: F::of(ux),
                 uy: F::of(uy),
+                ra: F::of(ra),
+                b: F::of(b),
                 inv_ra: F::of(1.0 / ra),
                 inv_b: F::of(1.0 / b),
                 shorter: F::of(shorter),
@@ -951,7 +965,7 @@ impl<'a, F: Real> Prepared<'a, F> {
     #[inline]
     fn edge_coverage<const N: usize>(&self, x: F, y: F) -> F {
         let d: [F; N] = std::array::from_fn(|e| self.edges[e].distance(x, y));
-        let Some((cutting, last)) = self.cutting(&d) else {
+        let Some((cutting, last)) = self.cutting(&d, false) else {
             return F::of(0.0);
         };
         match cutting {
@@ -1067,13 +1081,36 @@ impl<'a, F: Real> Prepared<'a, F> {
         } else {
             Edge::ramp(w, u)
         };
-        if d <= -edge.half_sum {
+        // On a conic's axes the geometric distance is exactly radius
+        // minus offset. The general (r - a) / g can lose an ulp at an
+        // exact pixel boundary; recognise that kink from the original
+        // radii, only for the derivative, without moving forward coverage.
+        let axial_d = if p2 == zero {
+            c.ra - p1.abs()
+        } else if p1 == zero {
+            c.b - p2.abs()
+        } else {
+            d
+        };
+        let kink = edge.inv_narrow == zero && axial_d.abs() == F::of(0.5) * c.filter;
+        if d < -edge.half_sum && !kink {
             return None;
         }
-        if d >= edge.half_sum {
+        if d > edge.half_sum && !kink {
             return Some((one, grad));
         }
-        let value = edge.cdf_grad(d);
+        let mut value = edge.cdf_grad(if kink {
+            if axial_d < zero {
+                -edge.half_sum
+            } else {
+                edge.half_sum
+            }
+        } else {
+            d
+        });
+        if kink {
+            value.f = edge.cdf(d);
+        }
         // The partials of `q₁`, `q₂`, `α` and `β` with respect to
         // `p − c`, `ra`, `φ` and `b`, in that order.
         let (ira2, ib2) = (ira * ira, ib * ib);
@@ -1117,16 +1154,18 @@ impl<'a, F: Real> Prepared<'a, F> {
     /// The number of the first `N` edges whose reach holds the filter
     /// square of a pixel at the signed distances `d` from them, those with
     /// `−half_sum < d < half_sum`, and the last of them; `None` if the
-    /// square is outside an edge.
+    /// square is outside an edge. The gradient path includes an aligned
+    /// ramp's endpoints: zero coverage there can have a half-slope.
     #[inline]
-    fn cutting<const N: usize>(&self, d: &[F; N]) -> Option<(usize, usize)> {
+    fn cutting<const N: usize>(&self, d: &[F; N], gradient: bool) -> Option<(usize, usize)> {
         let (mut cutting, mut last) = (0, 0);
         for (e, &d) in d.iter().enumerate() {
             let reach = self.edges[e].half_sum;
-            if d <= -reach {
+            let kink = gradient && self.edges[e].inv_narrow == F::of(0.0) && d.abs() == reach;
+            if d <= -reach && !kink {
                 return None;
             }
-            if d < reach {
+            if d < reach || kink {
                 cutting += 1;
                 last = e;
             }
@@ -1201,8 +1240,42 @@ impl<'a, F: Real> Prepared<'a, F> {
     #[inline]
     fn edge_coverage_grad<const N: usize>(&self, x: F, y: F) -> Option<(F, [F; COORDS])> {
         let zero = F::of(0.0);
-        let d: [F; N] = std::array::from_fn(|e| self.edges[e].distance(x, y));
-        let (cutting, last) = self.cutting(&d)?;
+        let mut geometric_kink = false;
+        let d: [F; N] = std::array::from_fn(|e| {
+            let edge = &self.edges[e];
+            // Normalisation and the expanded line constant can lose an
+            // ulp even on an exact axis-aligned boundary (e.g. length 98).
+            // Recognise only exact geometric kinks, from the endpoint,
+            // and use the ramp's endpoint on the derivative path.
+            let axial = if edge.ex == zero && edge.ey != zero {
+                Some(if edge.nx < zero {
+                    edge.px - x
+                } else {
+                    x - edge.px
+                })
+            } else if edge.ey == zero && edge.ex != zero {
+                Some(if edge.ny < zero {
+                    edge.py - y
+                } else {
+                    y - edge.py
+                })
+            } else {
+                None
+            };
+            if let Some(axial) = axial
+                && axial.abs() == self.half
+            {
+                geometric_kink = true;
+                if axial < zero {
+                    -edge.half_sum
+                } else {
+                    edge.half_sum
+                }
+            } else {
+                edge.distance(x, y)
+            }
+        });
+        let (cutting, last) = self.cutting(&d, true)?;
         let mut grad = [zero; COORDS];
         match cutting {
             0 => Some((F::of(1.0), grad)),
@@ -1215,12 +1288,30 @@ impl<'a, F: Real> Prepared<'a, F> {
                 grad[2 * p + 1] += g[1];
                 grad[2 * q] += g[2];
                 grad[2 * q + 1] += g[3];
-                Some((value.f, grad))
+                Some((
+                    if geometric_kink {
+                        self.edge_coverage::<N>(x, y)
+                    } else {
+                        value.f
+                    },
+                    grad,
+                ))
             }
             _ => {
                 let polygon = self.clip(&d);
+                let kink = d.iter().enumerate().any(|(e, &d)| {
+                    self.edges[e].inv_narrow == zero && d.abs() == self.edges[e].half_sum
+                });
+                // Including an endpoint in the derivative's clip can
+                // change the last bit of a nearly tangent corner's area.
+                // Keep the original forward path's value bit for bit.
+                let coverage = if kink {
+                    self.edge_coverage::<N>(x, y)
+                } else {
+                    polygon.coverage(self.inv_area)
+                };
                 if polygon.len == 0 {
-                    return None;
+                    return kink.then_some((coverage, grad));
                 }
                 // Only the clipped segments of the edges move: each moves
                 // the boundary along its outward normal `−(nx, ny)` at the
@@ -1236,6 +1327,9 @@ impl<'a, F: Real> Prepared<'a, F> {
                     }
                     let j = if i + 1 == polygon.len { 0 } else { i + 1 };
                     let edge = &self.edges[e];
+                    if edge.inv_narrow == zero && d[e].abs() == edge.half_sum {
+                        continue;
+                    }
                     let (tx, ty) = (edge.ex * edge.inv_l, edge.ey * edge.inv_l);
                     let centre = (x - edge.px) * tx + (y - edge.py) * ty;
                     let s0 = centre + polygon.u[i] * tx + polygon.v[i] * ty;
@@ -1251,7 +1345,43 @@ impl<'a, F: Real> Prepared<'a, F> {
                     grad[2 * q] += ox * to_q;
                     grad[2 * q + 1] += oy * to_q;
                 }
-                Some((polygon.coverage(self.inv_area), grad))
+                // At a kink the clipped boundary may coincide with a
+                // filter-square side (or collapse to it). It still moves
+                // half as much as the interior boundary. Integrate the
+                // portion retained by the other edges, including corners.
+                for (e, &distance) in d.iter().enumerate() {
+                    let edge = &self.edges[e];
+                    if edge.inv_narrow != zero || distance.abs() != edge.half_sum {
+                        continue;
+                    }
+                    let (tx, ty) = (edge.ex * edge.inv_l, edge.ey * edge.inv_l);
+                    let centre = (x - edge.px) * tx + (y - edge.py) * ty;
+                    let (mut low, mut high) = (F::of(f64::INFINITY), F::of(f64::NEG_INFINITY));
+                    for i in 0..polygon.len {
+                        if edge.nx * polygon.u[i] + edge.ny * polygon.v[i] + distance == zero {
+                            let s = centre + polygon.u[i] * tx + polygon.v[i] * ty;
+                            if s < low {
+                                low = s;
+                            }
+                            if s > high {
+                                high = s;
+                            }
+                        }
+                    }
+                    if high <= low {
+                        continue;
+                    }
+                    let length = F::of(0.5) * (high - low);
+                    let to_q = F::of(0.5) * length * (high + low) * edge.inv_l;
+                    let to_p = length - to_q;
+                    let (ox, oy) = (-edge.nx * self.inv_area, -edge.ny * self.inv_area);
+                    let (p, q) = (e, (e + 1) % N);
+                    grad[2 * p] += ox * to_p;
+                    grad[2 * p + 1] += oy * to_p;
+                    grad[2 * q] += ox * to_q;
+                    grad[2 * q + 1] += oy * to_q;
+                }
+                Some((coverage, grad))
             }
         }
     }
@@ -2331,6 +2461,64 @@ pub(super) mod tests {
         }
     }
 
+    /// Half-slopes at pixel boundaries, including corners, for both edge
+    /// directions and both sides of the shapes. Forward coverage stays exact.
+    #[test]
+    fn analytic_gradients_at_axis_aligned_edge_kinks_match_finite_differences() {
+        let mut rng = ChaCha8Rng::seed_from_u64(73);
+        let scene = random_scene::<f64>(&mut rng, 32, 32);
+        let mut layers = vec![
+            Layer::triangle([5.5, 6.5, 24.5, 6.5, 5.5, 25.5], 180.0, [60.0, 210.0, 90.0]),
+            Layer::triangle(
+                [24.5, 25.5, 5.5, 25.5, 24.5, 6.5],
+                180.0,
+                [60.0, 210.0, 90.0],
+            ),
+            Layer {
+                outline: Outline::Quad,
+                params: [5.5, 6.5, 24.5, 6.5, 24.5, 25.5, 5.5, 25.5],
+                alpha: 180.0,
+                color: [60.0, 210.0, 90.0],
+            },
+        ];
+        for (ux, uy, h) in [
+            (5.0, 0.0, 3.0),
+            (0.0, 5.0, 3.0),
+            (49.0, 0.0, 7.0),
+            (0.0, 49.0, 7.0),
+        ] {
+            layers.push(Layer {
+                outline: Outline::Rotated,
+                params: [15.5, 15.5, ux, uy, h, 0.0, 0.0, 0.0],
+                alpha: 180.0,
+                color: [60.0, 210.0, 90.0],
+            });
+        }
+        for radius in [1.5, 2.5, 3.5, 4.5, 5.5, 6.5] {
+            layers.push(conic(Outline::Circle, (15.0, 15.0), (radius, radius), 0.0));
+            layers.push(conic(Outline::Ellipse, (15.0, 15.0), (radius, 1.5), 0.0));
+        }
+        for layer in layers {
+            if layer.outline.sides() >= 3 {
+                compare_coverage(&layer);
+            } else {
+                let prepared = Prepared::new(&layer, &scene);
+                for y in 0..scene.height {
+                    for x in 0..scene.width {
+                        let (x, y) = (x as f64, y as f64);
+                        assert_eq!(
+                            prepared.conic_coverage_grad(x, y).map_or(0.0, |(f, _)| f),
+                            prepared.conic_coverage(x, y)
+                        );
+                    }
+                }
+            }
+            let (worst, overall, _) = gradient_check(&scene, &[layer]);
+            assert!(worst < 1e-3, "{layer:?}: worst {worst}");
+            assert!(overall < 1e-4, "{layer:?}: overall {overall}");
+        }
+    }
+
     /// The same with axis-aligned and rotated rectangles, among them
     /// rectangles on the rule's boundary: sides of exactly 1 px, half-sides
     /// of exactly 1/2, and long sides of exactly 8 times the short ones.
@@ -2589,7 +2777,11 @@ pub(super) mod tests {
                     3 => prepared.edge_coverage_grad::<3>(fx, fy),
                     _ => prepared.edge_coverage_grad::<4>(fx, fy),
                 };
-                assert_eq!(with_grad.map_or(0.0, |(cover, _)| cover), model);
+                assert_eq!(
+                    with_grad.map_or(0.0, |(cover, _)| cover),
+                    model,
+                    "{layer:?} at ({x}, {y})"
+                );
                 model_area += model;
                 exact_area += exact;
             }
@@ -2839,7 +3031,11 @@ pub(super) mod tests {
                 };
                 if in_box {
                     let with_grad = Curved::cover_grad(&prepared, x, y, fy);
-                    assert_eq!(with_grad.map_or(0.0, |(cover, _)| cover), model);
+                    assert_eq!(
+                        with_grad.map_or(0.0, |(cover, _)| cover),
+                        model,
+                        "{layer:?} at ({x}, {y})"
+                    );
                 }
                 let reference = match conic_class(layer, fx, fy) {
                     Some(exact) => {

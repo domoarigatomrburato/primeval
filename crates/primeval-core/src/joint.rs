@@ -1351,6 +1351,38 @@ mod tests {
             .collect()
     }
 
+    /// Even sides place every axis-aligned edge on a pixel boundary;
+    /// wrong colours must still produce geometry moves through those kinks.
+    #[test]
+    fn optimise_moves_even_axis_aligned_rotated_rectangles() {
+        let target = target(48, 40);
+        for angle in [0, 90] {
+            let mut model = greedy_kind(&target, 1, ShapeKind::RotatedRectangle, Alpha::Auto);
+            let mut drawing = model.drawing();
+            drawing.shapes[0].geometry = Shape::RotatedRectangle(crate::shapes::RotatedRectangle {
+                x: 20,
+                y: 16,
+                sx: 10,
+                sy: 6,
+                angle,
+            })
+            .geometry();
+            drawing.shapes[0].color = Color::new(210, 20, 80, 180);
+            assert_eq!(model.adopt(&drawing, true), Some(true));
+            let before = model.drawing();
+            let after =
+                optimise(&model, Alpha::Auto, settings(30), || false).expect("not cancelled");
+            assert_ne!(
+                before.shapes[0].geometry, after.shapes[0].geometry,
+                "angle {angle}"
+            );
+            assert!(
+                score(&model, &after) < score(&model, &before),
+                "angle {angle}"
+            );
+        }
+    }
+
     /// Exported axis-aligned rectangles keep the rule, checked
     /// independently on their sides, sit on their lattice, and lower the
     /// model's error; so do rotated rectangles, checked by `acos` angles

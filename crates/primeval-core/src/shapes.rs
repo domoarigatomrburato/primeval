@@ -4,7 +4,6 @@ use crate::scanline::Scanline;
 use crate::util::{atan2_degrees, rotate_sc, sin_cos_whole_degrees};
 use crate::worker::{SearchRound, WorkerCtx};
 use rand::{Rng, RngExt};
-use rand_distr::{Distribution, StandardNormal};
 use std::str::FromStr;
 
 /// The off-canvas position margin shared by moves, adoption and joint optimisation.
@@ -1592,8 +1591,16 @@ pub(crate) fn legible_corner(
 }
 
 fn gaussian_sample<R: Rng>(rng: &mut R, sigma: f64) -> f64 {
-    let sample: f64 = StandardNormal.sample(rng);
-    sample * sigma
+    // Marsaglia polar sampling. Discard the second variate so every call
+    // consumes a plain stream of uniform draws, with no cached state.
+    loop {
+        let u = 2.0 * rng.random::<f64>() - 1.0;
+        let v = 2.0 * rng.random::<f64>() - 1.0;
+        let s = u * u + v * v;
+        if s > 0.0 && s < 1.0 {
+            return u * (-2.0 * libm::log(s) / s).sqrt() * sigma;
+        }
+    }
 }
 
 /// The size of a move ([`Shape::mutate`]).
@@ -2409,7 +2416,9 @@ mod tests {
     /// the same random streams and make the same shapes as before the
     /// width became searchable: the digest was recorded before that change,
     /// and again when curves got a cap, round by default, which the trace
-    /// spells and their moves keep.
+    /// spells and their moves keep. Recorded again when Gaussian moves
+    /// switched to portable polar sampling with libm::log: the intended
+    /// new random stream agrees on aarch64 and x86_64.
     #[test]
     fn fixed_width_quadratics_keep_their_random_streams() {
         let (mut worker, round) = round(64, 48);
@@ -2429,7 +2438,7 @@ mod tests {
             }
         }
         trace.push_str(&format!("{}", worker.rng.random::<u64>()));
-        assert_eq!(fnv1a(&trace), 6_973_592_854_616_683_699);
+        assert_eq!(fnv1a(&trace), 12_365_064_046_449_991_623);
     }
 
     #[test]
@@ -2691,6 +2700,42 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn gaussian_samples_have_normal_moments_and_tails() {
+        let mut rng = crate::rng::create_rng(0x901a);
+        let (mut sum, mut squares, mut tails) = (0.0, 0.0, 0);
+        const COUNT: usize = 1_000_000;
+        for _ in 0..COUNT {
+            let sample = gaussian_sample(&mut rng, 1.0);
+            sum += sample;
+            squares += sample * sample;
+            tails += usize::from(sample.abs() > 3.0);
+        }
+        let mean = sum / COUNT as f64;
+        let variance = squares / COUNT as f64 - mean * mean;
+        let tail = tails as f64 / COUNT as f64;
+        assert!(mean.abs() < 0.01, "mean {mean}");
+        assert!((variance - 1.0).abs() < 0.01, "variance {variance}");
+        assert!((tail - 0.0027).abs() < 0.0002, "tails {tail}");
+    }
+
+    /// FNV-1a of the little-endian IEEE bits of 1,000 unit-sigma samples
+    /// from ChaCha8 seed 0x901a. Pins the polar sampler and uniform stream.
+    #[test]
+    fn gaussian_samples_are_pinned() {
+        let mut rng = crate::rng::create_rng(0x901a);
+        let digest = (0..1000).fold(0xcbf2_9ce4_8422_2325_u64, |hash, _| {
+            gaussian_sample(&mut rng, 1.0)
+                .to_bits()
+                .to_le_bytes()
+                .iter()
+                .fold(hash, |hash, byte| {
+                    (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                })
+        });
+        assert_eq!(digest, 3_848_654_534_955_378_079);
     }
 
     /// Scaled integer offsets are rounded and never zero: a single offset

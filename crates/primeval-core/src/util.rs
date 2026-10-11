@@ -1,5 +1,10 @@
 use std::sync::OnceLock;
 
+// Portability: geometry uses IEEE arithmetic, sqrt and rounding, with
+// rotations computed below instead of platform trigonometry. The engine's
+// one transcendental function, the Gaussian sampler's ln, uses libm::log:
+// the same pure Rust implementation on native and WebAssembly targets.
+
 /// Rotates point `(x, y)` using pre-computed sine and cosine values.
 ///
 /// Use this when the same angle is applied to many points to avoid

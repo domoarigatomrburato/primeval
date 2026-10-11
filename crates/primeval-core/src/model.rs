@@ -1043,19 +1043,28 @@ mod tests {
     /// whose last bit differs between libms: before, x86_64 (glibc, and
     /// macOS) gave other digests for both than Apple Silicon; now every
     /// digest is the same on aarch64 and x86_64. `rotated-ellipse` and the
-    /// coarse `any` kept theirs.
+    /// coarse `any` kept theirs. All kinds and coarse `any` again when
+    /// Gaussian moves switched to portable polar sampling with libm::log,
+    /// changing the random stream; quadratic joins also became overlapping
+    /// finite bands with round vertices and cap half-plane clipping. The
+    /// joint edge-kink half-slopes change optimisation, not these greedy
+    /// drawings. The new pins agree on aarch64 and x86_64. Quadratic again
+    /// when shallow same-axis joins reclaimed half-open major spans with
+    /// conditional finite-neighbour coverage, reusing prepared geometry;
+    /// sharper turns retain overlapping round joins (tan² > 1/8). Any,
+    /// coarse any and the fixed-width move trace kept their values.
     #[test]
     fn seeded_greedy_output_is_pinned() {
         let pinned = [
-            (ShapeKind::Any, 0x10bfbb1a786a1c4a),
-            (ShapeKind::Triangle, 0x0b2c1d60c966824f),
-            (ShapeKind::Rectangle, 0xd8f95f8e1f029eac),
-            (ShapeKind::Ellipse, 0xdd99e621c00e71b6),
-            (ShapeKind::Circle, 0x1cc7d6677aa8b599),
-            (ShapeKind::RotatedRectangle, 0x3f4a0794729f9615),
-            (ShapeKind::Quadratic, 0x523abbb2eb939ae9),
-            (ShapeKind::RotatedEllipse, 0xf9f17763932224cc),
-            (ShapeKind::Polygon, 0xb57dc794666b2a2b),
+            (ShapeKind::Any, 0xdf58536e3b570d1b),
+            (ShapeKind::Triangle, 0x550ccb3dea49c855),
+            (ShapeKind::Rectangle, 0x05fec499b8a6dc99),
+            (ShapeKind::Ellipse, 0x7c4c82a72acffcf9),
+            (ShapeKind::Circle, 0x59cfe3d24b9cc55f),
+            (ShapeKind::RotatedRectangle, 0x88d73cdfeca7a510),
+            (ShapeKind::Quadratic, 0x99743ce1939c5902),
+            (ShapeKind::RotatedEllipse, 0xf76bf821d5638e66),
+            (ShapeKind::Polygon, 0xb04e0c9956ea5777),
         ];
         assert_eq!(pinned.len(), every_kind().len());
         let actual: Vec<_> = pinned
@@ -1070,7 +1079,7 @@ mod tests {
         assert_eq!(actual, pinned);
         assert_eq!(
             digest(&seeded_drawing_of(42, 2, 2, ShapeKind::Any, true, COARSE)),
-            0x82420a134976eb5b,
+            0x10010aef3645248d,
             "with a coarse random phase"
         );
     }
@@ -1497,18 +1506,19 @@ mod tests {
         assert_consistent(&model, "quadratic width 1.5:6");
     }
 
-    /// The refit pass's climbs move the widths too. With butt caps: with
-    /// round ones, on this small target the curves of most seeds are all
-    /// at the widest, 6 px, before and after the pass.
+    /// The refit pass's climbs move the widths too. Start at a fixed 2 px
+    /// so the widths are not already saturated at 6 px after the greedy
+    /// search; then let the refit search the full 1.5–6 px interval.
     #[cfg(feature = "lab")]
     #[test]
     fn a_refit_pass_moves_quadratic_widths_within_their_bounds() {
         let mut model = stepped_model(5, (48, 36), ShapeKind::Quadratic, 0);
-        model.set_quadratic_width(1.5, 6.0);
+        model.set_quadratic_width(2.0, 2.0);
         model.set_quadratic_cap(LineCap::Butt);
         for _ in 0..8 {
             model.step(ShapeKind::Quadratic, Alpha::Auto);
         }
+        model.set_quadratic_width(1.5, 6.0);
         let before = quadratic_widths(&model.drawing());
         model.refine(Alpha::Auto);
         let after = quadratic_widths(&model.drawing());
@@ -1618,17 +1628,18 @@ mod tests {
 
     /// The refit's climbs per layer change the pass's parallelism, not its
     /// result: twice the default climbs give the same drawing on any number
-    /// of threads.
+    /// of threads. Seed 43 retains an effort-sensitive stack after the
+    /// shared quadratic joins changed the shapes adopted for seed 42.
     #[cfg(feature = "lab")]
     #[test]
     fn seeded_refine_at_a_higher_effort_is_independent_of_the_thread_count() {
         let drawing = |threads| {
-            refined_drawing_with(42, threads, true, |model| model.set_refine_effort(8, 25))
+            refined_drawing_with(43, threads, true, |model| model.set_refine_effort(8, 25))
         };
         let reference = drawing(1);
         assert_ne!(
             reference,
-            refined_drawing(42, 1, true),
+            refined_drawing(43, 1, true),
             "the effort changed nothing"
         );
         for threads in [2, 4, 8] {

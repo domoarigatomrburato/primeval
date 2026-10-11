@@ -691,14 +691,11 @@ mod tests {
         }
     }
 
-    /// On a finely fitted stack of polygons the joint optimisation's
-    /// result without a warm-up (`warmup: 0`, the steps before the default
-    /// warm-up of 5) is far worse than its input once rendered (its first
-    /// full steps and the snap move the small shapes, whatever its coverage
-    /// model); the final stage then returns its input, the drawing after
-    /// the refit passes. The default warm-up brings this case's ratio below
-    /// 1, so the test sets the pipeline's tuning to keep exercising the
-    /// guard.
+    /// On a finely fitted stack of polygons, aggressive joint steps
+    /// (`warmup: 0`, `step: 2`) export far worse than the input after the
+    /// refit passes, so the final stage returns that input. The 2 px step
+    /// keeps exercising this guard after the portable sampler changed the
+    /// seeded stack; the default pipeline still uses its gentler tuning.
     #[test]
     fn the_final_stage_keeps_its_input_when_the_joint_result_exports_worse() {
         let target = hard_shapes(24);
@@ -706,12 +703,15 @@ mod tests {
         let input = model.drawing();
         let tuning = joint::Tuning {
             warmup: 0,
+            step: 2.0,
             ..joint::Tuning::default()
         };
         let joint = tuned_joint_result(&model, tuning);
         assert!(
             png_error(&joint, &target) > 2 * png_error(&input, &target),
-            "the joint optimisation no longer worsens this case"
+            "the joint optimisation no longer worsens this case: {} -> {}",
+            png_error(&input, &target),
+            png_error(&joint, &target)
         );
         let mut pipeline = stages(Refits::Passes(0), Some(1));
         pipeline.joint_settings.tuning = tuning;
@@ -1476,10 +1476,10 @@ mod tests {
         (error as f64 / values).sqrt() / 255.0 / model.score_f64() - 1.0
     }
 
-    /// The PNG at the working size of a drawing with round or square caps
-    /// agrees with the engine's canvas as well as one with butt caps.
-    /// Measured after 16 quadratic steps: a gap of +1.05% with butt caps,
-    /// +0.43% with round ones and +0.49% with square ones.
+    /// Every cap meets its original engine/export gap bound. These are
+    /// different fitted drawings, so their errors need not be ordered:
+    /// clipping joins by true butt-cap tangents made butt's gap smaller
+    /// than round's on this seed, while both still meet their bounds.
     #[cfg(feature = "lab")]
     #[test]
     fn capped_quadratics_export_as_the_engine_covers_them() {
@@ -1496,7 +1496,7 @@ mod tests {
         for (cap, bound) in [(LineCap::Round, 0.005), (LineCap::Square, 0.0055)] {
             let gap = gap_of(cap);
             assert!(
-                gap.abs() <= bound && gap.abs() <= butt.abs(),
+                gap.abs() <= bound,
                 "{cap:?}: {gap:+.5} against butt's {butt:+.5}"
             );
         }
