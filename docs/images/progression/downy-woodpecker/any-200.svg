@@ -1,203 +1,203 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="788" viewBox="0 0 256 197" stroke-linecap="round">
 <rect width="256" height="197" fill="#d9ad68"/>
-<ellipse cx="201" cy="174.5" rx="34.609" ry="127.5" transform="rotate(122.312 201 174.5)" fill="#2a0924" fill-opacity="0.478"/>
-<ellipse cx="158.25" cy="79.75" rx="18.683" ry="47.25" transform="rotate(114.507 158.25 79.75)" fill="#0a0e46" fill-opacity="0.58"/>
-<ellipse cx="63.5" cy="32.25" rx="257.649" ry="65.25" transform="rotate(321.184 63.5 32.25)" fill="#ffcd79" fill-opacity="0.961"/>
-<ellipse cx="202.25" cy="133" rx="31.942" ry="21.5" transform="rotate(59.421 202.25 133)" fill="#d3b18b"/>
-<ellipse cx="252.75" cy="171.25" rx="25.056" ry="139.5" transform="rotate(65.225 252.75 171.25)" fill="#614436" fill-opacity="0.635"/>
-<circle cx="65.75" cy="191" r="74.5" fill="#fdcb62" fill-opacity="0.808"/>
-<ellipse cx="138.75" cy="101.25" rx="31.259" ry="18.5" transform="rotate(358.625 138.75 101.25)" fill="#fccf9d" fill-opacity="0.596"/>
-<ellipse cx="206.25" cy="50.75" rx="130.337" ry="32.5" transform="rotate(226.632 206.25 50.75)" fill="#fbc682" fill-opacity="0.765"/>
-<polygon points="188,73.25 214.75,115 229.25,154.25 154.75,64.5" fill="#241c24" fill-opacity="0.831"/>
-<polygon points="70,91 165.5,211.75 162.5,155" fill="#623c26" fill-opacity="0.682"/>
-<ellipse cx="129.25" cy="72.5" rx="15.429" ry="8.25" transform="rotate(63.02 129.25 72.5)" fill="#140200" fill-opacity="0.671"/>
-<polygon points="85.832,67.63 91.332,126.63 13.668,133.87 8.168,74.87" fill="#fac164" fill-opacity="0.98"/>
-<polygon points="221,174.25 176,140.5 140,57.5 167.75,76.75" fill="#c1a08c" fill-opacity="0.914"/>
-<ellipse cx="85" cy="19" rx="116.894" ry="41.25" transform="rotate(8.858 85 19)" fill="#ffdab2" fill-opacity="0.353"/>
-<path d="M155.137 73.355 Q191.684 90.355 204.435 110.829" fill="none" stroke="#c9d2ed" stroke-opacity="0.22" stroke-width="6"/>
-<ellipse cx="241" cy="117.75" rx="29.649" ry="20.75" transform="rotate(109.199 241 117.75)" fill="#f4bf5e" fill-opacity="0.984"/>
-<polygon points="153.25,60.25 136,49.5 144.5,81.75" fill="#000016" fill-opacity="0.62"/>
-<ellipse cx="237.75" cy="12" rx="22.216" ry="69" transform="rotate(309.063 237.75 12)" fill="#fdb845" fill-opacity="0.667"/>
-<path d="M159.027 110.92 Q141.882 88.506 136.009 59.887" fill="none" stroke="#fff7f3" stroke-opacity="0.745" stroke-width="6"/>
-<polygon points="258.75,203.25 264.75,127.75 240,153.5 239,163" fill="#382214" fill-opacity="0.769"/>
-<path d="M211.75 97.67 Q183.419 94.77 178.032 92.309" fill="none" stroke="#ede9f5" stroke-opacity="0.792" stroke-width="3.21"/>
-<path d="M213.476 160.125 Q194.489 140.881 173.618 131.56" fill="none" stroke="#f5eee4" stroke-opacity="0.949" stroke-width="6"/>
-<polygon points="173.25,178 194.75,206.75 194.25,166.25 194,164.75" fill="#39241f" fill-opacity="0.714"/>
-<polygon points="223.75,161.25 208.25,167.5 223.75,184 244.5,198.5" fill="#31211b" fill-opacity="0.847"/>
-<path d="M133.383 53.992 Q123.131 55.922 121.22 63.885" fill="none" stroke="#fd5f01" stroke-opacity="0.792" stroke-width="5.442"/>
-<polygon points="196.75,114 181.5,102.75 173,92.5 207,107.5" fill="#1a0f0a" fill-opacity="0.769"/>
-<ellipse cx="70.75" cy="179" rx="27.75" ry="82.25" fill="#ffc936" fill-opacity="0.416"/>
-<ellipse cx="-1.5" cy="130.25" rx="26.251" ry="47" transform="rotate(340.53 -1.5 130.25)" fill="#f6e6b7" fill-opacity="0.294"/>
-<path d="M179.067 105.301 Q205.278 128.987 215.883 135.657" fill="none" stroke="#d1c4c5" stroke-opacity="0.702" stroke-width="6"/>
-<polygon points="139,110.25 223.5,159.5 226.25,153.5 167.5,110.75" fill="#b98443" fill-opacity="0.608"/>
-<polygon points="122.75,155.75 85.5,112 101.75,105.5 130.75,144.5" fill="#3f1f07" fill-opacity="0.576"/>
-<polygon points="52,66.5 90.5,98.25 143.5,112.5 115.5,66.5" fill="#fbc363" fill-opacity="0.965"/>
-<polygon points="183,168.25 176.5,212.5 157,140 172.25,139" fill="#bb8460" fill-opacity="0.549"/>
-<polygon points="153.75,63.75 144.5,47.5 170,66.75" fill="#fefcfd" fill-opacity="0.675"/>
-<rect x="185.5" y="102.5" width="17.5" height="2.5" fill="#d9c5b8" fill-opacity="0.69"/>
-<polygon points="139.5,83.75 140.25,97 141,102 153.75,71" fill="#443431" fill-opacity="0.89"/>
-<polygon points="241.5,174 233.75,176.25 231.75,160.5 240,160.25" fill="#e3c1ad" fill-opacity="0.463"/>
-<polygon points="120,151.5 160.5,211 106,173.75" fill="#f8c96c" fill-opacity="0.875"/>
-<path d="M183.66 98.902 Q199.485 100.228 201.508 96.837" fill="none" stroke="#1d1615" stroke-opacity="0.816" stroke-width="4.643"/>
-<polygon points="211.75,184.5 237,195.75 218,177.5" fill="#f9c3a3" fill-opacity="0.541"/>
-<polygon points="210.25,165.25 195.5,155.75 181,137.75 196.25,143.75" fill="#ffd771" fill-opacity="0.929"/>
-<path d="M207.605 121.352 Q215.603 121.742 216.07 123.076" fill="none" stroke="#cdc1bf" stroke-width="3.412"/>
-<polygon points="86,105 92.75,92.75 100.75,97.75 88.5,109" fill="#795135" fill-opacity="0.965"/>
-<path d="M151.984 64.704 Q152.058 69.077 150.123 70.385" fill="none" stroke="#e8e0dc" stroke-opacity="0.78" stroke-width="4.843"/>
-<polygon points="183,89 193.75,88.75 183,93" fill="#fbf2fc" fill-opacity="0.761"/>
-<path d="M206.864 110.99 Q201.412 106.096 166.334 133.024" fill="none" stroke="#cbbcb5" stroke-opacity="0.98" stroke-width="3.609"/>
-<path d="M142.876 55.363 Q144.557 80.794 140.464 80.735" fill="none" stroke="#312220" stroke-opacity="0.886" stroke-width="4.805"/>
-<polygon points="209.5,170 192.25,205.25 211.5,186.5 216,174.75" fill="#d3977d" fill-opacity="0.561"/>
-<path d="M202.534 117.598 Q204.657 112.675 210.173 117.764" fill="none" stroke="#1e1209" stroke-opacity="0.686" stroke-width="5.481"/>
-<polygon points="240.5,150.25 210.75,188.75 212,178 226.75,156.75" fill="#301d18"/>
-<path d="M148.36 111.15 Q147.536 142.428 168.356 143.229" fill="none" stroke="#2e1b18" stroke-opacity="0.349" stroke-width="5.309"/>
-<path d="M154.897 121.827 Q157.737 97.289 150.788 95.317" fill="none" stroke="#efe8e7" stroke-opacity="0.42" stroke-width="6"/>
-<polygon points="161.25,62.5 130.25,40.5 198.75,65.25 205.75,74.75" fill="#f9bc5b"/>
-<polygon points="186.5,167.5 166.5,164 152.5,152.25 184.75,161.75" fill="#fbe6e9" fill-opacity="0.525"/>
-<polygon points="223,133.5 183.5,59 271.5,40 235,155.5" fill="#f8c262" fill-opacity="0.933"/>
-<path d="M198.56 182.725 Q198.64 160.764 182.74 146.468" fill="none" stroke="#b69187" stroke-opacity="0.804" stroke-width="4.221"/>
-<path d="M167.078 158.853 Q149.174 144.161 119.22 103.485" fill="none" stroke="#946a46" stroke-width="5.328"/>
-<ellipse cx="224.5" cy="25" rx="21.287" ry="15" transform="rotate(123.503 224.5 25)" fill="#d2954f" fill-opacity="0.573"/>
-<path d="M254.341 201.51 Q217.804 199.059 219.761 188.6" fill="none" stroke="#3c261c" stroke-opacity="0.663" stroke-width="6"/>
-<polygon points="116.75,113.75 120,118.25 138.5,116.25 144,102.25" fill="#e4d8da" fill-opacity="0.655"/>
-<ellipse cx="81.5" cy="59" rx="69.669" ry="10" transform="rotate(165.665 81.5 59)" fill="#fec977" fill-opacity="0.514"/>
-<polygon points="159.5,189.25 144.75,186.5 138,175.25 180,165.25" fill="#81583e"/>
-<polygon points="137,127.5 114.5,112.75 115.5,120.75 156.25,164.25" fill="#b37d4f" fill-opacity="0.627"/>
-<path d="M195.33 104.326 Q202.556 102.782 206.927 103.675" fill="none" stroke="#dfdceb" stroke-opacity="0.694" stroke-width="4.236"/>
-<path d="M232.776 151.964 Q233.355 151.553 221.502 135.478" fill="none" stroke="#000149" stroke-opacity="0.608" stroke-width="2"/>
-<path d="M241.479 149.374 Q256.098 141.14 259.532 162.446" fill="none" stroke="#72584e" stroke-opacity="0.894" stroke-width="4.403"/>
-<ellipse cx="36" cy="34.5" rx="28.5" ry="31.75" fill="#ffdb99" fill-opacity="0.451"/>
-<polygon points="109.25,102.5 99,105.25 86.5,95.75 99.25,94" fill="#d2bcb6" fill-opacity="0.69"/>
-<polygon points="189.25,156.5 177.75,143 183.75,159.75 192.5,175.25" fill="#573f40" fill-opacity="0.988"/>
-<rect x="202" y="128.5" width="14.5" height="4.5" fill="#d7c7bf"/>
-<path d="M152.927 155.588 Q151.07 146.962 139.978 137.81" fill="none" stroke="#00000e" stroke-opacity="0.369" stroke-width="4.606"/>
-<polygon points="198.75,93 165.5,74.25 167.5,65 176.75,68.5" fill="#18171c" fill-opacity="0.584"/>
-<polygon points="243.5,38.5 214.25,52 222.75,96.25 243.5,82" fill="#fdcd81" fill-opacity="0.769"/>
-<polygon points="243.75,196 246.25,172.75 233,189.75" fill="#251101" fill-opacity="0.722"/>
-<polygon points="226.5,135.75 231.25,155.25 260.25,131.5 233.75,134.75" fill="#faba2b" fill-opacity="0.396"/>
-<path d="M166.241 209.653 Q132.154 165.046 117.617 138.678" fill="none" stroke="#73482c" stroke-opacity="0.812" stroke-width="6"/>
-<circle cx="167.5" cy="122.5" r="7.75" fill="#412c20" fill-opacity="0.514"/>
-<path d="M136.936 50.703 Q152.019 55.014 163.653 66.021" fill="none" stroke="#e8ebff" stroke-opacity="0.608" stroke-width="2.814"/>
-<path d="M176.595 83.763 Q171.066 99.801 151.104 83.947" fill="none" stroke="#b5998a" stroke-width="4.106"/>
-<path d="M208.915 102.501 Q211.008 95.668 179.146 65.031" fill="none" stroke="#f6ba5a" stroke-width="4.818"/>
-<ellipse cx="71.5" cy="196.75" rx="18.456" ry="35.5" transform="rotate(65.171 71.5 196.75)" fill="#f0bb57" fill-opacity="0.878"/>
-<path d="M259.067 172.731 Q250.706 180.715 251.208 182.442" fill="none" stroke="#ba8962" stroke-opacity="0.69" stroke-width="2"/>
-<path d="M193.349 156.787 Q212.853 170.838 209.808 174.306" fill="none" stroke="#bc9994" stroke-opacity="0.616" stroke-width="2.891"/>
-<ellipse cx="61" cy="152" rx="13.901" ry="46.5" transform="rotate(322.306 61 152)" fill="#ffd600" fill-opacity="0.11"/>
-<polygon points="215.5,130.75 209.75,127.75 208.25,117.25" fill="#1f0f07" fill-opacity="0.871"/>
-<ellipse cx="15.75" cy="96.5" rx="124.244" ry="15.75" transform="rotate(75.432 15.75 96.5)" fill="#ffce66" fill-opacity="0.451"/>
-<polygon points="107.25,104.5 117,113.75 101.25,125 96.5,119.5" fill="#794620" fill-opacity="0.439"/>
-<path d="M164.727 123.282 Q166.163 136.047 177.616 164.559" fill="none" stroke="#94827d" stroke-opacity="0.984" stroke-width="3.243"/>
-<path d="M124.874 111.766 Q150.552 115.096 151.958 120.621" fill="none" stroke="#bb937d" stroke-width="3.022"/>
-<ellipse cx="245.5" cy="196.5" rx="11.524" ry="1.5" transform="rotate(130.601 245.5 196.5)" fill="#a07655"/>
-<path d="M240.275 176.768 Q245.466 177.201 247.806 174.965" fill="none" stroke="#ffd3b3" stroke-opacity="0.435" stroke-width="2.821"/>
-<polygon points="256.709,192.257 257.709,198.257 251.791,199.243 250.791,193.243" fill="#332011"/>
-<path d="M173.741 86.176 Q178.086 84.231 185.988 93.055" fill="none" stroke="#060004" stroke-opacity="0.686" stroke-width="2.175"/>
-<polygon points="148,95.25 151.25,106.75 140.25,105 145.25,88.75" fill="#f4c45f" fill-opacity="0.91"/>
-<path d="M148.919 144.816 Q158.863 149.4 177.513 181.01" fill="none" stroke="#bf8f6c" stroke-opacity="0.741" stroke-width="3.457"/>
-<path d="M204.366 123.411 Q203.424 128.596 174.752 120.713" fill="none" stroke="#a98b6e" stroke-opacity="0.682" stroke-width="5.671"/>
-<polygon points="197,174 200,165.25 204.25,166 210.25,194.75" fill="#1a1017" fill-opacity="0.365"/>
-<path d="M136.385 89.927 Q138.705 90.289 141.82 82.297" fill="none" stroke="#ffd29e" stroke-opacity="0.631" stroke-width="3.903"/>
-<circle cx="219.5" cy="154.25" r="3" fill="#8b5f2b" fill-opacity="0.741"/>
-<ellipse cx="126.75" cy="162.25" rx="7.558" ry="1" transform="rotate(55.784 126.75 162.25)" fill="#e6daff" fill-opacity="0.557"/>
-<path d="M176.549 123.5 Q166.951 127.451 161.416 119.462" fill="none" stroke="#d3c4be" stroke-opacity="0.675" stroke-width="2"/>
-<polygon points="-15,-1.75 -3.75,8 87.5,0.5 12.25,-15.25" fill="#fcd79f"/>
-<path d="M227.357 154.289 Q227.005 151.895 219.958 143.506" fill="none" stroke="#e0d9da" stroke-opacity="0.976" stroke-width="2.642"/>
-<path d="M190.987 94.112 Q192.502 87.764 186.268 89.603" fill="none" stroke="#bbb9ca" stroke-width="2.028"/>
-<polygon points="137,122 141.5,127 145.5,108.5 126.25,108.75" fill="#d6af8f" fill-opacity="0.682"/>
-<path d="M86.222 111.528 Q98.978 99.512 101.927 101.304" fill="none" stroke="#fffcff" stroke-opacity="0.384" stroke-width="2.289"/>
-<rect x="185.5" y="-4" width="30" height="71.5" fill="#f1be7f" fill-opacity="0.373"/>
-<path d="M146.764 76.325 Q137.108 97.734 155.478 115.029" fill="none" stroke="#fcd692" stroke-opacity="0.537" stroke-width="2.231"/>
-<path d="M158.918 163.803 Q167.44 183.38 185.171 200.464" fill="none" stroke="#d5a385" stroke-opacity="0.286" stroke-width="3.073"/>
-<path d="M177.964 159.48 Q167.652 169.573 165.152 166.118" fill="none" stroke="#dec5bd" stroke-opacity="0.569" stroke-width="3.934"/>
-<polygon points="227.75,153.5 158.25,86 157.75,109 196,136.25" fill="#b9987b" fill-opacity="0.482"/>
-<path d="M128.146 114.402 Q139.379 106.372 154.469 116.868" fill="none" stroke="#965635" stroke-opacity="0.424" stroke-width="2.472"/>
-<path d="M159.744 156.037 Q159.047 146.98 159.751 130.136" fill="none" stroke="#dca162" stroke-opacity="0.376" stroke-width="4.166"/>
-<polygon points="167.25,70.25 186.25,83 167.75,81.25" fill="#0b0a10" fill-opacity="0.51"/>
-<circle cx="183" cy="88.25" r="1.5" fill="#fffbff" fill-opacity="0.812"/>
-<polygon points="122.25,75.25 128.75,63.75 141,81.5" fill="#150f08" fill-opacity="0.894"/>
-<polygon points="247.5,144.75 252,139.75 253.75,151.5" fill="#86706f" fill-opacity="0.973"/>
-<polygon points="139.25,58.75 136.75,52 124.5,61 125.5,63" fill="#f7af8d" fill-opacity="0.808"/>
-<polygon points="168.75,168.75 178,155.5 178.25,141.75 167,148.25" fill="#b8896f" fill-opacity="0.847"/>
-<polygon points="203.25,151.75 196.5,147.75 196.25,155.5 207.5,163.75" fill="#fbca51" fill-opacity="0.973"/>
-<path d="M209.063 163.937 Q213.237 158.7 206.617 157.703" fill="none" stroke="#eee7e0" stroke-opacity="0.996" stroke-width="2.595"/>
-<path d="M165.652 114.686 Q172.513 95.675 149.116 87.349" fill="none" stroke="#b1825a" stroke-opacity="0.573" stroke-width="5.778"/>
-<path d="M160.075 195.85 Q166.84 205.202 176.564 193.626" fill="none" stroke="#b18267" stroke-opacity="0.463" stroke-width="5.765"/>
-<path d="M157.712 148.249 Q145.095 136.473 126.963 122.907" fill="none" stroke="#cb9e74" stroke-opacity="0.655" stroke-width="2.501"/>
-<path d="M213.535 190.967 Q226.791 184.571 239.195 212" fill="none" stroke="#43271a" stroke-opacity="0.518" stroke-width="5.744"/>
-<polygon points="40.25,94.25 46.75,122.75 90.25,101.75 82.75,81.5" fill="#fbbe59" fill-opacity="0.816"/>
-<path d="M245.876 189.479 Q245.615 187.489 243.196 183.275" fill="none" stroke="#ffc169" stroke-opacity="0.329" stroke-width="3.472"/>
-<polygon points="171.75,87.25 173,96.25 174.5,96.75 187.25,96" fill="#786970" fill-opacity="0.478"/>
-<path d="M196.327 111.409 Q191.157 104.012 188.922 106.248" fill="none" stroke="#261a13" stroke-width="2.287"/>
-<polygon points="246.983,155.529 244.483,175.529 240.017,174.971 242.517,154.971" fill="#190e09" fill-opacity="0.69"/>
-<path d="M134.457 66.908 Q148.596 75.413 150.391 71.192" fill="none" stroke="#ccbaaf" stroke-opacity="0.286" stroke-width="2.751"/>
-<path d="M226.581 166.249 Q228.421 167.887 215.684 188.295" fill="none" stroke="#ffc5c1" stroke-opacity="0.173" stroke-width="6"/>
-<path d="M188.455 102.295 Q188.747 103.043 188.171 103.206" fill="none" stroke="#c1b1ae" stroke-width="2.077"/>
-<polygon points="252.267,42.805 207.267,61.305 200.233,44.195 245.233,25.695" fill="#f6b965" fill-opacity="0.616"/>
-<path d="M216.521 159.226 Q203.381 146.966 191.785 125.399" fill="none" stroke="#deae68" stroke-opacity="0.333" stroke-width="5.638"/>
-<path d="M153.952 70.765 Q156.406 65.706 157.535 64.272" fill="none" stroke="#000000" stroke-opacity="0.565" stroke-width="2"/>
-<path d="M169.42 162.156 Q178.592 170.704 181.145 182.913" fill="none" stroke="#b37b53" stroke-opacity="0.659" stroke-width="2.439"/>
-<ellipse cx="50.5" cy="32.5" rx="12.87" ry="81" transform="rotate(82.185 50.5 32.5)" fill="#fff2dd" fill-opacity="0.094"/>
-<polygon points="67.75,137.5 100.5,131.5 134.5,169.25 111.75,183" fill="#fce687" fill-opacity="0.243"/>
-<path d="M95.546 124.951 Q101.76 131.013 117.609 152.307" fill="none" stroke="#f2e2dd" stroke-opacity="0.467" stroke-width="2"/>
-<path d="M228.8 171.95 Q232.779 193.705 242.921 188.972" fill="none" stroke="#271810" stroke-opacity="0.698" stroke-width="4.107"/>
-<polygon points="135.25,25.5 189.75,64.5 125.75,44.5 125.5,39" fill="#feca78" fill-opacity="0.565"/>
-<polygon points="8.5,60.25 -7.75,6.25 31,13.5 42,76.25" fill="#ffd282" fill-opacity="0.416"/>
-<polygon points="211,185.5 198.25,201.75 192.25,173.5 212.75,183" fill="#885f48" fill-opacity="0.663"/>
-<path d="M121.455 70.765 Q128.298 63.636 132.407 65.888" fill="none" stroke="#3a2e2f" stroke-opacity="0.545" stroke-width="6"/>
-<polygon points="177.25,146.5 174.5,137.5 174.25,153.5 177.5,157.5" fill="#100000" fill-opacity="0.502"/>
-<polygon points="161.25,142.5 183.75,153 177,143.75 161.75,139.75" fill="#fbb786" fill-opacity="0.286"/>
-<path d="M137.6 153.398 Q149.85 169.322 159.519 152.09" fill="none" stroke="#fab685" stroke-opacity="0.157" stroke-width="4.504"/>
-<path d="M157.235 121.048 Q141.448 124.455 133.355 115.799" fill="none" stroke="#894f2b" stroke-opacity="0.384" stroke-width="2.272"/>
-<polygon points="184.18,95.552 180.68,98.052 176.32,91.948 179.82,89.448" fill="#dccac4" fill-opacity="0.631"/>
-<path d="M157.997 121.658 Q167.751 132.259 184.671 127.846" fill="none" stroke="#937b67" stroke-opacity="0.655" stroke-width="3.179"/>
-<path d="M136.882 102.095 Q138.813 94.035 126.161 85.374" fill="none" stroke="#f9c562" stroke-opacity="0.996" stroke-width="5.938"/>
-<path d="M228.503 151.088 Q218.885 138.297 221.857 136.528" fill="none" stroke="#040000" stroke-opacity="0.612" stroke-width="2"/>
-<polygon points="222.5,139.75 225.25,142.75 271.5,132.25 254.75,65.5" fill="#f6c356" fill-opacity="0.443"/>
-<ellipse cx="224.75" cy="151.5" rx="1.061" ry="1" transform="rotate(225 224.75 151.5)" fill="#533d3b"/>
-<ellipse cx="120" cy="108" rx="2.151" ry="1" transform="rotate(144.462 120 108)" fill="#ecd4bc" fill-opacity="0.8"/>
-<polygon points="184.25,148.75 192,122 199.75,112 202.75,125.25" fill="#edd7b0" fill-opacity="0.247"/>
-<polygon points="125,9.5 77.25,6 122.25,-15.5 205.75,14.75" fill="#fdcd85" fill-opacity="0.667"/>
-<ellipse cx="231.75" cy="154.5" rx="2.5" ry="2.75" fill="#fff3cf" fill-opacity="0.271"/>
-<path d="M147.601 127.621 Q136.26 122.825 146.085 115.4" fill="none" stroke="#bd8b6c" stroke-opacity="0.635" stroke-width="2.726"/>
-<path d="M99.554 112.894 Q142.776 170.099 162.428 197.481" fill="none" stroke="#f89444" stroke-opacity="0.137" stroke-width="4.327"/>
-<polygon points="148.25,55.75 137.5,55.25 139,62.75 147.25,73.5" fill="#151925" fill-opacity="0.561"/>
-<rect x="164.5" y="76" width="5" height="10.5" fill="#e9e0e9" fill-opacity="0.357"/>
-<path d="M168.936 128.468 Q160.251 123.727 147.442 134.184" fill="none" stroke="#44280c" stroke-opacity="0.373" stroke-width="2.09"/>
-<path d="M131.569 140.192 Q134.037 156.877 146.539 170.149" fill="none" stroke="#261000" stroke-opacity="0.325" stroke-width="2.55"/>
-<polygon points="65.5,70.75 115.75,91.25 121.5,64.75 119.75,54.25" fill="#ffc86d" fill-opacity="0.369"/>
-<path d="M173.234 79.504 Q187.852 82.702 186.506 86.414" fill="none" stroke="#161316" stroke-opacity="0.776" stroke-width="3.447"/>
-<polygon points="199.5,110.5 205.75,117 200.75,118" fill="#1d130d" fill-opacity="0.961"/>
-<path d="M142.024 138.186 Q127.381 135.034 97.948 110.764" fill="none" stroke="#8f5c36" stroke-opacity="0.545" stroke-width="2.243"/>
-<circle cx="163.75" cy="73.25" r="3.5" fill="#2c2c3a" fill-opacity="0.357"/>
-<polygon points="119,153.75 91,120.25 18.5,132" fill="#ffcb52" fill-opacity="0.58"/>
-<path d="M202.797 161.295 Q201.411 160.768 190.873 161.625" fill="none" stroke="#a6867e" stroke-width="3.409"/>
-<polygon points="59.75,131.5 -1.25,174.5 39.5,208" fill="#ffd06d" fill-opacity="0.384"/>
-<path d="M184.127 157.891 Q177.993 160.21 167.608 191.766" fill="none" stroke="#9f6b50" stroke-opacity="0.506" stroke-width="5.516"/>
-<path d="M201.338 168.535 Q184.046 139.865 179.581 139.085" fill="none" stroke="#9d766b" stroke-opacity="0.62" stroke-width="2.177"/>
-<polygon points="247.75,184.5 248.25,169 242.25,165.5" fill="#664a37" fill-opacity="0.682"/>
-<polygon points="172.5,178.75 205.25,211.5 203,210.5 173.75,182.5" fill="#4e3224" fill-opacity="0.937"/>
-<polygon points="47.25,173 76.5,182 65.5,212.5 -9.5,201" fill="#f9c558" fill-opacity="0.525"/>
-<polygon points="202.75,74.25 271.5,62 212.75,112.5 208.75,108.75" fill="#f9c86c" fill-opacity="0.608"/>
-<polygon points="144,159.75 144,160.75 158,150.5 156.75,150" fill="#462b1d"/>
-<polygon points="137.25,87 138,86.5 145.25,88 142,103" fill="#7e6e80" fill-opacity="0.659"/>
-<rect x="184.5" y="90.5" width="9.5" height="1.5" fill="#201920" fill-opacity="0.988"/>
-<path d="M252.304 159.235 Q263.658 153.367 252.888 145.587" fill="none" stroke="#57402e" stroke-width="3.384"/>
-<polygon points="181.338,87.309 182.338,85.809 188.162,89.691 187.162,91.191" fill="#dbdae8" fill-opacity="0.824"/>
-<polygon points="141.5,110 145.5,104.5 144.5,112" fill="#6a301e" fill-opacity="0.553"/>
-<polygon points="247.211,166.606 250.211,160.606 253.789,162.394 250.789,168.394" fill="#20120a" fill-opacity="0.863"/>
-<path d="M218.054 142.997 Q203.058 124.215 187.463 108.411" fill="none" stroke="#cfbfb8" stroke-opacity="0.98" stroke-width="2.137"/>
-<polygon points="242.75,30.25 263.5,17.75 227.75,-2.5 238,31.75" fill="#f0a73d" fill-opacity="0.537"/>
-<ellipse cx="211.25" cy="181.5" rx="1.904" ry="1" transform="rotate(23.199 211.25 181.5)" fill="#d3ada5"/>
-<polygon points="175,139.5 172.25,132.75 177.25,135.5 177.75,137.75" fill="#fbd478"/>
-<polygon points="136.25,85 120,75.5 141.75,79.25" fill="#181008" fill-opacity="0.922"/>
-<polygon points="162.505,146.844 172.505,158.344 170.995,159.656 160.995,148.156" fill="#cfc3bf" fill-opacity="0.376"/>
-<polygon points="95,100 95.75,93.5 103.25,96.75 108,101" fill="#1b0d39" fill-opacity="0.29"/>
-<path d="M162.303 129.639 Q165.456 147.82 172.393 156.242" fill="none" stroke="#7a563f" stroke-width="2"/>
-<polygon points="205.5,165.25 220.75,163.25 221.5,166 214.5,171.5" fill="#6e5352" fill-opacity="0.655"/>
-<polygon points="-15.5,161.5 34,159.25 37.75,142.75 -6.75,132.5" fill="#f8f4ff" fill-opacity="0.086"/>
-<rect x="255.5" y="182" width="4.5" height="3.5" fill="#f5c294" fill-opacity="0.718"/>
-<polygon points="235.75,181.5 232.25,187.25 203,162.5 220.75,170.75" fill="#493025" fill-opacity="0.678"/>
-<path d="M251.377 153.523 Q245.262 160.112 242.197 155.961" fill="none" stroke="#311e11" stroke-width="4.547"/>
-<ellipse cx="172.25" cy="136" rx="4.301" ry="1" transform="rotate(215.538 172.25 136)" fill="#42251b" fill-opacity="0.788"/>
+<ellipse cx="202.5" cy="174.25" rx="40.778" ry="128.75" transform="rotate(300.181 202.5 174.25)" fill="#66433b" fill-opacity="0.776"/>
+<ellipse cx="153.5" cy="76" rx="46.098" ry="18.25" transform="rotate(204.341 153.5 76)" fill="#230b49" fill-opacity="0.51"/>
+<ellipse cx="73.25" cy="-0.25" rx="151.225" ry="74" transform="rotate(349.619 73.25 -0.25)" fill="#ffd491" fill-opacity="0.965"/>
+<ellipse cx="198" cy="127" rx="25.116" ry="32.75" transform="rotate(337.775 198 127)" fill="#c39c70"/>
+<circle cx="54.75" cy="174.25" r="64.25" fill="#f7c558"/>
+<ellipse cx="246.5" cy="175.25" rx="24.219" ry="64.75" transform="rotate(225.418 246.5 175.25)" fill="#3d2617" fill-opacity="0.757"/>
+<ellipse cx="188" cy="92.25" rx="10.259" ry="40.75" transform="rotate(316.975 188 92.25)" fill="#101631" fill-opacity="0.682"/>
+<ellipse cx="140.75" cy="100.25" rx="34.008" ry="19" transform="rotate(181.264 140.75 100.25)" fill="#ffd27d" fill-opacity="0.541"/>
+<polygon points="238.479,149.049 178.479,59.549 242.021,16.951 302.021,106.451" fill="#fbc15b" fill-opacity="0.906"/>
+<ellipse cx="38.75" cy="104.25" rx="89.757" ry="32.25" transform="rotate(156.005 38.75 104.25)" fill="#fec56a" fill-opacity="0.816"/>
+<polygon points="140.5,82 131.25,62 115.25,74.75 134.5,87.25" fill="#060000" fill-opacity="0.718"/>
+<ellipse cx="117" cy="134" rx="9.737" ry="42.25" transform="rotate(318.122 117 134)" fill="#432106" fill-opacity="0.659"/>
+<polygon points="209,165 165.25,128.25 189.75,138 221,158.75" fill="#f2debe" fill-opacity="0.984"/>
+<polygon points="93,204.5 113.25,147 169.5,193" fill="#f8c869" fill-opacity="0.988"/>
+<polygon points="161.25,67.5 204,55.75 214.25,-15.5 133.75,42.75" fill="#f9ca90" fill-opacity="0.839"/>
+<polygon points="151,154.25 115,146 162.75,210.5 221.75,184.75" fill="#78503a" fill-opacity="0.965"/>
+<polygon points="229.75,154.5 218.5,141 186.25,101.5 214,115" fill="#241814" fill-opacity="0.902"/>
+<path d="M139.159 54.368 Q168.518 73.452 187.73 84.649" fill="none" stroke="#10121b" stroke-opacity="0.663" stroke-width="6"/>
+<path d="M153.305 61.454 Q141.628 83.186 193.799 97.217" fill="none" stroke="#e3dde4" stroke-opacity="0.875" stroke-width="5.062"/>
+<ellipse cx="-8.75" cy="98.5" rx="99.707" ry="36" transform="rotate(65.877 -8.75 98.5)" fill="#fccd72" fill-opacity="0.91"/>
+<path d="M139.294 75.602 Q138.185 59.923 129.786 55.114" fill="none" stroke="#fff6ec" stroke-opacity="0.722" stroke-width="5.554"/>
+<polygon points="240,159.25 223.5,164.25 233,175 240.75,177.25" fill="#9e7b66" fill-opacity="0.988"/>
+<ellipse cx="254.75" cy="12" rx="29.459" ry="78" transform="rotate(120.046 254.75 12)" fill="#f7b244" fill-opacity="0.757"/>
+<polygon points="187,163.75 134.5,125.75 167.75,167.75 178,180.25" fill="#ecb893" fill-opacity="0.533"/>
+<polygon points="196,168.5 193.25,207.5 180.25,187.25 188.25,163" fill="#01000b" fill-opacity="0.388"/>
+<path d="M133.202 54.131 Q124.951 54.571 121.206 63.099" fill="none" stroke="#f45b00" stroke-opacity="0.839" stroke-width="5.521"/>
+<polygon points="202.5,97.75 173.25,95 182,105 203,99" fill="#211918" fill-opacity="0.937"/>
+<polygon points="156.75,121.5 146,90 147,89.25 163.75,101.75" fill="#f5eee9" fill-opacity="0.933"/>
+<polygon points="141.75,56.5 140.25,81 147.75,73.75 145,57.5" fill="#36302f" fill-opacity="0.784"/>
+<ellipse cx="200.5" cy="103.5" rx="7.25" ry="2" fill="#c6c8e3" fill-opacity="0.725"/>
+<path d="M216.167 135.626 Q193.741 121.609 175.73 100.478" fill="none" stroke="#d4c8cc" stroke-opacity="0.725" stroke-width="6"/>
+<polygon points="206,172 237.75,193.5 229.5,151" fill="#1e1421" fill-opacity="0.388"/>
+<polygon points="146,63.75 188.5,89.5 170,112.5 160.75,110.25" fill="#b69e97" fill-opacity="0.627"/>
+<polygon points="236.75,194.75 234.75,196 216,182.75 218.5,178.25" fill="#cf9e84" fill-opacity="0.804"/>
+<polygon points="113.75,66 24.75,78 127.5,109 144,106" fill="#fcc467" fill-opacity="0.949"/>
+<polygon points="92.75,108 85.75,90.5 102,95.75 109,102.25" fill="#a6897d"/>
+<rect x="241" y="153.5" width="10.5" height="18" fill="#301f13" fill-opacity="0.957"/>
+<ellipse cx="148.75" cy="155.5" rx="31.942" ry="8.75" transform="rotate(276.291 148.75 155.5)" fill="#2e1801" fill-opacity="0.165"/>
+<ellipse cx="225.75" cy="75.5" rx="37.492" ry="17.75" transform="rotate(114.001 225.75 75.5)" fill="#ffd89a" fill-opacity="0.345"/>
+<path d="M206.954 110.992 Q198.686 109.008 198.705 113.052" fill="none" stroke="#c1b5b3" stroke-opacity="0.992" stroke-width="3.262"/>
+<path d="M216.4 123.097 Q206.705 118.189 196.492 129.923" fill="none" stroke="#d0c3bf" stroke-width="3.158"/>
+<polygon points="153.5,70.5 137.75,88.5 141.75,98.25" fill="#322d4a" fill-opacity="0.463"/>
+<ellipse cx="202.5" cy="172.75" rx="4.5" ry="7" fill="#3b2927" fill-opacity="0.686"/>
+<polygon points="25.75,156 -9.5,57.75 -9,178.25 21,170" fill="#fbd27f"/>
+<polygon points="157,68 149.5,69.5 174.5,92.5 168,76.75" fill="#fff9f6" fill-opacity="0.396"/>
+<path d="M178.607 139.776 Q189.053 145.609 196.715 170.453" fill="none" stroke="#ae877a" stroke-width="4.673"/>
+<path d="M186.363 107.47 Q220.061 142.877 227.556 153.926" fill="none" stroke="#d2c5c1" stroke-width="3.19"/>
+<path d="M163.81 65.502 Q143.331 50.287 137.628 50.403" fill="none" stroke="#deebff" stroke-opacity="0.702" stroke-width="3.558"/>
+<ellipse cx="70.75" cy="140.25" rx="23.5" ry="44.25" fill="#ffcd37" fill-opacity="0.475"/>
+<polygon points="114.25,115.25 143.25,118 148.25,106.5 137.5,104.5" fill="#f3e0de" fill-opacity="0.58"/>
+<polygon points="260,111.25 260,111 144.25,40.25 127.25,43" fill="#fbbe5c" fill-opacity="0.631"/>
+<polygon points="162.5,168.5 180.25,212.5 173.75,142.25 168,133.75" fill="#cda186" fill-opacity="0.718"/>
+<path d="M186.063 92.617 Q179.382 85.798 176.936 89.815" fill="none" stroke="#221b1e" stroke-opacity="0.949" stroke-width="2.435"/>
+<polygon points="234.75,154.5 270.75,114 271.25,88.75 206.75,103" fill="#f6c15a" fill-opacity="0.949"/>
+<path d="M187.387 141.92 Q203.343 155.444 202.332 156.834" fill="none" stroke="#ffcc35" stroke-opacity="0.584" stroke-width="6"/>
+<polygon points="168,115.75 138.25,109.5 104.75,116.25 133,140" fill="#9b6d4c" fill-opacity="0.62"/>
+<polygon points="118,99.25 127.5,109 124.5,112.5 116.25,108.25" fill="#2f2033" fill-opacity="0.596"/>
+<ellipse cx="27.75" cy="96" rx="15.35" ry="52.25" transform="rotate(343.926 27.75 96)" fill="#ffc24b" fill-opacity="0.302"/>
+<polygon points="98.75,180.5 88,115.25 127.25,161.5" fill="#f9d16f" fill-opacity="0.667"/>
+<polygon points="183.25,90.25 177,86 192,89.5" fill="#d4d1e4" fill-opacity="0.835"/>
+<path d="M264.674 166.215 Q251.232 197.188 237.478 200.997" fill="none" stroke="#d19e75" stroke-opacity="0.565" stroke-width="2.163"/>
+<ellipse cx="47" cy="12.5" rx="36.539" ry="24.25" transform="rotate(260.151 47 12.5)" fill="#ffdb9d" fill-opacity="0.682"/>
+<path d="M238.18 157.273 Q235.605 154.623 260.728 132.764" fill="none" stroke="#aa8f93" stroke-opacity="0.549" stroke-width="2.098"/>
+<polygon points="243,201.25 244,188.25 224.75,168.75" fill="#29170a" fill-opacity="0.741"/>
+<path d="M182.28 175.609 Q193.801 163.028 178.73 144.533" fill="none" stroke="#0e0126" stroke-opacity="0.29" stroke-width="3.372"/>
+<path d="M215.292 130.268 Q214.743 132.968 209.746 130.548" fill="none" stroke="#e4d4cc" stroke-opacity="0.698" stroke-width="4.024"/>
+<path d="M188.386 102.795 Q188.437 103.2 185.523 104.793" fill="none" stroke="#ae9f9c" stroke-width="3.006"/>
+<ellipse cx="200.75" cy="12.5" rx="92.012" ry="11.75" transform="rotate(33.474 200.75 12.5)" fill="#edb76f" fill-opacity="0.408"/>
+<path d="M210.003 181.344 Q213.363 169.337 195.449 158.131" fill="none" stroke="#d0b3be" stroke-opacity="0.369" stroke-width="3.507"/>
+<path d="M153.474 154.588 Q146.573 142.395 145.142 141.025" fill="none" stroke="#3c2925" stroke-opacity="0.898" stroke-width="4.026"/>
+<polygon points="181,112 166,135.5 199.25,112.5" fill="#cdbdb6" fill-opacity="0.859"/>
+<polygon points="170,212.5 184.5,166.5 144.5,173.25" fill="#926346" fill-opacity="0.627"/>
+<path d="M92.419 105.64 Q100.97 98.936 104.625 102.389" fill="none" stroke="#e4cfc0" stroke-width="2.232"/>
+<polygon points="120.25,151.5 107,176.25 116.75,179.75 134,169.25" fill="#f5d285" fill-opacity="0.545"/>
+<circle cx="166" cy="166.75" r="2" fill="#d0b1a0"/>
+<path d="M170.095 79.938 Q194.219 83.712 201.136 95.652" fill="none" stroke="#030006" stroke-opacity="0.514" stroke-width="2.917"/>
+<ellipse cx="128.5" cy="144" rx="12.301" ry="13.75" transform="rotate(127.569 128.5 144)" fill="#714428" fill-opacity="0.553"/>
+<polygon points="105,64.75 156,43 139,24 5.25,72" fill="#fecb79" fill-opacity="0.588"/>
+<path d="M184.654 118.739 Q170.197 129.773 162.786 121.253" fill="none" stroke="#d1bfb6" stroke-opacity="0.961" stroke-width="2"/>
+<path d="M143.733 109.242 Q161.696 119.438 165.51 158.454" fill="none" stroke="#9c6c4a" stroke-width="4.014"/>
+<polygon points="188.25,103.5 197.5,107 203,100.75" fill="#decfca" fill-opacity="0.725"/>
+<path d="M148.408 120.613 Q148.722 131.031 172.311 155.564" fill="none" stroke="#4f352c" stroke-opacity="0.482" stroke-width="2.762"/>
+<polygon points="198.5,172.75 217.5,209 201.75,199.25 192,174.75" fill="#c1937a" fill-opacity="0.341"/>
+<polygon points="157.75,110.5 185.5,128.5 176,88.5 148.25,75" fill="#b78b6d" fill-opacity="0.408"/>
+<path d="M246.848 141.669 Q241.517 147.391 222.366 131.249" fill="none" stroke="#f7c55f" stroke-opacity="0.922" stroke-width="6"/>
+<path d="M224.848 153.119 Q176.484 105.586 174.479 107.715" fill="none" stroke="#c3a68e" stroke-opacity="0.914" stroke-width="3.667"/>
+<path d="M148.901 140.683 Q147.541 149.137 163.925 147.436" fill="none" stroke="#b78e69" stroke-opacity="0.871" stroke-width="4.048"/>
+<path d="M131.869 58.637 Q138.229 52.14 138.953 52.938" fill="none" stroke="#f0a887" stroke-opacity="0.718" stroke-width="5.138"/>
+<polygon points="153.75,61.5 137,51.75 140.75,66.75 146.5,71.75" fill="#131622" fill-opacity="0.698"/>
+<path d="M212.246 185.949 Q215.131 180.928 213.464 180.034" fill="none" stroke="#000000" stroke-width="2"/>
+<path d="M247.502 175.389 Q235.182 178.28 236.922 182.888" fill="none" stroke="#ffd0a1" stroke-opacity="0.373" stroke-width="2.78"/>
+<path d="M193.741 109.541 Q186.44 107.417 175.614 93.841" fill="none" stroke="#1e110e" stroke-opacity="0.651" stroke-width="2.134"/>
+<polygon points="247.5,24.5 230.25,1.75 211.75,18.75 213.75,45.75" fill="#b67139" fill-opacity="0.239"/>
+<path d="M190.464 93.257 Q199.295 95.385 199.105 96.058" fill="none" stroke="#eff2ff" stroke-opacity="0.525" stroke-width="2"/>
+<polygon points="150.25,120.75 156,126 159.25,113.75 153.75,109.5" fill="#b18266"/>
+<polygon points="149.75,63 162.25,54.75 147.25,77.75" fill="#e1d7d2" fill-opacity="0.6"/>
+<path d="M118.952 112.757 Q121.726 116.212 124.415 115.922" fill="none" stroke="#fbeae9" stroke-opacity="0.561" stroke-width="4.733"/>
+<polygon points="179.25,71.25 232.25,60.5 211.25,10.5" fill="#f2b975" fill-opacity="0.541"/>
+<path d="M146.43 85.754 Q149.888 75.039 157.736 65.296" fill="none" stroke="#0e0700" stroke-opacity="0.518" stroke-width="2"/>
+<polygon points="109,138.25 88,165 70.5,139 89.75,116.5" fill="#ffe6a6" fill-opacity="0.216"/>
+<path d="M207.087 118.64 Q210.004 123.32 195.255 129.945" fill="none" stroke="#cdb49e" stroke-width="2"/>
+<polygon points="248.409,154.956 253.409,138.956 260.091,141.044 255.091,157.044" fill="#17090e" fill-opacity="0.424"/>
+<path d="M251.511 190.367 Q243.618 191.264 246.558 181.962" fill="none" stroke="#efbf87" stroke-opacity="0.49" stroke-width="2.221"/>
+<circle cx="176.5" cy="83.25" r="2" fill="#eff4ff" fill-opacity="0.741"/>
+<path d="M162.899 72.425 Q170.979 62.629 197.457 91.721" fill="none" stroke="#262126" stroke-opacity="0.886" stroke-width="4.55"/>
+<path d="M256.691 174.719 Q238.645 195.642 247.117 206.962" fill="none" stroke="#ab7e57" stroke-opacity="0.604" stroke-width="2"/>
+<path d="M174.074 190.476 Q171.815 182.397 134.353 136.382" fill="none" stroke="#c08864" stroke-opacity="0.537" stroke-width="2"/>
+<path d="M168.424 174.411 Q130.977 163.268 133.895 153.581" fill="none" stroke="#281200" stroke-opacity="0.239" stroke-width="6"/>
+<ellipse cx="220" cy="181.25" rx="18.393" ry="3.5" transform="rotate(121.097 220 181.25)" fill="#ffd8d4" fill-opacity="0.137"/>
+<path d="M213.973 162.872 Q205.181 156.763 204.975 152.115" fill="none" stroke="#f2f4ff" stroke-opacity="0.631" stroke-width="2.844"/>
+<polygon points="99.75,126.25 97,103.25 86,111.75 86.5,113.75" fill="#46260d" fill-opacity="0.51"/>
+<path d="M204.485 159.569 Q204.874 162.741 208.757 160.654" fill="none" stroke="#cd912d" stroke-opacity="0.753" stroke-width="2.452"/>
+<path d="M211.444 127.073 Q209.074 118.028 207.907 117.855" fill="none" stroke="#20130c" stroke-opacity="0.792" stroke-width="2"/>
+<path d="M91.273 108.301 Q89.36 109.236 86.444 110.598" fill="none" stroke="#fae9e9" stroke-opacity="0.725" stroke-width="2"/>
+<path d="M161.713 76.055 Q144.403 89.039 186.058 126.546" fill="none" stroke="#ac886c" stroke-opacity="0.533" stroke-width="6"/>
+<polygon points="125.5,119.75 145.5,136 147.25,140.5 125.5,125" fill="#ffd19c" fill-opacity="0.349"/>
+<rect x="-6" y="10.5" width="17.5" height="88" fill="#ffcf6f" fill-opacity="0.435"/>
+<polygon points="174.25,169.25 159.75,152.5 156.5,133.25 158,134.5" fill="#a67852" fill-opacity="0.745"/>
+<polygon points="176.892,84.039 181.892,85.039 181.108,88.961 176.108,87.961" fill="#0a0208" fill-opacity="0.824"/>
+<polygon points="203,102.5 197.5,101.25 204.75,106.5" fill="#d7d4dd"/>
+<polygon points="119,105.25 144.5,117 141.5,126.25" fill="#c89b78" fill-opacity="0.69"/>
+<polygon points="221.681,157.048 218.681,160.548 199.319,143.952 202.319,140.452" fill="#dea553" fill-opacity="0.471"/>
+<polygon points="118.75,194.25 98.5,169.5 59.25,178 80,212.5" fill="#ebb54e" fill-opacity="0.396"/>
+<polygon points="41.25,202.25 -0.5,212.5 72.25,93.25" fill="#fecc5f" fill-opacity="0.541"/>
+<polygon points="-15.5,5.5 85,0.5 72.75,-8 8.5,-5.5" fill="#fbd8a4"/>
+<path d="M158.002 126.7 Q182.106 129.259 184.16 128.881" fill="none" stroke="#100100" stroke-opacity="0.204" stroke-width="2.96"/>
+<path d="M248.997 144.915 Q271 168.369 271 208.165" fill="none" stroke="#e8c7c0" stroke-opacity="0.431" stroke-width="2"/>
+<ellipse cx="121.5" cy="5.75" rx="148.09" ry="8.5" transform="rotate(353.895 121.5 5.75)" fill="#fec770" fill-opacity="0.231"/>
+<path d="M207.026 126.706 Q207.092 123.493 203.833 121.574" fill="none" stroke="#876b54" stroke-opacity="0.675" stroke-width="3.33"/>
+<polygon points="256,136 215.25,121 200,48" fill="#f7c368" fill-opacity="0.647"/>
+<path d="M167.362 141.265 Q165.26 129.691 165.997 129.18" fill="none" stroke="#978987" stroke-opacity="0.929" stroke-width="4.087"/>
+<path d="M233.573 159.886 Q234.992 163.863 234.254 180.47" fill="none" stroke="#d2bdc5" stroke-opacity="0.212" stroke-width="3.292"/>
+<path d="M232.944 153.342 Q231.664 153.69 226.408 144.939" fill="none" stroke="#ffce5e" stroke-opacity="0.71" stroke-width="2"/>
+<polygon points="116.039,106.053 121.039,107.053 119.961,112.447 114.961,111.447" fill="#caa284"/>
+<path d="M168.386 205.687 Q113.041 131.661 80.192 85.727" fill="none" stroke="#e88d41" stroke-opacity="0.173" stroke-width="3.975"/>
+<polygon points="152,113.75 153.5,115.75 158.75,116.5 146.5,102.5" fill="#f7d48a"/>
+<path d="M217.048 196.104 Q198.101 212 171.758 189.135" fill="none" stroke="#a87d67" stroke-opacity="0.537" stroke-width="4.375"/>
+<path d="M133.189 65.977 Q129.062 63.183 121.611 69.715" fill="none" stroke="#332826" stroke-opacity="0.737" stroke-width="4.434"/>
+<polygon points="161.5,62.5 192.25,72.25 184.25,59 145.5,50.5" fill="#f9bd5d" fill-opacity="0.867"/>
+<polygon points="174,80.25 170.25,79.75 176,92.5" fill="#00000a" fill-opacity="0.643"/>
+<path d="M217.051 185.563 Q216.182 185.912 207.817 178.963" fill="none" stroke="#ffcab1" stroke-opacity="0.392" stroke-width="2.819"/>
+<polygon points="50.5,135.75 96.75,89 83.75,79.25 42.25,92" fill="#fabe5b" fill-opacity="0.973"/>
+<polygon points="172.5,92.75 162.25,87.75 178.25,86.75" fill="#ad958c"/>
+<path d="M178.999 186.344 Q173.792 180.767 173.87 180.093" fill="none" stroke="#21100f" stroke-opacity="0.573" stroke-width="2"/>
+<path d="M137.768 153.57 Q152.815 168.748 188.899 212" fill="none" stroke="#95664b" stroke-opacity="0.525" stroke-width="4.087"/>
+<path d="M222.373 156.798 Q223.538 150.244 195.407 140.337" fill="none" stroke="#c08a48" stroke-opacity="0.51" stroke-width="6"/>
+<path d="M137.18 142.079 Q130.524 127.949 113.768 117.67" fill="none" stroke="#aa784c" stroke-opacity="0.675" stroke-width="5.05"/>
+<path d="M186.932 168.107 Q177.326 157.423 173.54 162.904" fill="none" stroke="#cbb9c7" stroke-opacity="0.357" stroke-width="3.364"/>
+<polygon points="130.75,67.25 122.5,74.25 129.25,83.75 141,81" fill="#130c06" fill-opacity="0.82"/>
+<ellipse cx="199.5" cy="71.5" rx="3.162" ry="8" transform="rotate(288.435 199.5 71.5)" fill="#ffb08b" fill-opacity="0.086"/>
+<path d="M202.851 156.69 Q196.313 156.251 194.354 151.103" fill="none" stroke="#fdce59" stroke-opacity="0.984" stroke-width="3.911"/>
+<path d="M158.003 119.285 Q148.748 118.366 138.862 112.595" fill="none" stroke="#ffe4d5" stroke-opacity="0.435" stroke-width="2"/>
+<polygon points="154.672,153.672 155.672,152.672 161.328,158.328 160.328,159.328" fill="#d1a785"/>
+<polygon points="212.5,186 233.5,157.5 226.75,156 213.75,175.5" fill="#351f16" fill-opacity="0.78"/>
+<path d="M179.764 181.934 Q168.128 171.597 176.595 166.692" fill="none" stroke="#9f6d4e" stroke-width="5.093"/>
+<path d="M215.784 138.154 Q206.55 141.03 172.806 110.371" fill="none" stroke="#c3a382" stroke-opacity="0.612" stroke-width="6"/>
+<path d="M269.644 139.986 Q242.938 143.958 241.376 147.644" fill="none" stroke="#766b91" stroke-opacity="0.427" stroke-width="2"/>
+<path d="M187.263 89.997 Q185.282 90.811 180.015 84.119" fill="none" stroke="#f8feff" stroke-opacity="0.369" stroke-width="2"/>
+<polygon points="23.75,159.25 -11.5,175 -7.25,200.25 14.75,203.5" fill="#f3c26a" fill-opacity="0.471"/>
+<polygon points="173.588,144.882 176.588,142.882 182.412,151.618 179.412,153.618" fill="#a5765d"/>
+<path d="M148.288 159.418 Q165.221 171.521 167.095 170.441" fill="none" stroke="#754f3c" stroke-width="2.773"/>
+<polygon points="199.474,113.842 199.974,115.342 199.026,115.658 198.526,114.158" fill="#ddd0c6" fill-opacity="0.608"/>
+<path d="M156.086 195.869 Q131.902 165.89 131.832 163.489" fill="none" stroke="#6b4227" stroke-width="2"/>
+<polygon points="164,130 172.75,116.75 176.75,120.75 169.5,135" fill="#745a42" fill-opacity="0.447"/>
+<path d="M176.867 80.565 Q167.67 75.494 171.354 71.626" fill="none" stroke="#1a171c" stroke-width="3.759"/>
+<path d="M88.421 105.219 Q92.249 102.634 92.172 101.939" fill="none" stroke="#81573a" stroke-width="4.248"/>
+<polygon points="-2,102.25 -15.5,104.75 -8.75,161 15.75,152.25" fill="#fad690" fill-opacity="0.996"/>
+<path d="M163.279 126.316 Q159.526 129.864 173.633 159.851" fill="none" stroke="#361200" stroke-opacity="0.286" stroke-width="2.21"/>
+<polygon points="118,120.25 95.25,120.5 110.25,109.5" fill="#834f2c" fill-opacity="0.647"/>
+<ellipse cx="185.25" cy="99" rx="3" ry="3.75" fill="#1e1511" fill-opacity="0.831"/>
+<polygon points="107.75,141 110.5,149.5 29,135 72.5,97" fill="#fdc650" fill-opacity="0.698"/>
+<ellipse cx="182" cy="136.25" rx="13.551" ry="1.25" transform="rotate(29.876 182 136.25)" fill="#f8faff" fill-opacity="0.455"/>
+<ellipse cx="143" cy="76.75" rx="4.828" ry="2" transform="rotate(248.749 143 76.75)" fill="#3a2922" fill-opacity="0.945"/>
+<rect x="153.5" y="136" width="3" height="6.5" fill="#01041a" fill-opacity="0.431"/>
+<path d="M250.189 198.756 Q242.646 165.002 250.351 158.309" fill="none" stroke="#715034" stroke-opacity="0.541" stroke-width="2.43"/>
+<polygon points="189.666,87.876 192.666,89.876 191.834,91.124 188.834,89.124" fill="#cecfe1"/>
+<rect x="195.5" y="106.5" width="11.5" height="1.5" fill="#100500" fill-opacity="0.627"/>
+<path d="M198.654 171.731 Q201.776 169.722 197.216 160.29" fill="none" stroke="#856a66" stroke-opacity="0.651" stroke-width="3.64"/>
+<rect x="153" y="123" width="14.5" height="3.5" fill="#8c8b8b" fill-opacity="0.478"/>
+<ellipse cx="141.5" cy="92.75" rx="1.75" ry="8.5" fill="#746572"/>
+<path d="M205.797 163.991 Q218.8 178.307 223.462 173.337" fill="none" stroke="#321f18" stroke-opacity="0.659" stroke-width="2"/>
+<circle cx="225.25" cy="139.25" r="2.5" fill="#ac917c"/>
+<polygon points="187.75,164.5 190,160 199.5,158.25 203,160.25" fill="#bc9d94" fill-opacity="0.627"/>
+<circle cx="220.5" cy="138.75" r="3.25" fill="#221719" fill-opacity="0.608"/>
+<path d="M193.528 167.4 Q177.746 151.55 175.49 150.771" fill="none" stroke="#6c4c48" stroke-opacity="0.769" stroke-width="2.993"/>
+<polygon points="214.75,174.75 208.25,167.25 208.75,177.75" fill="#b6856f"/>
+<polygon points="158.25,161.5 166.75,174.75 162.75,178.5" fill="#a8795a" fill-opacity="0.788"/>
+<path d="M252.478 186.159 Q259.514 188.66 254.115 194.997" fill="none" stroke="#301e12" stroke-width="3.363"/>
+<rect x="64.5" y="10.5" width="61" height="34" fill="#ffd396" fill-opacity="0.565"/>
+<polygon points="90.75,93.25 90.25,98.25 87.75,97" fill="#e5e8fb" fill-opacity="0.722"/>
+<polygon points="134.5,113 140.75,115.25 124,118 124,117" fill="#d1c5c6" fill-opacity="0.569"/>
+<path d="M163.773 190.795 Q160.992 193.724 176.159 205.341" fill="none" stroke="#372219" stroke-opacity="0.561" stroke-width="2"/>
+<polygon points="232.75,103.75 259.75,73.5 266,63.5 240.75,44" fill="#faca69" fill-opacity="0.647"/>
+<path d="M157.658 145.262 Q144.349 131.076 139.23 130.164" fill="none" stroke="#a76000" stroke-opacity="0.349" stroke-width="3.033"/>
+<path d="M131.89 88.597 Q110.735 78.19 118.85 57.864" fill="none" stroke="#fec35a" stroke-opacity="0.627" stroke-width="4.359"/>
+<polygon points="241.5,71.5 224.5,71.5 224.5,50.5 241.5,50.5" fill="#fdcf84" fill-opacity="0.6"/>
+<polygon points="137,89 147.75,76 143.75,88.25" fill="#b3967e"/>
+<path d="M168.437 176.109 Q159.262 180.48 154.103 163.866" fill="none" stroke="#080100" stroke-opacity="0.231" stroke-width="2"/>
+<polygon points="233.5,150.75 223.75,136.5 259,131 250,141" fill="#f7bf4d"/>
+<circle cx="168.75" cy="131.75" r="1" fill="#ffffff"/>
 </svg>
