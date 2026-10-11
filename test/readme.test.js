@@ -50,7 +50,13 @@ test("the README API examples run against the built package", async () => {
   const examples = readmeExamples();
   assert.ok(examples.length >= 5, `found ${examples.length} examples`);
 
-  const results = await Promise.all(examples.map(runModule));
+  // One example at a time: each render takes every core, and the abort
+  // example's 10 s signal expired on a slow CI runner when six renders ran
+  // at once.
+  const results = [];
+  for (const example of examples) {
+    results.push(await runModule(example));
+  }
 
   results.forEach(({ status, stderr }, index) => {
     assert.equal(status, 0, `example ${index + 1}:\n${examples[index]}\n${stderr}`);
