@@ -19,6 +19,8 @@
 //!   breaks the rule, takes the valid lattice triangle closest to the
 //!   continuous one instead.
 
+use super::lattice::{bound, lattice_candidates, round_to, rounded_centroid};
+
 /// `tan 15.000001°`: [`is_valid`]'s bound, a millionth of a degree above
 /// the rule's 15° so that an `acos`-based check of the same triangle, whose
 /// rounding errors are around `1e-14`°, agrees with it.
@@ -50,7 +52,7 @@ struct Corners {
 impl Corners {
     /// `None` if two vertices coincide.
     fn new(v: &[f64; 6]) -> Option<Self> {
-        let area = (v[2] - v[0]) * (v[5] - v[1]) - (v[3] - v[1]) * (v[4] - v[0]);
+        let area = super::twice_signed_area_triangle(v);
         let sign = if area < 0.0 { -1.0 } else { 1.0 };
         // ∂|D|/∂(x_i, y_i) = sign · (y_{i+1} − y_{i+2}, x_{i+2} − x_{i+1}).
         let mut dc = [0.0; 6];
@@ -251,31 +253,13 @@ fn rebuild(v: &mut [f64; 6], tan_tau: f64) {
 /// the tests). Anything else that does not ends as a right isosceles
 /// triangle of one quantum at the rounded centroid, which keeps the rule.
 pub(super) fn snap(v: &[f64; 6], quantum: f64) -> ([f64; 6], bool) {
-    let round = |value: f64| (value / quantum).round() * quantum;
-    let rounded = v.map(round);
+    let rounded = v.map(|value| round_to(value, quantum));
     if is_valid(&rounded) {
         return (rounded, false);
     }
     for radius in [2_i32, 4] {
-        let candidates: Vec<Vec<(f64, f64, f64)>> = (0..3)
-            .map(|vertex| {
-                let (x, y) = (v[2 * vertex], v[2 * vertex + 1]);
-                let (rx, ry) = (rounded[2 * vertex], rounded[2 * vertex + 1]);
-                let mut list: Vec<(f64, f64, f64)> = (-radius..=radius)
-                    .flat_map(|j| (-radius..=radius).map(move |i| (i, j)))
-                    .map(|(i, j)| {
-                        let (cx, cy) = (rx + f64::from(i) * quantum, ry + f64::from(j) * quantum);
-                        let (dx, dy) = (cx - x, cy - y);
-                        (dx * dx + dy * dy, cx, cy)
-                    })
-                    .collect();
-                // Stable: ties keep the generation order.
-                list.sort_by(|a, b| a.0.total_cmp(&b.0));
-                list
-            })
-            .collect();
+        let candidates = lattice_candidates(v, &rounded, 3, radius, quantum);
         let mut best: Option<(f64, [f64; 6])> = None;
-        let bound = |best: &Option<(f64, [f64; 6])>| best.map_or(f64::INFINITY, |b| b.0);
         for a in &candidates[0] {
             if a.0 >= bound(&best) {
                 break;
@@ -301,10 +285,7 @@ pub(super) fn snap(v: &[f64; 6], quantum: f64) -> ([f64; 6], bool) {
             return (tri, true);
         }
     }
-    let (cx, cy) = (
-        round((v[0] + v[2] + v[4]) / 3.0),
-        round((v[1] + v[3] + v[5]) / 3.0),
-    );
+    let (cx, cy) = rounded_centroid(v, 3, quantum);
     ([cx, cy, cx + quantum, cy, cx, cy + quantum], true)
 }
 

@@ -29,9 +29,10 @@
 //!   orientation closest to the continuous one instead.
 
 use super::angle::{MAX_STEPS, OVERSHOOT, Projected, TAN_VALID};
+use super::diff::COORDS;
+use super::lattice::{bound, lattice_candidates, round_to, rounded_centroid};
+use crate::shapes::{is_legible_convex, legible_corner};
 
-/// Coordinates of a quadrilateral: `x0, y0, …, x3, y3`.
-pub(super) const COORDS: usize = 8;
 /// Vertices of a quadrilateral.
 const SIDES: usize = 4;
 
@@ -77,13 +78,11 @@ fn projection_bounds(tan_tau: f64) -> [Bound; 2] {
 /// orientation of a simple polygon, and of the larger lobe of a crossed
 /// one.
 fn orientation(v: &[f64; COORDS]) -> f64 {
-    let area: f64 = (0..SIDES)
-        .map(|i| {
-            let j = (i + 1) % SIDES;
-            v[2 * i] * v[2 * j + 1] - v[2 * j] * v[2 * i + 1]
-        })
-        .sum();
-    if area < 0.0 { -1.0 } else { 1.0 }
+    if super::twice_shoelace(v, SIDES) < 0.0 {
+        -1.0
+    } else {
+        1.0
+    }
 }
 
 /// The terms of the residuals at one vertex: the turn `t`, the dot
@@ -156,12 +155,10 @@ fn within(corners: &[Corner; SIDES], bounds: &[Bound]) -> bool {
 }
 
 /// Whether the corner at `p`, between `previous` and `next`, turns
-/// strictly the way `s` says with an angle above 15° ([`TAN_VALID`]).
+/// strictly the way `s` says with an angle above 15° ([`TAN_VALID`]):
+/// greedy's [`legible_corner`] with [`is_valid`]'s bound.
 fn corner_valid(previous: (f64, f64), p: (f64, f64), next: (f64, f64), s: f64) -> bool {
-    let (ux, uy) = (next.0 - p.0, next.1 - p.1);
-    let (wx, wy) = (previous.0 - p.0, previous.1 - p.1);
-    let turn = s * (ux * wy - uy * wx);
-    turn > 0.0 && turn > TAN_VALID * (ux * wx + uy * wy)
+    legible_corner(previous, p, next, s, TAN_VALID)
 }
 
 /// Whether every corner of `v` passes [`corner_valid`] with orientation
@@ -179,14 +176,14 @@ fn valid_oriented(v: &[f64; COORDS], s: f64) -> bool {
 }
 
 /// Whether `v` is simple and strictly convex with every interior angle
-/// above 15° (see [`TAN_VALID`]): greedy's `is_legible_convex`, with the
+/// above 15° (see [`TAN_VALID`]): greedy's [`is_legible_convex`], with the
 /// orientation taken from the first vertex, and a bound a millionth of a
 /// degree stricter.
 pub(super) fn is_valid(v: &[f64; COORDS]) -> bool {
-    let (ux, uy) = (v[2] - v[0], v[3] - v[1]);
-    let (wx, wy) = (v[6] - v[0], v[7] - v[1]);
-    let s = if ux * wy - uy * wx < 0.0 { -1.0 } else { 1.0 };
-    valid_oriented(v, s)
+    is_legible_convex(
+        &[(v[0], v[1]), (v[2], v[3]), (v[4], v[5]), (v[6], v[7])],
+        TAN_VALID,
+    )
 }
 
 /// The step of least Euclidean norm `Δ = Σ λ_i a_i`, `λ ≥ 0`, that lifts
@@ -321,32 +318,14 @@ fn rebuild(v: &mut [f64; COORDS], s: f64) {
 /// the third is chosen. Anything that finds no valid polygon ends as a
 /// square of one quantum at the rounded centroid, which keeps the rule.
 pub(super) fn snap(v: &[f64; COORDS], quantum: f64) -> ([f64; COORDS], bool) {
-    let round = |value: f64| (value / quantum).round() * quantum;
-    let rounded = v.map(round);
+    let rounded = v.map(|value| round_to(value, quantum));
     if is_valid(&rounded) {
         return (rounded, false);
     }
     let s = orientation(v);
     for radius in [2_i32, 4] {
-        let candidates: Vec<Vec<(f64, f64, f64)>> = (0..SIDES)
-            .map(|vertex| {
-                let (x, y) = (v[2 * vertex], v[2 * vertex + 1]);
-                let (rx, ry) = (rounded[2 * vertex], rounded[2 * vertex + 1]);
-                let mut list: Vec<(f64, f64, f64)> = (-radius..=radius)
-                    .flat_map(|j| (-radius..=radius).map(move |i| (i, j)))
-                    .map(|(i, j)| {
-                        let (cx, cy) = (rx + f64::from(i) * quantum, ry + f64::from(j) * quantum);
-                        let (dx, dy) = (cx - x, cy - y);
-                        (dx * dx + dy * dy, cx, cy)
-                    })
-                    .collect();
-                // Stable: ties keep the generation order.
-                list.sort_by(|a, b| a.0.total_cmp(&b.0));
-                list
-            })
-            .collect();
+        let candidates = lattice_candidates(v, &rounded, SIDES, radius, quantum);
         let mut best: Option<(f64, [f64; COORDS])> = None;
-        let bound = |best: &Option<(f64, [f64; COORDS])>| best.map_or(f64::INFINITY, |b| b.0);
         let mut checks = 0;
         'search: for a in &candidates[0] {
             if a.0 >= bound(&best) {
@@ -387,10 +366,7 @@ pub(super) fn snap(v: &[f64; COORDS], quantum: f64) -> ([f64; COORDS], bool) {
             return (quad, true);
         }
     }
-    let (cx, cy) = (
-        round((v[0] + v[2] + v[4] + v[6]) / 4.0),
-        round((v[1] + v[3] + v[5] + v[7]) / 4.0),
-    );
+    let (cx, cy) = rounded_centroid(v, SIDES, quantum);
     let mut square = [
         cx,
         cy,

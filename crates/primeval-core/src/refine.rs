@@ -181,8 +181,8 @@ impl StepScale {
 /// canvases ([`replay_plan`]), may take, in bytes.
 const CHECKPOINT_BUDGET: usize = 64 << 20;
 
-/// `M` of the fixed-point blend, as a float.
-const M: f32 = 65535.0;
+/// [`score::M`] of the fixed-point blend, as a float.
+const M: f32 = score::M as f32;
 
 /// One line's blend in the model: `x ← keep · x + paint · s`.
 #[derive(Clone, Copy)]

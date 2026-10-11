@@ -171,7 +171,7 @@ mod tests {
     fn moments(lines: &[crate::scanline::Scanline], scale: f64) -> (f64, f64, f64) {
         let (mut area, mut sx, mut sy) = (0.0, 0.0, 0.0);
         for line in lines {
-            let weight = f64::from(line.alpha) / f64::from(0xFFFF_u32);
+            let weight = line.coverage();
             let pixels = f64::from(line.x2 - line.x1 + 1);
             let x_mid = (f64::from(line.x1) + f64::from(line.x2) + 1.0) / 2.0;
             let y_mid = f64::from(line.y) + 0.5;

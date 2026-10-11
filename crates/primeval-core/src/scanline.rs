@@ -15,6 +15,16 @@ pub(crate) struct Scanline {
     pub(crate) alpha: u32,
 }
 
+impl Scanline {
+    /// The share of each pixel the line covers, `alpha` over full
+    /// coverage ([`crate::score::M`]), in `0..=1`.
+    #[must_use]
+    #[inline]
+    pub(crate) fn coverage(&self) -> f64 {
+        f64::from(self.alpha) / f64::from(crate::score::M)
+    }
+}
+
 /// Filters and clamps scanlines in-place so that every remaining line
 /// lies within the `[0, w) x [0, h)` pixel grid.
 ///
@@ -51,6 +61,19 @@ pub(crate) fn clamp_line(line: &Scanline, w: i32, h: i32) -> Option<(i32, i32)> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coverage_is_alpha_over_full_coverage() {
+        let line = |alpha| Scanline {
+            y: 0,
+            x1: 0,
+            x2: 0,
+            alpha,
+        };
+        assert_eq!(line(0).coverage(), 0.0);
+        assert_eq!(line(0xFFFF).coverage(), 1.0);
+        assert_eq!(line(0x8000).coverage(), 32768.0 / 65535.0);
+    }
 
     fn sl(y: i32, x1: i32, x2: i32) -> Scanline {
         Scanline {

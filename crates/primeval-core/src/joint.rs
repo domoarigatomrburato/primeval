@@ -73,7 +73,7 @@
 //! on every platform even where the platforms' `sin_cos` differ in the
 //! last bit; so does a rotated ellipse's starting semi-axis vector, from
 //! its continuous angle, and its exported rotation, the angle of that
-//! vector, comes from `rect::atan2_degrees`, a polynomial in `+ − × ÷`
+//! vector, comes from `crate::util::atan2_degrees`, a polynomial in `+ − × ÷`
 //! too. The exported rotated ellipse is then drawn through
 //! `sin_cos_degrees` as well, as the greedy search's are.
 
@@ -81,11 +81,12 @@ mod angle;
 mod convex;
 mod diff;
 mod ellipse;
+mod lattice;
 mod rect;
 
 use crate::model::CommittedShape;
 use crate::shapes::Shape;
-use crate::util::sin_cos_degrees;
+use crate::util::{atan2_degrees, sin_cos_degrees};
 use crate::worker::WorkerCtx;
 use crate::{Alpha, Buffer, Color, Drawing, DrawnShape, Geometry, Model, Point};
 use diff::{ALPHA, COORDS, Layer, Mask, Outline, PARAMS, Real, Scene, Workspace};
@@ -116,6 +117,24 @@ pub fn default_iterations(shapes: usize) -> u32 {
 /// `tan 15.5°`: the projection keeps every angle at least 15.5°, half a
 /// degree inside the rule, so that the snap rarely needs a repair.
 const TAN_PROJECTION: f64 = 0.277_324_544_059_838_4;
+
+/// Twice the signed area of the triangle `v`, `x0, y0, x1, y1, x2, y2`:
+/// the cross product `(v1 − v0) × (v2 − v0)`.
+fn twice_signed_area_triangle(v: &[f64]) -> f64 {
+    (v[2] - v[0]) * (v[5] - v[1]) - (v[3] - v[1]) * (v[4] - v[0])
+}
+
+/// Twice the signed area of the polygon through the first `n` vertices of
+/// `v`, `x0, y0, x1, y1, …`, by the shoelace formula, summed in vertex
+/// order.
+fn twice_shoelace(v: &[f64], n: usize) -> f64 {
+    (0..n)
+        .map(|i| {
+            let j = (i + 1) % n;
+            v[2 * i] * v[2 * j + 1] - v[2 * j] * v[2 * i + 1]
+        })
+        .sum()
+}
 
 /// Settings of [`optimise`].
 ///
@@ -335,53 +354,41 @@ fn parts<F: Real>(
                 f64::from(color.a),
                 [color.r, color.g, color.b].map(f64::from),
             );
-            match &committed.shape {
-                Shape::Triangle(t) => Layer::triangle(
-                    [t.x1, t.y1, t.x2, t.y2, t.x3, t.y3].map(f64::from),
-                    alpha,
-                    rgb,
-                ),
+            let mut params = [0.0; COORDS];
+            let outline = match &committed.shape {
+                Shape::Triangle(t) => {
+                    params[..6]
+                        .copy_from_slice(&[t.x1, t.y1, t.x2, t.y2, t.x3, t.y3].map(f64::from));
+                    Outline::Triangle
+                }
                 // Polygon vertices are continuous: the engine's coordinates
                 // are 0.5 below them.
-                Shape::Polygon(polygon) if polygon.order == 3 => Layer::triangle(
-                    std::array::from_fn(|k| {
+                Shape::Polygon(polygon) if matches!(polygon.order, 3 | 4) => {
+                    for (k, param) in params[..2 * polygon.order].iter_mut().enumerate() {
                         let axis = if k % 2 == 0 { &polygon.x } else { &polygon.y };
-                        axis[k / 2] - 0.5
-                    }),
-                    alpha,
-                    rgb,
-                ),
-                Shape::Polygon(polygon) if polygon.order == 4 => Layer {
-                    outline: Outline::Quad,
-                    params: std::array::from_fn(|k| {
-                        let axis = if k % 2 == 0 { &polygon.x } else { &polygon.y };
-                        axis[k / 2] - 0.5
-                    }),
-                    alpha,
-                    color: rgb,
-                },
+                        *param = axis[k / 2] - 0.5;
+                    }
+                    if polygon.order == 3 {
+                        Outline::Triangle
+                    } else {
+                        Outline::Quad
+                    }
+                }
                 // The pixels `x1..=x2` span `x1 − 0.5..x2 + 0.5`.
                 Shape::Rectangle(rectangle) => {
                     let (x1, y1, x2, y2) = rectangle.bounds();
-                    let mut params = [0.0; COORDS];
                     params[..4].copy_from_slice(&[
                         f64::from(x1) - 0.5,
                         f64::from(y1) - 0.5,
                         f64::from(x2) + 0.5,
                         f64::from(y2) + 0.5,
                     ]);
-                    Layer {
-                        outline: Outline::Rect,
-                        params,
-                        alpha,
-                        color: rgb,
-                    }
+                    Outline::Rect
                 }
                 // The centre is continuous; `u` runs along the side `sx`.
                 Shape::RotatedRectangle(rectangle) => {
                     let (sin, cos) = sin_cos_degrees(f64::from(rectangle.angle));
                     let half = f64::from(rectangle.sx) / 2.0;
-                    let mut params = [0.0; COORDS];
                     params[..5].copy_from_slice(&[
                         f64::from(rectangle.x) - 0.5,
                         f64::from(rectangle.y) - 0.5,
@@ -389,42 +396,24 @@ fn parts<F: Real>(
                         half * sin,
                         f64::from(rectangle.sy) / 2.0,
                     ]);
-                    Layer {
-                        outline: Outline::Rotated,
-                        params,
-                        alpha,
-                        color: rgb,
-                    }
+                    Outline::Rotated
                 }
                 // The engine's integer centre is a pixel centre, as a
                 // triangle's vertices.
                 &Shape::Ellipse(ellipse) if curved => {
-                    let mut params = [0.0; COORDS];
                     params[..4].copy_from_slice(
                         &[ellipse.x, ellipse.y, ellipse.rx, ellipse.ry].map(f64::from),
                     );
-                    Layer {
-                        outline: Outline::Ellipse,
-                        params,
-                        alpha,
-                        color: rgb,
-                    }
+                    Outline::Ellipse
                 }
                 &Shape::Circle(circle) if curved => {
-                    let mut params = [0.0; COORDS];
                     params[..3].copy_from_slice(&[circle.x, circle.y, circle.r].map(f64::from));
-                    Layer {
-                        outline: Outline::Circle,
-                        params,
-                        alpha,
-                        color: rgb,
-                    }
+                    Outline::Circle
                 }
                 // The centre is continuous; `a` runs along the radius `rx`,
                 // at the angle `angle` in degrees.
                 &Shape::RotatedEllipse(ellipse) if curved => {
                     let (sin, cos) = sin_cos_degrees(ellipse.angle);
-                    let mut params = [0.0; COORDS];
                     params[..5].copy_from_slice(&[
                         ellipse.x - 0.5,
                         ellipse.y - 0.5,
@@ -432,12 +421,7 @@ fn parts<F: Real>(
                         ellipse.rx * sin,
                         ellipse.ry,
                     ]);
-                    Layer {
-                        outline: Outline::RotatedEllipse,
-                        params,
-                        alpha,
-                        color: rgb,
-                    }
+                    Outline::RotatedEllipse
                 }
                 shape => {
                     masks.push(Mask::from_lines(
@@ -446,13 +430,14 @@ fn parts<F: Real>(
                         height,
                     ));
                     fixed.push(shape.geometry());
-                    Layer {
-                        outline: Outline::Fixed(masks.len() - 1),
-                        params: [0.0; COORDS],
-                        alpha,
-                        color: rgb,
-                    }
+                    Outline::Fixed(masks.len() - 1)
                 }
+            };
+            Layer {
+                outline,
+                params,
+                alpha,
+                color: rgb,
             }
         })
         .collect();
@@ -497,7 +482,6 @@ fn optimise_shapes(
         &mut layers,
         iterations,
         auto_alpha,
-        TAN_PROJECTION,
         settings.tuning,
         &mut cancelled,
     )?;
@@ -637,16 +621,7 @@ fn vertex_step(layer: &Layer, tuning: Tuning) -> Option<f64> {
     let p = &layer.params;
     let area = match layer.outline {
         Outline::Fixed(_) => return None,
-        Outline::Triangle | Outline::Quad => {
-            let n = layer.outline.sides();
-            let twice: f64 = (0..n)
-                .map(|i| {
-                    let j = (i + 1) % n;
-                    p[2 * i] * p[2 * j + 1] - p[2 * j] * p[2 * i + 1]
-                })
-                .sum();
-            twice.abs() / 2.0
-        }
+        Outline::Triangle | Outline::Quad => twice_shoelace(p, layer.outline.sides()).abs() / 2.0,
         Outline::Rotated => 4.0 * (p[2] * p[2] + p[3] * p[3]).sqrt() * p[4].abs(),
         Outline::Rect => ((p[2] - p[0]) * (p[3] - p[1])).abs(),
         Outline::Circle | Outline::Ellipse | Outline::RotatedEllipse => {
@@ -660,23 +635,23 @@ fn vertex_step(layer: &Layer, tuning: Tuning) -> Option<f64> {
     })
 }
 
-/// Projects `layer` onto its rule, with angles of at least `atan tan_tau`:
-/// a triangle by [`angle::project`], a polygon by [`convex::project`], a
-/// rectangle by [`rect::project_box`] and a rotated one by
-/// [`rect::project_rotated`], a curved layer by [`ellipse::project`]; a
-/// fixed layer has no parameters. Returns the
+/// Projects `layer` onto its rule, with angles of at least 15.5°
+/// ([`TAN_PROJECTION`]): a triangle by [`angle::project`], a polygon by
+/// [`convex::project`], a rectangle by [`rect::project_box`] and a rotated
+/// one by [`rect::project_rotated`], a curved layer by
+/// [`ellipse::project`]; a fixed layer has no parameters. Returns the
 /// displacement of the parameters, or `None` if the layer was already
 /// inside.
-fn project(layer: &mut Layer, tan_tau: f64) -> Option<[f64; COORDS]> {
+fn project(layer: &mut Layer) -> Option<[f64; COORDS]> {
     let before = layer.params;
     let projected = match layer.outline {
         Outline::Triangle => {
             let mut v: [f64; 6] = std::array::from_fn(|k| layer.params[k]);
-            let projected = angle::project(&mut v, tan_tau);
+            let projected = angle::project(&mut v, TAN_PROJECTION);
             layer.params[..6].copy_from_slice(&v);
             projected
         }
-        Outline::Quad => convex::project(&mut layer.params, tan_tau),
+        Outline::Quad => convex::project(&mut layer.params, TAN_PROJECTION),
         Outline::Rect => rect::project_box(&mut layer.params),
         Outline::Rotated => rect::project_rotated(&mut layer.params),
         outline @ (Outline::Circle | Outline::Ellipse | Outline::RotatedEllipse) => {
@@ -722,12 +697,11 @@ fn run<F: Real>(
     layers: &mut [Layer],
     iterations: usize,
     auto_alpha: bool,
-    tan_tau: f64,
     tuning: Tuning,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Option<()> {
     for layer in layers.iter_mut() {
-        project(layer, tan_tau);
+        project(layer);
     }
     let steps: Vec<f64> = layers
         .iter()
@@ -764,7 +738,7 @@ fn run<F: Real>(
                 };
                 *value = (*value - rate * factor * update).clamp(low, high);
             }
-            if let Some(displacement) = project(layer, tan_tau) {
+            if let Some(displacement) = project(layer) {
                 redirect_momentum(
                     &mut first[index],
                     &mut second[index],
@@ -844,7 +818,7 @@ fn redirect_momentum(
 /// ([`Layer::corners`]), a curved layer a [`Geometry::Ellipse`]: a circle's
 /// radii both `r`, an axis-aligned ellipse's `rx` and `ry`, both with no
 /// rotation, and a rotated ellipse's `|a|` and `b`, rotated by the angle of
-/// `a` in degrees ([`rect::atan2_degrees`]), not rounded further. A fixed
+/// `a` in degrees ([`atan2_degrees`]), not rounded further. A fixed
 /// layer keeps its geometry, from `fixed`.
 fn export<F: Real>(
     scene: &Scene<F>,
@@ -903,7 +877,7 @@ fn export<F: Real>(
                             rx: (ax * ax + ay * ay).sqrt(),
                             ry: b,
                             rotation: if layer.outline == Outline::RotatedEllipse {
-                                rect::atan2_degrees(ay, ax)
+                                atan2_degrees(ay, ax)
                             } else {
                                 0.0
                             },
@@ -935,6 +909,22 @@ mod tests {
     use crate::{ModelOptions, ShapeKind};
     use rand::{RngExt, SeedableRng};
     use rand_chacha::ChaCha8Rng;
+
+    /// Both areas are signed by orientation, and the shoelace of a
+    /// triangle is its cross product's area.
+    #[test]
+    fn twice_the_areas_are_signed() {
+        let triangle = [1.0, 1.0, 5.0, 1.0, 1.0, 4.0];
+        assert_eq!(twice_signed_area_triangle(&triangle), 12.0);
+        assert_eq!(twice_shoelace(&triangle, 3), 12.0);
+        let reversed = [1.0, 1.0, 1.0, 4.0, 5.0, 1.0];
+        assert_eq!(twice_signed_area_triangle(&reversed), -12.0);
+        assert_eq!(twice_shoelace(&reversed, 3), -12.0);
+        let square = [0.0, 0.0, 2.0, 0.0, 2.0, 2.0, 0.0, 2.0];
+        assert_eq!(twice_shoelace(&square, 4), 8.0);
+        let crossed = [0.0, 0.0, 2.0, 2.0, 2.0, 0.0, 0.0, 2.0];
+        assert_eq!(twice_shoelace(&crossed, 4), 0.0);
+    }
 
     /// A smooth target with a few hard edges, `width × height`.
     fn target(width: u32, height: u32) -> Buffer {
@@ -1087,15 +1077,9 @@ mod tests {
         }
         let background = Color::new(40, 120, 200, 255);
         let mut tris = start.clone();
-        run(
-            &scene,
-            &mut tris,
-            40,
-            true,
-            TAN_PROJECTION,
-            Tuning::default(),
-            &mut || false,
-        )
+        run(&scene, &mut tris, 40, true, Tuning::default(), &mut || {
+            false
+        })
         .expect("not cancelled");
         for v in vertices(&export(&scene, &tris, &[], background)) {
             assert!(acos_valid(&v), "{v:?}");
@@ -1337,7 +1321,6 @@ mod tests {
             &mut layers,
             20,
             true,
-            TAN_PROJECTION,
             Tuning::default(),
             &mut || false,
         )
@@ -1424,7 +1407,6 @@ mod tests {
             &mut layers,
             20,
             true,
-            TAN_PROJECTION,
             Tuning::default(),
             &mut || false,
         )
@@ -1699,7 +1681,7 @@ mod tests {
             ),
         ] {
             let mut layer = curved_layer(outline, &before);
-            let displacement = project(&mut layer, TAN_PROJECTION).expect("projected");
+            let displacement = project(&mut layer).expect("projected");
             let (start, expected) = (
                 curved_layer(outline, &before),
                 curved_layer(outline, &after),
@@ -1712,7 +1694,7 @@ mod tests {
                 );
                 assert_eq!(moved, layer.params[k] - start.params[k]);
             }
-            assert_eq!(project(&mut layer, TAN_PROJECTION), None, "{after:?}");
+            assert_eq!(project(&mut layer), None, "{after:?}");
         }
         for (outline, params) in [
             (Outline::Circle, vec![-40.0, 90.0, 0.5]),
@@ -1722,15 +1704,9 @@ mod tests {
             let mut rng = ChaCha8Rng::seed_from_u64(80);
             let scene = diff::tests::random_scene::<f32>(&mut rng, 40, 32);
             let mut layers = vec![curved_layer(outline, &params)];
-            run(
-                &scene,
-                &mut layers,
-                1,
-                true,
-                TAN_PROJECTION,
-                Tuning::default(),
-                &mut || false,
-            )
+            run(&scene, &mut layers, 1, true, Tuning::default(), &mut || {
+                false
+            })
             .expect("not cancelled");
             let p = layers[0].params;
             assert!((-MARGIN..=39.0 + MARGIN).contains(&p[0]), "{p:?}");
@@ -1813,7 +1789,7 @@ mod tests {
         }
         let mut snapped = layers.clone();
         for layer in &mut snapped {
-            project(layer, TAN_PROJECTION);
+            project(layer);
         }
         let short = snapped
             .iter()
@@ -1836,7 +1812,6 @@ mod tests {
             &mut layers,
             20,
             true,
-            TAN_PROJECTION,
             Tuning::default(),
             &mut || false,
         )

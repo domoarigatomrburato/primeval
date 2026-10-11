@@ -18,7 +18,9 @@ use crate::color::Color;
 use crate::prefix::{MAX_CHANNEL_SPAN, PrefixSums, SpanSums};
 use crate::scanline::{Scanline, clamp_line};
 
-const M: u32 = 0xFFFF;
+/// Full coverage: a scanline's `alpha` of a pixel it covers whole, and the
+/// denominator of the blend's fixed point.
+pub(crate) const M: u32 = 0xFFFF;
 
 /// Converts a raw score, the sum of squared channel differences over every
 /// pixel, into the normalised RMSE over the RGB channels:

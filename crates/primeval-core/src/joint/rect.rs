@@ -20,22 +20,22 @@
 //!   lattice. The checks on the lattice are exact: lattice values are
 //!   small multiples of a power of two, so their sums, products and
 //!   squares are exact in `f64`.
-//! - [`atan2_degrees`] turns a rotated ellipse's semi-axis vector back
-//!   into its angle, by `+ − × ÷` alone. The other way, a rotated
-//!   rectangle's `u` and a rotated ellipse's semi-axis vector come from the
-//!   greedy search's angles through [`crate::util::sin_cos_degrees`], the
-//!   function the greedy search's own corners and coverage use.
+//!
+//! A rotated rectangle's `u` and a rotated ellipse's semi-axis vector come
+//! from the greedy search's angles through
+//! [`crate::util::sin_cos_degrees`], the function the greedy search's own
+//! corners and coverage use; a rotated ellipse's angle comes back from its
+//! semi-axis vector through [`crate::util::atan2_degrees`].
 
 use super::angle::Projected;
 use super::diff::COORDS;
-
-/// The longest side of a rectangle in multiples of its shortest, as the
-/// greedy search's.
-const MAX_ASPECT: f64 = 8.0;
+use super::lattice::{lengthen_on_lattice, round_to};
+use crate::shapes::MAX_ASPECT;
 
 /// Whether the lengths `(a, b)` keep the rule with least length `least`.
 fn sides_valid(a: f64, b: f64, least: f64) -> bool {
-    a >= least && b >= least && a <= MAX_ASPECT * b && b <= MAX_ASPECT * a
+    let aspect = f64::from(MAX_ASPECT);
+    a >= least && b >= least && a <= aspect * b && b <= aspect * a
 }
 
 /// The point of the set `a ≥ m`, `b ≥ m`, `a ≤ 8 b`, `b ≤ 8 a` nearest to
@@ -52,15 +52,16 @@ pub(super) fn project_sides(a: f64, b: f64, least: f64) -> (f64, f64) {
         return (a, b);
     }
     let m = least;
-    let high = MAX_ASPECT * m;
-    let along = |dot: f64| (dot / (1.0 + MAX_ASPECT * MAX_ASPECT)).max(0.0);
-    let steep = m + along((a - m) + MAX_ASPECT * (b - high));
-    let flat = m + along(MAX_ASPECT * (a - high) + (b - m));
+    let aspect = f64::from(MAX_ASPECT);
+    let high = aspect * m;
+    let along = |dot: f64| (dot / (1.0 + aspect * aspect)).max(0.0);
+    let steep = m + along((a - m) + aspect * (b - high));
+    let flat = m + along(aspect * (a - high) + (b - m));
     let candidates = [
         (m, b.clamp(m, high)),
         (a.clamp(m, high), m),
-        (steep, MAX_ASPECT * steep),
-        (MAX_ASPECT * flat, flat),
+        (steep, aspect * steep),
+        (aspect * flat, flat),
     ];
     let distance = |(x, y): (f64, f64)| (x - a) * (x - a) + (y - b) * (y - b);
     let mut best = candidates[0];
@@ -88,7 +89,7 @@ fn half_sides(p: &[f64; COORDS]) -> (f64, f64) {
 /// squares, without a root.
 pub(super) fn rotated_valid(p: &[f64; COORDS]) -> bool {
     let (u2, h) = half_sides(p);
-    let cap = MAX_ASPECT * MAX_ASPECT;
+    let cap = f64::from(MAX_ASPECT * MAX_ASPECT);
     u2 >= 0.25 && h >= 0.5 && h * h <= cap * u2 && u2 <= cap * h * h
 }
 
@@ -131,11 +132,6 @@ pub(super) fn project_rotated(p: &mut [f64; COORDS]) -> Projected {
     }
     p[4] = ph;
     Projected::Moved
-}
-
-/// `value` rounded to the lattice of `quantum`.
-fn round_to(value: f64, quantum: f64) -> f64 {
-    (value / quantum).round() * quantum
 }
 
 /// The axis-aligned rectangle `p` with every parameter rounded to the
@@ -190,19 +186,8 @@ pub(super) fn snap_rotated(p: &[f64; COORDS], quantum: f64) -> ([f64; COORDS], b
     if rotated_valid(&out) {
         return (out, false);
     }
-    let away = |value: f64| {
-        let steps = (value.abs() / quantum).ceil() * quantum;
-        if value < 0.0 { -steps } else { steps }
-    };
-    if half_sides(&out).0 < 0.25 {
-        out[2] = away(p[2]);
-        out[3] = away(p[3]);
-        while half_sides(&out).0 < 0.25 {
-            let k = if out[2].abs() >= out[3].abs() { 2 } else { 3 };
-            out[k] += if out[k] < 0.0 { -quantum } else { quantum };
-        }
-    }
-    let cap = MAX_ASPECT * MAX_ASPECT;
+    lengthen_on_lattice(&mut out, p, quantum, 0.25);
+    let cap = f64::from(MAX_ASPECT * MAX_ASPECT);
     let u2 = half_sides(&out).0;
     while out[4] < 0.5 || u2 > cap * out[4] * out[4] {
         out[4] += quantum;
@@ -212,49 +197,6 @@ pub(super) fn snap_rotated(p: &[f64; COORDS], quantum: f64) -> ([f64; COORDS], b
     }
     debug_assert!(rotated_valid(&out), "{p:?} -> {out:?}");
     (out, true)
-}
-
-/// `atan t` for `0 ≤ t ≤ tan(π/8)`, by its Taylor series to the term in
-/// `t⁴⁵`, in Horner form: the first omitted term is below `10⁻¹⁸`.
-fn atan_octant(t: f64) -> f64 {
-    let t2 = t * t;
-    let mut sum = 0.0;
-    for n in (0..=22).rev() {
-        let n = f64::from(n);
-        sum = 1.0 / (2.0 * n + 1.0) - t2 * sum;
-    }
-    t * sum
-}
-
-/// The angle of the vector `(x, y)` in degrees, in `[−180°, 180°]`, as
-/// `y.atan2(x).to_degrees()` but by `+ − × ÷` alone, so that native and
-/// WebAssembly builds agree: the vector reduced to the first octant by the
-/// symmetries of the plane, `atan` of the ratio of its coordinates there,
-/// `t ≤ 1`, reduced again to `t ≤ tan(π/8)` by
-/// `atan t = π/4 − atan((1 − t) / (1 + t))`, then [`atan_octant`]. Within
-/// `3e-14°` of the platform's in the tests. `(0, 0)` has angle 0.
-pub(crate) fn atan2_degrees(y: f64, x: f64) -> f64 {
-    use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI};
-    let (ax, ay) = (x.abs(), y.abs());
-    let (low, high) = if ay <= ax { (ay, ax) } else { (ax, ay) };
-    if high == 0.0 {
-        return 0.0;
-    }
-    let t = low / high;
-    // `tan(π/8)`.
-    let mut angle = if t <= 0.414_213_562_373_095_03 {
-        atan_octant(t)
-    } else {
-        FRAC_PI_4 - atan_octant((1.0 - t) / (1.0 + t))
-    };
-    if ay > ax {
-        angle = FRAC_PI_2 - angle;
-    }
-    if x < 0.0 {
-        angle = PI - angle;
-    }
-    let degrees = angle * (180.0 / PI);
-    if y < 0.0 { 0.0 - degrees } else { degrees }
 }
 
 #[cfg(test)]
@@ -295,43 +237,6 @@ pub(super) mod tests {
             && (lengths[1] - lengths[3]).abs() <= tolerance * long
             && short >= 1.0 - tolerance
             && long <= 8.0 * short * (1.0 + tolerance)
-    }
-
-    /// The angle of a vector in degrees against the platform's on a sweep
-    /// that includes the axes and the octant boundaries, well within
-    /// `1e-12°`: measured 2.8e-14°.
-    #[test]
-    fn angles_of_real_degrees_match_the_platform() {
-        let mut angles: Vec<f64> = (-16..=16).map(|k| f64::from(k) * 45.0).collect();
-        for k in -16..=16 {
-            let boundary = f64::from(k) * 45.0;
-            angles.extend([boundary - 1e-9, boundary + 1e-9, boundary + 22.5]);
-        }
-        angles.extend((0..20_000).map(|k| -720.0 + f64::from(k) * 0.072_003_1));
-        let mut rng = ChaCha8Rng::seed_from_u64(45);
-        angles.extend((0..5000).map(|_| rng.random_range(-1000.0..1000.0)));
-        let mut worst_angle = 0.0_f64;
-        for &degrees in &angles {
-            let (sin, cos) = degrees.to_radians().sin_cos();
-            for radius in [1.0, 0.25, 37.5] {
-                let (y, x) = (radius * sin, radius * cos);
-                let angle = atan2_degrees(y, x);
-                let expected = y.atan2(x).to_degrees();
-                // Both in `[−180°, 180°]`; `±180°` may differ in sign at
-                // the boundary.
-                let turn = (angle - expected).rem_euclid(360.0);
-                worst_angle = worst_angle.max(turn.min(360.0 - turn));
-                assert!((-180.0..=180.0).contains(&angle), "{y}, {x}: {angle}");
-            }
-        }
-        assert!(worst_angle <= 1e-12, "atan2: {worst_angle}°");
-        assert_eq!(atan2_degrees(0.0, 0.0), 0.0);
-        assert_eq!(atan2_degrees(0.0, 2.0), 0.0);
-        assert_eq!(atan2_degrees(3.0, 0.0), 90.0);
-        assert_eq!(atan2_degrees(0.0, -1.0), 180.0);
-        assert_eq!(atan2_degrees(-0.5, 0.0), -90.0);
-        assert!((atan2_degrees(1.0, 1.0) - 45.0).abs() <= 1e-14);
-        assert!((atan2_degrees(-1.0, -1.0) + 135.0).abs() <= 1e-13);
     }
 
     /// The projection lands on the set, leaves points inside alone, and

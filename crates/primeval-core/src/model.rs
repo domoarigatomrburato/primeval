@@ -373,16 +373,14 @@ impl Model {
     /// - an axis-aligned rectangle rounds the joint result's half-pixel
     ///   edges to the engine's pixel bounds, each edge moving at most
     ///   0.5 px: lossy by design;
-    /// - a rotated rectangle does not convert (`None`): recovering its
-    ///   integer centre, sides and angle from the corners takes `atan2` and
-    ///   `hypot`, which the arithmetic rule of [`crate::joint`] forbids.
-    ///   Only the lab build recovers them, rounded, and lossy too;
+    /// - a rotated rectangle recovers its integer centre, sides and angle
+    ///   from the corners, rounded, lossy too; a side that rounds to 0 does
+    ///   not convert (`None`);
     /// - an ellipse, a circle or a rotated ellipse that moved (the joint
     ///   optimisation's curved outlines, [`crate::joint::Settings::curved`])
-    ///   converts only in the lab build: an ellipse or a circle rounds to
-    ///   its integer centre and radii, lossy, a rotated ellipse takes the
-    ///   drawing's centre, radii and rotation exactly; a radius under 1 does
-    ///   not convert. The production build refuses it (`None`);
+    ///   converts: an ellipse or a circle rounds to its integer centre and
+    ///   radii, lossy, a rotated ellipse takes the drawing's centre, radii
+    ///   and rotation exactly; a radius under 1 does not convert;
     /// - every other shape keeps its geometry, which the drawing must not
     ///   have moved.
     ///
@@ -1706,12 +1704,10 @@ mod tests {
 
     /// A joint result without iterations adopts exactly for triangles and
     /// polygons, which become continuous polygons; rectangles recover their
-    /// integer bounds, rotated rectangles, in the lab build only, their
-    /// centre and sides and the joint result's angle
-    /// ([`assert_rotated_round_trip`]), and the fixed kinds keep their
-    /// geometry. The canvas is the exact replay of the adopted shapes, with
-    /// every colour of the joint result. In the production build a drawing
-    /// with a rotated rectangle is refused, and the model left as it was.
+    /// integer bounds, rotated rectangles their centre and sides and the
+    /// joint result's angle ([`assert_rotated_round_trip`]), and the fixed
+    /// kinds keep their geometry. The canvas is the exact replay of the
+    /// adopted shapes, with every colour of the joint result.
     #[test]
     fn adopt_round_trips_a_joint_result_of_every_kind() {
         for (index, kind) in every_kind().into_iter().enumerate() {
@@ -1722,15 +1718,6 @@ mod tests {
                 let joint = snapped(&model);
                 let kinds: Vec<Shape> = model.history.iter().map(|c| c.shape.clone()).collect();
 
-                let rotated = kinds
-                    .iter()
-                    .any(|shape| matches!(shape, Shape::RotatedRectangle(_)));
-                if rotated && !cfg!(feature = "lab") {
-                    let unchanged = model.clone();
-                    assert_eq!(model.adopt(&joint, true), None, "{context}");
-                    assert_unchanged(&model, &unchanged, &context);
-                    continue;
-                }
                 assert_eq!(model.adopt(&joint, true), Some(true), "{context}");
 
                 let after = model.drawing();
@@ -1775,14 +1762,12 @@ mod tests {
     }
 
     /// A joint result of ellipses, circles or rotated ellipses with the
-    /// curved outlines and no iterations adopts, in the lab build, as the
-    /// joint result's geometry: ellipses and circles keep their integer
-    /// centre and radii, which the quarter-pixel snap keeps, and rotated
-    /// ellipses take the joint result's continuous centre, radii and
-    /// angle. Each shape moved by a pixel adopts as moved. The canvas is
-    /// the exact replay of the adopted shapes. In the production build, a
-    /// drawing whose curved shapes moved is refused, and the model left as
-    /// it was.
+    /// curved outlines and no iterations adopts as the joint result's
+    /// geometry: ellipses and circles keep their integer centre and radii,
+    /// which the quarter-pixel snap keeps, and rotated ellipses take the
+    /// joint result's continuous centre, radii and angle. Each shape moved
+    /// by a pixel adopts as moved. The canvas is the exact replay of the
+    /// adopted shapes.
     #[test]
     fn adopt_round_trips_a_curved_joint_result() {
         use crate::Geometry;
@@ -1804,12 +1789,6 @@ mod tests {
                         panic!("{context}: not an ellipse: {shape:?}");
                     };
                     *cx += 1.0;
-                }
-                if !cfg!(feature = "lab") {
-                    let mut model = original.clone();
-                    assert_eq!(model.adopt(&moved, true), None, "{context}");
-                    assert_unchanged(&model, &original, &context);
-                    continue;
                 }
                 for (drawing, label) in [(&joint, "snapped"), (&moved, "moved")] {
                     let context = format!("{context}, {label}");
@@ -1922,21 +1901,8 @@ mod tests {
             Point::new(10.0, 1.25),
             Point::new(1.0, 1.25),
         ]);
-        // Refused in the production build whatever its sides, since a
-        // rotated rectangle never converts there.
         refused(&rotated, &thin, "a rotated side that rounds to 0");
 
-        let ellipses = stepped_model(2, SMALL, ShapeKind::Ellipse, 4);
-        // The lab build converts a moved ellipse
-        // (`adopt_round_trips_a_curved_joint_result`).
-        if !cfg!(feature = "lab") {
-            let mut moved = snapped(&ellipses);
-            let Geometry::Ellipse { cx, .. } = &mut moved.shapes[2].geometry else {
-                panic!("not an ellipse");
-            };
-            *cx += 1.0;
-            refused(&ellipses, &moved, "a fixed shape that moved");
-        }
         for kind in [
             ShapeKind::Ellipse,
             ShapeKind::Circle,

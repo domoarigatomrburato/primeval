@@ -2,6 +2,7 @@
 #![allow(clippy::too_many_arguments)]
 use crate::drawing::LineCap;
 use crate::scanline::Scanline;
+use crate::score::M;
 use crate::util::sin_cos_degrees;
 use crate::worker::WorkerCtx;
 use rand::Rng;
@@ -338,11 +339,24 @@ impl Trapezoid {
     /// The share of a pixel within `half_width` of a line its centre is
     /// `distance ≥ 0` from: the area on `[distance - half_width,
     /// distance + half_width]`, exact for an infinite straight band.
+    ///
+    /// A band wider than the trapezoid, `half_width > end` (every stroke
+    /// width the search draws), has its far term `primitive(half_width +
+    /// distance)` past `end`, where the primitive is exactly `1/2`, so it
+    /// takes that constant; and where the near end is past `end` too, the
+    /// sum is exactly 1. Both are the full expression's values bit for bit.
     #[inline]
     fn band(self, half_width: f64, distance: f64) -> f64 {
         let near = half_width - distance;
-        (self.primitive(near.abs()).copysign(near) + self.primitive(half_width + distance))
-            .clamp(0.0, 1.0)
+        let far = if half_width > self.end {
+            if near > self.end {
+                return 1.0;
+            }
+            0.5
+        } else {
+            self.primitive(half_width + distance)
+        };
+        (self.primitive(near.abs()).copysign(near) + far).clamp(0.0, 1.0)
     }
 }
 
@@ -445,7 +459,7 @@ fn stroke_segment(
         if column >= inner && column <= length - inner {
             for j in lo..=hi {
                 let across = (f64::from(j) + 0.5 - minor) * cos_theta;
-                let alpha = (trapezoid.band(half_width, across.abs()) * 65535.0) as u32;
+                let alpha = (trapezoid.band(half_width, across.abs()) * f64::from(M)) as u32;
                 if steep {
                     grid.raise(j, i, alpha);
                 } else {
@@ -483,7 +497,7 @@ fn stroke_segment(
             if end_b == End::Cap {
                 share *= trapezoid.inside(length - along);
             }
-            let alpha = (share * 65535.0) as u32;
+            let alpha = (share * f64::from(M)) as u32;
             if steep {
                 grid.raise(j, i, alpha);
             } else {
@@ -870,6 +884,71 @@ mod tests {
     use rand::{RngExt, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
+    /// [`Trapezoid::band`] as both its terms computed in full: the
+    /// reference for its shortcuts.
+    fn two_term_band(trapezoid: Trapezoid, half_width: f64, distance: f64) -> f64 {
+        let near = half_width - distance;
+        (trapezoid.primitive(near.abs()).copysign(near)
+            + trapezoid.primitive(half_width + distance))
+        .clamp(0.0, 1.0)
+    }
+
+    /// The band equals its two terms computed in full, bit for bit, for
+    /// every stroke width the search draws (the quadratics' 2–6 px) and the
+    /// lab's 1 px, across the directions of segments and round caps, on a
+    /// grid of distances and at the trapezoid's breakpoints.
+    #[test]
+    fn bands_match_their_two_terms_computed_in_full() {
+        let (min, max) = crate::shapes::Quadratic::STROKE_WIDTHS;
+        let mut widths: Vec<f64> = vec![1.0];
+        widths.extend((0..=64).map(|k| min + (max - min) * f64::from(k) / 64.0));
+        let mut rng = ChaCha8Rng::seed_from_u64(12);
+        widths.extend((0..32).map(|_| rng.random_range(min..=max)));
+        // Segments' unit directions, as `stroke_segment` computes them,
+        // then round caps' arbitrary ones.
+        let mut directions: Vec<(f64, f64)> = (0..=64)
+            .map(|k| {
+                let gradient = f64::from(k) / 64.0;
+                let cos_theta = 1.0 / gradient.mul_add(gradient, 1.0).sqrt();
+                (cos_theta, gradient * cos_theta)
+            })
+            .collect();
+        directions.extend((0..64).map(|_| {
+            let (dx, dy): (f64, f64) = (rng.random_range(-5.0..5.0), rng.random_range(-5.0..5.0));
+            let distance: f64 = dx.mul_add(dx, dy * dy).sqrt();
+            (dx / distance, dy / distance)
+        }));
+        let mut checked = 0;
+        for &direction in &directions {
+            let trapezoid = Trapezoid::across(direction);
+            for &width in &widths {
+                let half_width: f64 = width / 2.0;
+                let mut distances: Vec<f64> = (0..=640).map(|k| f64::from(k) / 128.0).collect();
+                for edge in [trapezoid.top, trapezoid.end] {
+                    for base in [half_width - edge, half_width + edge] {
+                        for offset in [-1e-12, 0.0, 1e-12] {
+                            distances.push((base + offset).max(0.0));
+                        }
+                    }
+                }
+                distances.extend((0..64).map(|_| rng.random_range(0.0..half_width + 1.0)));
+                for &distance in &distances {
+                    let (band, reference) = (
+                        trapezoid.band(half_width, distance),
+                        two_term_band(trapezoid, half_width, distance),
+                    );
+                    assert_eq!(
+                        band.to_bits(),
+                        reference.to_bits(),
+                        "{direction:?}, {half_width}, {distance}: {band} against {reference}"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 1_000_000, "{checked}");
+    }
+
     fn render_mask(lines: &[Scanline], width: u32, height: u32) -> Buffer {
         let mut buffer = Buffer::new(width, height);
         score::draw_lines(&mut buffer, Color::new(255, 255, 255, 255), lines);
@@ -996,7 +1075,7 @@ mod tests {
             x2,
             alpha,
         };
-        let three_quarters = (0.75 * 65535.0) as u32;
+        let three_quarters = (0.75 * f64::from(M)) as u32;
         assert_eq!(
             lines,
             &[
@@ -1126,7 +1205,7 @@ mod tests {
             for x in line.x1..=line.x2 {
                 let cell = &mut coverage[(line.y * CAP_W + x) as usize];
                 assert_eq!(*cell, 0.0, "pixel ({x}, {}) emitted twice", line.y);
-                *cell = f64::from(line.alpha) / 65535.0;
+                *cell = line.coverage();
             }
         }
         coverage

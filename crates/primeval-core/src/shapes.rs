@@ -1,7 +1,7 @@
 use crate::drawing::{Geometry, LineCap, Point};
 use crate::error::ParseError;
 use crate::scanline::Scanline;
-use crate::util::{rotate_sc, sin_cos_degrees};
+use crate::util::{atan2_degrees, rotate_sc, sin_cos_whole_degrees};
 use crate::worker::{SearchRound, WorkerCtx};
 use rand::{Rng, RngExt};
 use rand_distr::{Distribution, StandardNormal};
@@ -420,17 +420,15 @@ impl Shape {
     /// same family; `None` if it does not convert into a valid one. See
     /// `Model::adopt`, the only caller, for the rules.
     ///
-    /// Computes with `+ − × ÷`, comparisons and `round` only, the
+    /// Computes with `+ − × ÷`, `sqrt`, comparisons and `round` only, the
     /// arithmetic rule of [`crate::joint`], so native and WebAssembly
-    /// builds convert alike. A rotated rectangle converts only in the lab
-    /// build, through `atan2` and `hypot`, which that rule forbids; in the
-    /// production build it is `None`, by the last arm. An ellipse, a circle
-    /// or a rotated ellipse that moved converts only in the lab build too:
-    /// an ellipse or a circle rounds to its integer centre and radii, a
-    /// rotated ellipse takes the continuous ones and the rotation, which
-    /// the joint optimisation's export computes by a trig-free `atan2`; a
-    /// radius under 1 is `None`. The production build takes them only
-    /// unmoved, as the fixed shapes they are there.
+    /// builds convert alike. A rotated rectangle recovers its centre, sides
+    /// and angle from its corners ([`RotatedRectangle::from_corners`]),
+    /// rounded. An ellipse or a circle that moved rounds to its integer
+    /// centre and radii, a rotated ellipse takes the continuous ones and
+    /// the rotation, which the joint optimisation's export computes by
+    /// [`atan2_degrees`]; a radius under 1 is `None`. An unmoved quadratic
+    /// keeps its geometry.
     pub(crate) fn adopted(&self, geometry: &Geometry) -> Option<Self> {
         match (self, geometry) {
             (Self::Triangle(_), Geometry::Polygon(points)) if points.len() == 3 => {
@@ -462,13 +460,11 @@ impl Shape {
                     && rectangle.is_valid())
                 .then_some(Self::Rectangle(rectangle))
             }
-            #[cfg(feature = "lab")]
             (Self::RotatedRectangle(_), Geometry::Polygon(points)) if points.len() == 4 => {
                 RotatedRectangle::from_corners(points).map(Self::RotatedRectangle)
             }
             // The integer centre is a pixel centre, 0.5 below the
             // geometry's ([`ellipse_geometry`]).
-            #[cfg(feature = "lab")]
             (
                 Self::Ellipse(_),
                 &Geometry::Ellipse {
@@ -476,9 +472,9 @@ impl Shape {
                     cy,
                     rx,
                     ry,
-                    rotation,
+                    rotation: 0.0,
                 },
-            ) if rotation == 0.0 => {
+            ) => {
                 let ellipse = Ellipse {
                     x: lattice(cx - 0.5)?,
                     y: lattice(cy - 0.5)?,
@@ -487,7 +483,6 @@ impl Shape {
                 };
                 (ellipse.rx >= 1 && ellipse.ry >= 1).then_some(Self::Ellipse(ellipse))
             }
-            #[cfg(feature = "lab")]
             (
                 Self::Circle(_),
                 &Geometry::Ellipse {
@@ -505,7 +500,6 @@ impl Shape {
                 };
                 (circle.r >= 1).then_some(Self::Circle(circle))
             }
-            #[cfg(feature = "lab")]
             (
                 Self::RotatedEllipse(_),
                 &Geometry::Ellipse {
@@ -522,10 +516,7 @@ impl Shape {
                 ry,
                 angle: rotation,
             })),
-            (
-                Self::Ellipse(_) | Self::Circle(_) | Self::Quadratic(_) | Self::RotatedEllipse(_),
-                geometry,
-            ) => (*geometry == self.geometry()).then(|| self.clone()),
+            (Self::Quadratic(_), geometry) => (*geometry == self.geometry()).then(|| self.clone()),
             _ => None,
         }
     }
@@ -620,11 +611,14 @@ impl Triangle {
     /// triangle has an angle of exactly 15°.
     #[must_use]
     pub(crate) fn is_valid(&self) -> bool {
-        is_legible_convex(&[
-            (f64::from(self.x1), f64::from(self.y1)),
-            (f64::from(self.x2), f64::from(self.y2)),
-            (f64::from(self.x3), f64::from(self.y3)),
-        ])
+        is_legible_convex(
+            &[
+                (f64::from(self.x1), f64::from(self.y1)),
+                (f64::from(self.x2), f64::from(self.y2)),
+                (f64::from(self.x3), f64::from(self.y3)),
+            ],
+            TAN_MIN_ANGLE,
+        )
     }
 
     fn rasterize<'a, R>(&self, worker: &'a mut WorkerCtx<R>) -> &'a [Scanline] {
@@ -698,7 +692,7 @@ impl Rectangle {
     pub(crate) fn is_valid(&self) -> bool {
         let (x1, y1, x2, y2) = self.bounds();
         let (width, height) = (x2 - x1 + 1, y2 - y1 + 1);
-        width.max(height) <= MAX_ASPECT * width.min(height)
+        within_aspect(width, height)
     }
 
     /// The corners in order: `x1 <= x2` and `y1 <= y2`.
@@ -834,12 +828,13 @@ impl RotatedRectangle {
     }
 
     /// The exact corners, rotated by `angle` degrees about `(x, y)`, by
-    /// [`sin_cos_degrees`], so that every target computes the same ones;
-    /// whole quarter turns are exact.
+    /// [`sin_cos_whole_degrees`], the table of
+    /// [`crate::util::sin_cos_degrees`], so that every target computes the
+    /// same ones; whole quarter turns are exact.
     fn corners(&self) -> [(f64, f64); 4] {
         let half_x = f64::from(self.sx) / 2.0;
         let half_y = f64::from(self.sy) / 2.0;
-        let (sin_a, cos_a) = sin_cos_degrees(f64::from(self.angle));
+        let (sin_a, cos_a) = sin_cos_whole_degrees(self.angle);
         [
             (-half_x, -half_y),
             (half_x, -half_y),
@@ -859,7 +854,7 @@ impl RotatedRectangle {
         let (sx, sy) = loop {
             let sx = worker.rng.random_range(1..33);
             let sy = worker.rng.random_range(1..33);
-            if sx.max(sy) <= MAX_ASPECT * sx.min(sy) {
+            if within_aspect(sx, sy) {
                 break (sx, sy);
             }
         };
@@ -877,7 +872,7 @@ impl RotatedRectangle {
     /// Whether the long side is at most [`MAX_ASPECT`] times the short one.
     #[must_use]
     pub(crate) fn is_valid(&self) -> bool {
-        self.sx.max(self.sy) <= MAX_ASPECT * self.sx.min(self.sy)
+        within_aspect(self.sx, self.sy)
     }
 
     /// The rectangle whose corners, in [`Self::corners`]' order, are about
@@ -887,15 +882,18 @@ impl RotatedRectangle {
     /// `None` if a side rounds to 0 or the rectangle breaks the
     /// aspect-ratio cap.
     ///
-    /// Lab only: the angle comes from `atan2` and the sides from `hypot`,
-    /// whose last bit can differ between platforms.
-    #[cfg(feature = "lab")]
+    /// The angle comes from [`atan2_degrees`] and the sides from `sqrt`,
+    /// never from the platform's `atan2` or `hypot`, whose last bit can
+    /// differ between platforms.
     fn from_corners(corners: &[Point]) -> Option<Self> {
         let [a, b, c, d] = corners else {
             return None;
         };
-        let side = |p: &Point, q: &Point| (q.x - p.x).hypot(q.y - p.y);
-        let angle = (b.y - a.y).atan2(b.x - a.x).to_degrees().round();
+        let side = |p: &Point, q: &Point| {
+            let (dx, dy) = (q.x - p.x, q.y - p.y);
+            (dx * dx + dy * dy).sqrt()
+        };
+        let angle = atan2_degrees(b.y - a.y, b.x - a.x).round();
         let rectangle = Self {
             x: lattice((a.x + b.x + c.x + d.x) / 4.0)?,
             y: lattice((a.y + b.y + c.y + d.y) / 4.0)?,
@@ -1379,7 +1377,7 @@ impl Polygon {
     #[must_use]
     pub(crate) fn is_valid(&self) -> bool {
         let vertices: [(f64, f64); 4] = std::array::from_fn(|i| (self.x[i], self.y[i]));
-        is_legible_convex(&vertices[..self.order])
+        is_legible_convex(&vertices[..self.order], TAN_MIN_ANGLE)
     }
 
     fn rasterize<'a, R>(&self, worker: &'a mut WorkerCtx<R>) -> &'a [Scanline] {
@@ -1430,44 +1428,67 @@ impl Polygon {
 const TAN_MIN_ANGLE: f64 = 0.267_949_192_431_122_7;
 
 /// The longest side of a rectangle, rotated or not, in multiples of its
-/// shortest.
-const MAX_ASPECT: i32 = 8;
+/// shortest: the greedy search's cap on its integer sides
+/// ([`within_aspect`]), and the joint optimisation's on its continuous
+/// ones.
+pub(crate) const MAX_ASPECT: i32 = 8;
+
+/// Whether the longer of the sides `a` and `b` is at most [`MAX_ASPECT`]
+/// times the shorter.
+fn within_aspect(a: i32, b: i32) -> bool {
+    a.max(b) <= MAX_ASPECT * a.min(b)
+}
 
 /// Whether the polygon through `vertices`, three or four of them in either
 /// orientation, is simple and strictly convex with every interior angle
-/// strictly above 15°: the rule that keeps triangles and polygons reading
-/// as their kind.
+/// strictly above `atan tan_min_angle`: with [`TAN_MIN_ANGLE`], 15°, the
+/// rule that keeps triangles and polygons reading as their kind.
 ///
 /// At each vertex, with `u` and `w` the edges to the next and the previous
 /// vertex, the interior angle `θ` has `sin θ ∝ s · (u × w)` and
 /// `cos θ ∝ u · w`, where `s = ±1` is the orientation, taken from the first
-/// vertex. A vertex passes if `s · (u × w) > 0`, a strict turn the same way
-/// as at the first vertex (no straight or reflex angle, no coincident
-/// vertices), and `s · (u × w) > tan 15° · (u · w)`, so `θ > 15°`; an angle
-/// of 90° or more passes on the first condition alone. With a strict turn
-/// the same way at every vertex, every exterior angle is below 180° and
-/// they sum to a multiple of 360°, which for at most four vertices can
+/// vertex. A vertex passes ([`legible_corner`]) if `s · (u × w) > 0`, a
+/// strict turn the same way as at the first vertex (no straight or reflex
+/// angle, no coincident vertices), and
+/// `s · (u × w) > tan_min_angle · (u · w)`, so `θ` is above the bound; an
+/// angle of 90° or more passes on the first condition alone. With a strict
+/// turn the same way at every vertex, every exterior angle is below 180°
+/// and they sum to a multiple of 360°, which for at most four vertices can
 /// only be 360°: the polygon is simple and convex.
-fn is_legible_convex(vertices: &[(f64, f64)]) -> bool {
+pub(crate) fn is_legible_convex(vertices: &[(f64, f64)], tan_min_angle: f64) -> bool {
     debug_assert!((3..=4).contains(&vertices.len()));
     let n = vertices.len();
-    let mut orientation = 1.0;
-    for i in 0..n {
-        let (px, py) = vertices[i];
-        let (nx, ny) = vertices[(i + 1) % n];
-        let (qx, qy) = vertices[(i + n - 1) % n];
-        let (ux, uy) = (nx - px, ny - py);
-        let (wx, wy) = (qx - px, qy - py);
-        let cross = ux * wy - uy * wx;
-        if i == 0 && cross < 0.0 {
-            orientation = -1.0;
-        }
-        let turn = orientation * cross;
-        if !(turn > 0.0 && turn > TAN_MIN_ANGLE * (ux * wx + uy * wy)) {
-            return false;
-        }
-    }
-    true
+    let ((px, py), (nx, ny), (qx, qy)) = (vertices[0], vertices[1], vertices[n - 1]);
+    let cross = (nx - px) * (qy - py) - (ny - py) * (qx - px);
+    let orientation = if cross < 0.0 { -1.0 } else { 1.0 };
+    (0..n).all(|i| {
+        legible_corner(
+            vertices[(i + n - 1) % n],
+            vertices[i],
+            vertices[(i + 1) % n],
+            orientation,
+            tan_min_angle,
+        )
+    })
+}
+
+/// Whether the corner at `p`, between `previous` and `next`, turns
+/// strictly the way the orientation `s = ±1` says, with an interior angle
+/// above `atan tan_min_angle`: `s · (u × w) > 0` and
+/// `s · (u × w) > tan_min_angle · (u · w)`, with `u` and `w` the edges to
+/// `next` and `previous` ([`is_legible_convex`]).
+#[inline]
+pub(crate) fn legible_corner(
+    previous: (f64, f64),
+    p: (f64, f64),
+    next: (f64, f64),
+    s: f64,
+    tan_min_angle: f64,
+) -> bool {
+    let (ux, uy) = (next.0 - p.0, next.1 - p.1);
+    let (wx, wy) = (previous.0 - p.0, previous.1 - p.1);
+    let turn = s * (ux * wy - uy * wx);
+    turn > 0.0 && turn > tan_min_angle * (ux * wx + uy * wy)
 }
 
 fn gaussian_sample<R: Rng>(rng: &mut R, sigma: f64) -> f64 {
@@ -1728,6 +1749,14 @@ impl EdgeWalker {
 mod tests {
     use super::*;
     use crate::test_util::make_test_round;
+    use crate::util::sin_cos_degrees;
+
+    #[test]
+    fn the_aspect_cap_is_eight_to_one_either_way() {
+        assert!(within_aspect(1, 8) && within_aspect(8, 1) && within_aspect(5, 5));
+        assert!(within_aspect(4, 32) && within_aspect(32, 4));
+        assert!(!within_aspect(1, 9) && !within_aspect(9, 1) && !within_aspect(4, 33));
+    }
 
     fn round(w: u32, h: u32) -> (WorkerCtx<rand_chacha::ChaCha8Rng>, SearchRound<'static>) {
         make_test_round(w, h, 7)

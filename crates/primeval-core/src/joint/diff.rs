@@ -169,6 +169,7 @@ pub(super) struct Layer {
 
 impl Layer {
     /// A triangle through the six coordinates `v`.
+    #[cfg(test)]
     pub(super) fn triangle(v: [f64; 6], alpha: f64, color: [f64; 3]) -> Self {
         Self {
             outline: Outline::Triangle,
@@ -312,11 +313,16 @@ impl<F: Real> Mask<F> {
     /// other pixel at zero. The box is the lines' bounding box on the
     /// canvas, empty without lines.
     pub(super) fn from_lines(lines: &[Scanline], width: usize, height: usize) -> Self {
-        let spans: Vec<(usize, usize, usize, u32)> = lines
+        let spans: Vec<(usize, usize, usize, f64)> = lines
             .iter()
             .filter_map(|line| {
                 let (x1, x2) = clamp_line(line, width as i32, height as i32)?;
-                Some((line.y as usize, x1 as usize, x2 as usize + 1, line.alpha))
+                Some((
+                    line.y as usize,
+                    x1 as usize,
+                    x2 as usize + 1,
+                    line.coverage(),
+                ))
             })
             .collect();
         if spans.is_empty() {
@@ -328,8 +334,8 @@ impl<F: Real> Mask<F> {
         let y1 = spans.iter().map(|span| span.0).max().unwrap_or(0) + 1;
         let box_width = x1 - x0;
         let mut coverage = vec![F::of(0.0); box_width * (y1 - y0)];
-        for (y, start, end, alpha) in spans {
-            let value = F::of(f64::from(alpha) / 65535.0);
+        for (y, start, end, share) in spans {
+            let value = F::of(share);
             let row = (y - y0) * box_width;
             for cell in &mut coverage[row + start - x0..row + end - x0] {
                 *cell = value;
@@ -401,9 +407,10 @@ struct EdgeValue<F> {
 }
 
 /// How a [`Prepared`] layer covers its pixels.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum Kind {
     /// A fixed layer's mask.
+    #[default]
     Masked,
     /// Three edges.
     Triangle,
@@ -455,7 +462,7 @@ struct Conic<F> {
 /// fixed layer's mask, its bounding box on the canvas (`x0..x1`, `y0..y1`,
 /// empty if it cannot cover any pixel), its opacity as a fraction and its
 /// colour.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub(super) struct Prepared<'a, F> {
     kind: Kind,
     edges: [Edge<F>; 4],
@@ -610,6 +617,14 @@ impl<F: Real> Edge<F> {
 }
 
 /// The pixels `start..end` of a canvas axis of `size` pixels whose
+/// centres lie in `[low, high]`, or `None` if there are none.
+fn pixel_span(low: f64, high: f64, size: usize) -> Option<(usize, usize)> {
+    let start = low.ceil().max(0.0);
+    let end = (high.floor() + 1.0).min(size as f64);
+    (start < end).then_some((start as usize, end as usize))
+}
+
+/// The pixels `start..end` of a canvas axis of `size` pixels whose
 /// centres an axis-aligned rectangle's sides at `low` and `high` cover with
 /// a box filter of width `filter`, or `None` if there are none or the
 /// rectangle is empty.
@@ -617,9 +632,7 @@ fn box_span(low: f64, high: f64, filter: f64, size: usize) -> Option<(usize, usi
     if low >= high {
         return None;
     }
-    let start = (low - filter / 2.0).ceil().max(0.0);
-    let end = ((high + filter / 2.0).floor() + 1.0).min(size as f64);
-    (start < end).then_some((start as usize, end as usize))
+    pixel_span(low - filter / 2.0, high + filter / 2.0, size)
 }
 
 /// `1` for a non-negative `value`, `−1` for a negative one: the sign the
@@ -645,18 +658,14 @@ impl<'a, F: Real> Prepared<'a, F> {
                 let mask = &scene.masks[index];
                 return Self {
                     kind: Kind::Masked,
-                    edges: [Edge::default(); 4],
-                    rect: [F::of(0.0); 5],
-                    conic: Conic::default(),
                     mask: &mask.coverage,
-                    half: F::of(0.0),
-                    inv_area: F::of(0.0),
                     x0: mask.x0,
                     x1: mask.x1,
                     y0: mask.y0,
                     y1: mask.y1,
                     opacity,
                     color,
+                    ..Self::default()
                 };
             }
         };
@@ -674,30 +683,20 @@ impl<'a, F: Real> Prepared<'a, F> {
             };
             return Self {
                 kind,
-                edges: [Edge::default(); 4],
                 rect: [p[0], p[1], p[2], p[3], 1.0 / filter].map(F::of),
-                conic: Conic::default(),
-                mask: &[],
-                half: F::of(0.0),
-                inv_area: F::of(0.0),
                 x0,
                 x1,
                 y0,
                 y1,
                 opacity,
                 color,
+                ..Self::default()
             };
         }
         let cross = if sides == 3 {
-            (v[2] - v[0]) * (v[5] - v[1]) - (v[3] - v[1]) * (v[4] - v[0])
+            super::twice_signed_area_triangle(&v)
         } else {
-            // Twice the shoelace area.
-            (0..sides)
-                .map(|i| {
-                    let j = (i + 1) % sides;
-                    v[2 * i] * v[2 * j + 1] - v[2 * j] * v[2 * i + 1]
-                })
-                .sum()
+            super::twice_shoelace(&v, sides)
         };
         let sigma = if cross >= 0.0 { 1.0 } else { -1.0 };
         let mut visible = cross.abs() > 1e-9;
@@ -766,12 +765,9 @@ impl<'a, F: Real> Prepared<'a, F> {
             let values = (1..sides).map(|k| v[2 * k + offset]);
             let low = values.clone().fold(v[offset], f64::min) - reach;
             let high = values.fold(v[offset], f64::max) + reach;
-            let start = low.ceil().max(0.0);
-            let end = (high.floor() + 1.0).min(size as f64);
-            if visible && start < end {
-                (start as usize, end as usize)
-            } else {
-                (0, 0)
+            match pixel_span(low, high, size) {
+                Some(span) if visible => span,
+                _ => (0, 0),
             }
         };
         let (x0, x1) = span(0, scene.width);
@@ -784,9 +780,6 @@ impl<'a, F: Real> Prepared<'a, F> {
         Self {
             kind,
             edges,
-            rect: [F::of(0.0); 5],
-            conic: Conic::default(),
-            mask: &[],
             half: F::of(filter / 2.0),
             inv_area: F::of(1.0 / (filter * filter)),
             x0,
@@ -795,6 +788,7 @@ impl<'a, F: Real> Prepared<'a, F> {
             y1,
             opacity,
             color,
+            ..Self::default()
         }
     }
 
@@ -816,9 +810,7 @@ impl<'a, F: Real> Prepared<'a, F> {
         let half_x = (ax * ax + (b * uy) * (b * uy)).sqrt();
         let half_y = (ay * ay + (b * ux) * (b * ux)).sqrt();
         let span = |centre: f64, half: f64, size: usize| {
-            let start = (centre - half - reach).ceil().max(0.0);
-            let end = ((centre + half + reach).floor() + 1.0).min(size as f64);
-            (start < end).then_some((start as usize, end as usize))
+            pixel_span(centre - half - reach, centre + half + reach, size)
         };
         let (x0, x1, y0, y1) = match (
             span(cx, half_x, scene.width),
@@ -831,8 +823,6 @@ impl<'a, F: Real> Prepared<'a, F> {
         let inner = shorter - reach;
         Self {
             kind: Kind::Curved,
-            edges: [Edge::default(); 4],
-            rect: [F::of(0.0); 5],
             conic: Conic {
                 cx: F::of(cx),
                 cy: F::of(cy),
@@ -845,15 +835,13 @@ impl<'a, F: Real> Prepared<'a, F> {
                 filter: F::of(filter),
                 reach: F::of(reach),
             },
-            mask: &[],
-            half: F::of(0.0),
-            inv_area: F::of(0.0),
             x0,
             x1,
             y0,
             y1,
             opacity,
             color,
+            ..Self::default()
         }
     }
 
@@ -1323,14 +1311,15 @@ trait Cover {
     fn cover<F: Real>(layer: &Prepared<'_, F>, x: usize, y: usize, fy: F) -> F;
 
     /// The coverage and its gradient with respect to the vertex
-    /// coordinates, or an axis-aligned rectangle's parameters, if the layer
-    /// has them, or `None` where the coverage and its gradient are zero.
+    /// coordinates, an axis-aligned rectangle's parameters or a curved
+    /// layer's ([`Kind::coords`] of them; all zero for a fixed layer, which
+    /// has none), or `None` where the coverage and its gradient are zero.
     fn cover_grad<F: Real>(
         layer: &Prepared<'_, F>,
         x: usize,
         y: usize,
         fy: F,
-    ) -> Option<(F, Option<[F; COORDS]>)>;
+    ) -> Option<(F, [F; COORDS])>;
 }
 
 /// A fixed layer's mask.
@@ -1351,10 +1340,8 @@ impl Cover for Boxed {
         x: usize,
         _y: usize,
         fy: F,
-    ) -> Option<(F, Option<[F; COORDS]>)> {
-        layer
-            .box_coverage_grad(F::of(x as f64), fy)
-            .map(|(cov, grad)| (cov, Some(grad)))
+    ) -> Option<(F, [F; COORDS])> {
+        layer.box_coverage_grad(F::of(x as f64), fy)
     }
 }
 
@@ -1377,10 +1364,8 @@ impl Cover for Curved {
         x: usize,
         _y: usize,
         fy: F,
-    ) -> Option<(F, Option<[F; COORDS]>)> {
-        layer
-            .conic_coverage_grad(F::of(x as f64), fy)
-            .map(|(cov, grad)| (cov, Some(grad)))
+    ) -> Option<(F, [F; COORDS])> {
+        layer.conic_coverage_grad(F::of(x as f64), fy)
     }
 }
 
@@ -1396,9 +1381,9 @@ impl Cover for Masked {
         x: usize,
         y: usize,
         fy: F,
-    ) -> Option<(F, Option<[F; COORDS]>)> {
+    ) -> Option<(F, [F; COORDS])> {
         let cov = Self::cover(layer, x, y, fy);
-        (cov > F::of(0.0)).then_some((cov, None))
+        (cov > F::of(0.0)).then_some((cov, [F::default(); COORDS]))
     }
 }
 
@@ -1414,10 +1399,8 @@ impl<const N: usize> Cover for Edges<N> {
         x: usize,
         _y: usize,
         fy: F,
-    ) -> Option<(F, Option<[F; COORDS]>)> {
-        layer
-            .edge_coverage_grad::<N>(F::of(x as f64), fy)
-            .map(|(cov, grad)| (cov, Some(grad)))
+    ) -> Option<(F, [F; COORDS])> {
+        layer.edge_coverage_grad::<N>(F::of(x as f64), fy)
     }
 }
 
@@ -1779,10 +1762,8 @@ impl<F: Real> Reverse<'_, F> {
                 }
                 let dl_dw = (F::of(2.0) * transmitted * dot).get();
                 if dl_dw != 0.0 {
-                    if let Some(cov_grad) = cov_grad {
-                        for (sum, d) in sums[..coords].iter_mut().zip(cov_grad) {
-                            *sum += dl_dw * opacity * d.get();
-                        }
+                    for (sum, d) in sums[..coords].iter_mut().zip(cov_grad) {
+                        *sum += dl_dw * opacity * d.get();
                     }
                     sums[ALPHA] += dl_dw * cov.get() / 255.0;
                 }
@@ -1899,6 +1880,21 @@ pub(super) mod tests {
     use super::*;
     use rand::{RngExt, SeedableRng};
     use rand_chacha::ChaCha8Rng;
+
+    /// The pixels whose integer centres lie in `[low, high]`, clipped to
+    /// the axis, ends included.
+    #[test]
+    fn pixel_spans_take_the_centres_inside_the_closed_range() {
+        assert_eq!(pixel_span(1.0, 3.0, 10), Some((1, 4)));
+        assert_eq!(pixel_span(0.5, 3.5, 10), Some((1, 4)));
+        assert_eq!(pixel_span(-4.0, 2.2, 10), Some((0, 3)));
+        assert_eq!(pixel_span(7.1, 30.0, 10), Some((8, 10)));
+        assert_eq!(pixel_span(2.1, 2.9, 10), None);
+        assert_eq!(pixel_span(-3.0, -0.5, 10), None);
+        assert_eq!(pixel_span(10.0, 12.0, 10), None);
+        assert_eq!(box_span(1.0, 3.0, 1.0, 10), Some((1, 4)));
+        assert_eq!(box_span(3.0, 3.0, 1.0, 10), None);
+    }
 
     pub(in crate::joint) fn random_scene<F: Real>(
         rng: &mut ChaCha8Rng,

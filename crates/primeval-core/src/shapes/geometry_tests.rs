@@ -379,7 +379,7 @@ fn engine_coverage(shape: &Shape, worker: &mut WorkerCtx<rand_chacha::ChaCha8Rng
     let mut coverage = vec![0.0; (W * H) as usize];
     for line in shape.rasterize(worker) {
         for x in line.x1..=line.x2 {
-            coverage[line.y as usize * W as usize + x as usize] = f64::from(line.alpha) / 65535.0;
+            coverage[line.y as usize * W as usize + x as usize] = line.coverage();
         }
     }
     coverage

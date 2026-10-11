@@ -17,6 +17,7 @@
 
 use super::angle::Projected;
 use super::diff::{COORDS, Outline};
+use super::lattice::{lengthen_on_lattice, round_to};
 
 /// The least radius of a circle or an ellipse, as the greedy search's.
 const LEAST: f64 = 1.0;
@@ -54,11 +55,6 @@ pub(super) fn project(outline: Outline, p: &mut [f64; COORDS]) -> Projected {
     }
 }
 
-/// `value` rounded to the lattice of `quantum`.
-fn round_to(value: f64, quantum: f64) -> f64 {
-    (value / quantum).round() * quantum
-}
-
 /// The curved layer `p` of `outline` with every parameter rounded to the
 /// lattice of `quantum` (`1/4`, `1/2` or `1`, so that 1 is on it), every
 /// radius kept at least 1.
@@ -81,19 +77,7 @@ pub(super) fn snap(outline: Outline, p: &[f64; COORDS], quantum: f64) -> [f64; C
             out[3] = out[3].max(LEAST);
         }
         Outline::RotatedEllipse => {
-            let short = |out: &[f64; COORDS]| out[2] * out[2] + out[3] * out[3] < LEAST * LEAST;
-            if short(&out) {
-                let away = |value: f64| {
-                    let steps = (value.abs() / quantum).ceil() * quantum;
-                    if value < 0.0 { -steps } else { steps }
-                };
-                out[2] = away(p[2]);
-                out[3] = away(p[3]);
-                while short(&out) {
-                    let k = if out[2].abs() >= out[3].abs() { 2 } else { 3 };
-                    out[k] += if out[k] < 0.0 { -quantum } else { quantum };
-                }
-            }
+            lengthen_on_lattice(&mut out, p, quantum, LEAST * LEAST);
             out[4] = out[4].max(LEAST);
         }
         outline => panic!("not a curved outline: {outline:?}"),
