@@ -465,6 +465,69 @@ describe("demo, cross-origin isolated by headers", () => {
     }
   });
 
+  test("the compare divider follows the pointer without restyling the frame", async () => {
+    const { context, page } = await openDemo(server.origin);
+    try {
+      await setControls(page, { count: 4, resolution: 128 });
+      await page.getByRole("button", { name: SAMPLE }).click();
+      await waitForRun(page, 0);
+      await page.waitForFunction(() => document.querySelector("#frame").dataset.view === "compare");
+
+      const frame = await page.locator("#frame").boundingBox();
+      // Every change to the frame's own style attribute during the drag.
+      await page.evaluate(() => {
+        window.frameStyleChanges = [];
+        new MutationObserver((records) => {
+          for (const record of records) {
+            window.frameStyleChanges.push(record.oldValue);
+          }
+        }).observe(document.querySelector("#frame"), {
+          attributes: true,
+          attributeFilter: ["style"],
+          attributeOldValue: true,
+        });
+      });
+      const frameStyle = () =>
+        page.evaluate(() => {
+          const element = document.querySelector("#frame");
+          const computed = getComputedStyle(element);
+          return {
+            inline: element.getAttribute("style"),
+            split: computed.getPropertyValue("--split"),
+          };
+        });
+      const before = await frameStyle();
+      const nextFrame = () =>
+        page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => resolve())));
+      const knobX = async () => {
+        const knob = await page.locator(".knob").boundingBox();
+        return knob.x + knob.width / 2;
+      };
+
+      const y = frame.y + frame.height / 2;
+      await page.mouse.move(frame.x + frame.width / 2, y);
+      await page.mouse.down();
+      for (const fraction of [0.45, 0.373, 0.618]) {
+        const x = frame.x + frame.width * fraction;
+        await page.mouse.move(x, y, { steps: 4 });
+        await nextFrame();
+        await nextFrame();
+        const at = await knobX();
+        assert.ok(Math.abs(at - x) <= 1, `divider at ${at}, pointer at ${x}`);
+        assert.match(
+          await page.locator("#compare").getAttribute("aria-valuetext"),
+          /^\d+% original, \d+% shapes$/,
+        );
+      }
+      await page.mouse.up();
+
+      assert.deepEqual(await page.evaluate(() => window.frameStyleChanges), []);
+      assert.deepEqual(await frameStyle(), before);
+    } finally {
+      await context.close();
+    }
+  });
+
   test("every control has an accessible name", async () => {
     const { context, page } = await openDemo(server.origin);
     try {
@@ -517,6 +580,50 @@ describe("demo, cross-origin isolated by headers", () => {
   });
 });
 
+/** The bootstrap's stored probe outcome (see demo/index.html). */
+const COI_OUTCOME_KEY = "primeval-coi-threads";
+
+/** The stored probe outcome, parsed, or null. */
+const storedOutcome = (page) =>
+  page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? "null"), COI_OUTCOME_KEY);
+
+/**
+ * Simulates WebKit's bug with service-worker isolation (WebKit bug 261734):
+ * while the page is cross-origin isolated, the bootstrap's probe workers fail
+ * to load. Chromium itself has no such bug.
+ */
+function failProbeWorkers() {
+  if (!window.crossOriginIsolated) {
+    return;
+  }
+  const NativeWorker = window.Worker;
+  window.Worker = function Worker(url, options) {
+    if (!String(url).includes("coi-probe")) {
+      return new NativeWorker(url, options);
+    }
+    const worker = new EventTarget();
+    worker.postMessage = () => {};
+    worker.terminate = () => {};
+    setTimeout(() => {
+      const event = new Event("error");
+      worker.onerror?.(event);
+      worker.dispatchEvent(event);
+    });
+    return worker;
+  };
+}
+
+/** Counts the page's main-frame loads; navigations commit before the new document runs. */
+function countLoads(page) {
+  const counter = { loads: 0 };
+  page.on("framenavigated", (frame) => {
+    if (frame === page.mainFrame()) {
+      counter.loads += 1;
+    }
+  });
+  return counter;
+}
+
 describe("demo, served without isolation headers", () => {
   let server;
 
@@ -568,6 +675,104 @@ describe("demo, served without isolation headers", () => {
       await page.waitForFunction(() => window.primevalDemo?.ready === true);
       assert.equal(await page.evaluate(() => window.crossOriginIsolated), true);
       assert.equal(loads, 3);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("a passing probe stores that threads work in this browser", async () => {
+    const context = await browser.newContext({ serviceWorkers: "allow" });
+    try {
+      const page = await context.newPage();
+      await page.goto(`${server.origin}/`);
+      await page.waitForFunction(() => window.crossOriginIsolated === true, undefined, {
+        timeout: 15000,
+      });
+      await page.waitForFunction((key) => localStorage.getItem(key) !== null, COI_OUTCOME_KEY);
+      const userAgent = await page.evaluate(() => navigator.userAgent);
+      assert.deepEqual(await storedOutcome(page), { userAgent, threads: true });
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("a failing probe falls back to one thread without the service worker", async () => {
+    const context = await browser.newContext({ serviceWorkers: "allow" });
+    try {
+      await context.addInitScript(failProbeWorkers);
+      const requests = [];
+      context.on("request", (request) => requests.push(new URL(request.url()).pathname));
+      const page = await context.newPage();
+      const counter = countLoads(page);
+      await page.goto(`${server.origin}/`);
+      // The bootstrap's reload isolates the page, the probe fails, and the
+      // fallback's reload leaves it without the service worker.
+      await page.waitForFunction(
+        (key) => localStorage.getItem(key) !== null && !window.crossOriginIsolated,
+        COI_OUTCOME_KEY,
+        { timeout: 15000 },
+      );
+      await page.waitForFunction(() => window.primevalDemo?.ready === true);
+      await page.waitForTimeout(SETTLE_MS);
+      assert.ok(counter.loads <= 3, `${counter.loads} loads`);
+      assert.equal(await page.evaluate(() => window.crossOriginIsolated), false);
+      assert.equal(await page.evaluate(() => navigator.serviceWorker.controller), null);
+      assert.equal(
+        await page.evaluate(async () => (await navigator.serviceWorker.getRegistrations()).length),
+        0,
+      );
+      const userAgent = await page.evaluate(() => navigator.userAgent);
+      assert.deepEqual(await storedOutcome(page), { userAgent, threads: false });
+      const badge = page.locator("#threads");
+      assert.equal((await badge.textContent()).trim(), "1 thread");
+      assert.match(await badge.getAttribute("title"), /service worker/);
+
+      await collectRuns(page);
+      await setControls(page, { count: 4, resolution: 128 });
+      await page.getByRole("button", { name: SAMPLE }).click();
+      const run = await waitForRun(page, 0);
+      assert.equal(run.outcome, "done");
+      const wasm = requests.filter((pathname) => pathname.endsWith(".wasm"));
+      assert.deepEqual(wasm, ["/wasm/single/primeval_bg.wasm"]);
+
+      // A later visit neither registers the service worker nor reloads.
+      requests.length = 0;
+      const later = await context.newPage();
+      const laterCounter = countLoads(later);
+      await later.goto(`${server.origin}/`);
+      await later.waitForFunction(() => window.primevalDemo?.ready === true);
+      await later.waitForTimeout(SETTLE_MS);
+      assert.equal(laterCounter.loads, 1);
+      assert.ok(!requests.includes("/coi-sw.js"), requests.join(", "));
+      assert.equal(
+        await later.evaluate(async () => (await navigator.serviceWorker.getRegistrations()).length),
+        0,
+      );
+      assert.equal(await later.evaluate(() => window.crossOriginIsolated), false);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("an outcome stored for another browser version does not disable threads", async () => {
+    const context = await browser.newContext({ serviceWorkers: "allow" });
+    try {
+      await context.addInitScript((key) => {
+        if (localStorage.getItem(key) === null) {
+          localStorage.setItem(key, JSON.stringify({ userAgent: "Other/1.0", threads: false }));
+        }
+      }, COI_OUTCOME_KEY);
+      const page = await context.newPage();
+      await page.goto(`${server.origin}/`);
+      await page.waitForFunction(() => window.crossOriginIsolated === true, undefined, {
+        timeout: 15000,
+      });
+      const userAgent = await page.evaluate(() => navigator.userAgent);
+      await page.waitForFunction(
+        ([key, agent]) => JSON.parse(localStorage.getItem(key))?.userAgent === agent,
+        [COI_OUTCOME_KEY, userAgent],
+      );
+      assert.deepEqual(await storedOutcome(page), { userAgent, threads: true });
     } finally {
       await context.close();
     }

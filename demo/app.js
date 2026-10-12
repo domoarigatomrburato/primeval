@@ -11,6 +11,8 @@ const ui = {
   frame: $("#frame"),
   result: $("#result"),
   original: $("#original"),
+  reveal: $("#frame .reveal"),
+  divider: $("#frame .divider"),
   compare: $("#compare"),
   choose: $("#choose"),
   fileInput: $("#file-input"),
@@ -83,9 +85,16 @@ function showThreads() {
   const threads = isolated ? navigator.hardwareConcurrency : 1;
   ui.threads.dataset.isolated = String(isolated);
   ui.threads.textContent = `${threads} ${threads === 1 ? "thread" : "threads"}`;
-  ui.threads.title = isolated
-    ? "The page is cross-origin isolated, so the render uses a thread per core."
-    : "The page is not cross-origin isolated, so the render runs on one thread.";
+  // The isolation bootstrap in index.html marks a browser whose probe failed.
+  const fellBack = document.documentElement.dataset.coiThreads === "false";
+  if (isolated) {
+    ui.threads.title = "The page is cross-origin isolated, so the render uses a thread per core.";
+  } else if (fellBack) {
+    ui.threads.title =
+      "This browser cannot start the demo's threads through its service worker, so the render runs on one thread.";
+  } else {
+    ui.threads.title = "The page is not cross-origin isolated, so the render runs on one thread.";
+  }
 }
 
 // --- Controls ---
@@ -207,9 +216,35 @@ function setView(view) {
   }
 }
 
+/**
+ * Sets the compare split on the two elements it moves, never on the frame:
+ * a property there would restyle every shape of the SVG inside it.
+ */
 function setSplit(percent) {
-  ui.frame.style.setProperty("--split", `${percent}%`);
-  ui.compare.setAttribute("aria-valuetext", `${percent}% original, ${100 - percent}% shapes`);
+  ui.reveal.style.setProperty("--split", `${percent}%`);
+  ui.divider.style.setProperty("--split", `${percent}%`);
+  describeSplit(percent);
+}
+
+function describeSplit(percent) {
+  const original = Math.round(percent);
+  ui.compare.setAttribute("aria-valuetext", `${original}% original, ${100 - original}% shapes`);
+}
+
+/**
+ * A drag fires more input events than frames: the label follows each one,
+ * the picture only the last one per frame.
+ */
+const split = { frame: 0 };
+
+function scheduleSplit() {
+  describeSplit(Number(ui.compare.value));
+  if (split.frame === 0) {
+    split.frame = requestAnimationFrame(() => {
+      split.frame = 0;
+      setSplit(Number(ui.compare.value));
+    });
+  }
 }
 
 function setAspect(width, height) {
@@ -776,7 +811,7 @@ function wireControls() {
       cancelScheduledRun();
     }
   });
-  ui.compare.addEventListener("input", () => setSplit(Number(ui.compare.value)));
+  ui.compare.addEventListener("input", scheduleSplit);
 }
 
 showThreads();

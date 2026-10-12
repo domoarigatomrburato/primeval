@@ -58,7 +58,7 @@ npm run build && npm run build:wasm
 npm run demo
 ```
 
-The server sends no COOP/COEP headers, as on Pages, so the demo's service worker (`demo/coi-sw.js`) isolates the page after one reload. `npm run demo -- --isolated` sends the headers from the server instead. The demo's tests are part of `npm run test:browser`.
+The server sends no COOP/COEP headers, as on Pages, so the demo's service worker (`demo/coi-sw.js`) isolates the page after one reload. Safari (WebKit) refuses concurrently started module workers under that isolation, so the bootstrap in `demo/index.html` probes for this once per browser version (`demo/coi-probe.js`) and, when the probe fails, unregisters the service worker and reloads once more onto one thread. `npm run demo -- --isolated` sends the headers from the server instead. The demo's tests are part of `npm run test:browser`.
 
 ## Project Rules
 

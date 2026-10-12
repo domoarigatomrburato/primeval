@@ -253,7 +253,6 @@ a:hover {
 
 .frame {
   --aspect: 0.75;
-  --split: 50%;
   position: relative;
   grid-area: 1 / 1;
   width: min(100cqw, var(--picture-height) * var(--aspect));
@@ -269,11 +268,25 @@ a:hover {
 }
 
 .result,
+.reveal,
 .original {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
+}
+
+/* The compare split moves only the reveal, the original inside it and the
+   divider, with transforms on their own layers: a drag neither restyles nor
+   relayouts the frame, and the result's SVG, on its own layer too, is
+   rasterized once. `app.js` sets `--split` on the reveal and the divider. */
+.result {
+  will-change: transform;
+}
+
+.reveal {
+  --split: 50%;
+  overflow: hidden;
 }
 
 .result svg {
@@ -292,20 +305,39 @@ a:hover {
   visibility: hidden;
 }
 
-.frame[data-view="compare"] .original {
-  clip-path: inset(0 calc(100% - var(--split)) 0 0);
+/* The reveal slides right by the shapes' share, and the original slides
+   back by as much, so only its left `--split` shows. */
+.frame[data-view="compare"] .reveal {
+  transform: translateX(calc(var(--split) - 100%));
+  will-change: transform;
 }
 
+.frame[data-view="compare"] .original {
+  transform: translateX(calc(100% - var(--split)));
+  will-change: transform;
+}
+
+/* As wide as the frame, so a translation by its own width's percentage
+   puts its centre, where the line and the knob are, at the split. */
 .divider {
+  --split: 50%;
+  position: absolute;
+  inset: 0;
+  transform: translateX(calc(var(--split) - 50%));
+  will-change: transform;
+  pointer-events: none;
+}
+
+.divider::before {
+  content: "";
   position: absolute;
   top: 0;
   bottom: 0;
-  left: var(--split);
+  left: 50%;
   width: 1px;
   margin-left: -0.5px;
   background: #fff;
   box-shadow: 0 0 0 0.5px rgb(0 0 0 / 0.25);
-  pointer-events: none;
 }
 
 .knob {
@@ -365,11 +397,14 @@ a:hover {
 }
 
 /* The compare control: a full-frame range input, invisible but for its
-   thumb's hit area; the divider and knob draw it. */
+   thumb's hit area; the divider and knob draw it. It overhangs the frame
+   by half a thumb on each side, so the thumb's centre, and the value, run
+   from the frame's left edge to its right one and follow the pointer. */
 .compare {
   position: absolute;
-  inset: 0;
-  width: 100%;
+  top: 0;
+  left: -24px;
+  width: calc(100% + 48px);
   height: 100%;
   margin: 0;
   opacity: 0;
@@ -1270,13 +1305,6 @@ a:hover {
 @media (prefers-reduced-motion: no-preference) {
   .frame {
     animation: hang 0.4s ease-out;
-  }
-
-  .frame[data-view="compare"] .divider,
-  .frame[data-view="compare"] .original {
-    transition:
-      left 0.08s linear,
-      clip-path 0.08s linear;
   }
 
   .frame[data-view="compare"] .chip,
