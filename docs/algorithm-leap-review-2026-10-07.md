@@ -452,3 +452,39 @@ Now that quality is where it should be, the direction turns to speed: primeval d
 Over all kinds the budgets save 10–12% of the time, at 10 threads and at 1 thread. `any`, rectangles and ellipses keep theirs. The kind's round (`RoundEffort::of`) now carries its actual climb age instead of a multiple of a base age, and the lab's `--search age=` replaces it outright. Run with the new defaults and no lab flag, the engine runner reproduced every non-time column of the measured lab runs (90 rows). The greedy and joint pins of the five changed kinds moved, the same on aarch64 and x86_64; the others stayed. Two render tests had fixtures fitted by the old search: the capped-quadratic gap test now searches with the round its bounds were measured with, and the final stage's guard test asks only that the aggressive joint result export worse than its input (1.8 times the error, where it had been more than twice).
 
 The remaining proposals are exact optimisations, with output unchanged: SIMD scoring kernels for wasm and x86, cheaper refit and colour fits, scratch and prepared-geometry reuse, and worker reuse in the browser. They are the next work list.
+
+## 23. Exact speed-ups, and SIMD in WebAssembly (2026-10-12)
+
+The third group of the speed review changes no output bit: every pin stays on aarch64 and x86_64, and every non-time column of the engine runner's corpus run is unchanged.
+
+**Per-step structures (native and wasm).** Between two steps only the rows the committed shape covers change. The error grid now updates its prefix sums, cells and distribution on those rows and keeps the target's prefixes; the coarse canvas syncs lazily, by dirty rows, and only for kinds that rank on it. Convex polygon rows take their two crossings without the general sort, a moved quad corner is validated against its neighbours only, the greedy rounds keep their workers across steps, and the coarse top list moves indices instead of whole states. Each replaced computation stays as a test reference. Time, new over base, at 10 threads on the corpus (two runs each, base noise within 1%) and at 1 thread on the paintings, 100 and 200 shapes:
+
+| Kind | 10 threads | 1 thread |
+|---|---|---|
+| any | 0.971–0.975 | 0.970–0.972 |
+| polygon | 0.958–0.961 | 0.938–0.939 |
+| circle | 0.950–0.956 | 0.971–0.974 |
+| ellipse, rectangle | 0.970–0.975 | 0.975–0.987 |
+| triangle, rotated rectangle | 0.978–0.989 | 0.991–0.994 |
+| quadratic, rotated ellipse | 0.995–0.998 | 0.991–0.999 |
+| all | 0.982 | 0.981 |
+
+A fourth proposal, summing full-coverage lines before weighting them in the colour fit, was built and dropped: it gained nothing measurable on circles and triangles, and its constant cost per fit made quadratics 8% and rotated ellipses 3% slower; even with that cost skipped it only matched the version without it.
+
+**SIMD scoring kernels in WebAssembly.** Both wasm builds now require WebAssembly SIMD (Chrome 91, Firefox 89, Safari 16.4 or newer; a browser without it gets an `InternalError` naming them), and `primeval-core` has simd128 versions of the kernels that have NEON ones: line sums, squared errors and the error after a blend, on blocks of 16 RGB pixels. They equal the scalar kernels bit for bit, which `node scripts/build-wasm.mjs test-kernels` checks on `wasm32-wasip1` under Node's WASI, and the browser suite compares SVG and PNG bytes with the native addon for every kind. In single-threaded wasm (warmed Node, Mona Lisa, 100 shapes, SVG identical across builds), time over the build without SIMD:
+
+| Kind | Ratio |
+|---|---|
+| circle | 0.80–0.81 |
+| ellipse | 0.83–0.84 |
+| rectangle | 0.85–0.86 |
+| triangle | 0.91 |
+| rotated rectangle | 0.92 |
+| any | 0.96–0.97 |
+| rotated ellipse, polygon | 0.98–1.01 |
+| quadratic | 1.02 |
+| all | 0.98 |
+
+The `.wasm` shrinks by about 25 KiB gzip. Quadratics' 2% did not go away with a different masked-tail threshold (3, 8, 12 pixels or never) or with short lines sent to the scalar kernels (which cost the other kinds 1–1.5%), so it most likely comes from the flag's effect on code outside the kernels, which the speed review had already seen alone.
+
+Still open from the review, all exact: x86 kernels (in a cloud x86 session), SIMD in the refit's pixel loop, prepared-geometry reuse in the joint optimisation, cheaper rejection before the colour fit, and worker reuse in the browser. Caching the second Gaussian variate would change the random streams, so it needs a quality measurement first.
