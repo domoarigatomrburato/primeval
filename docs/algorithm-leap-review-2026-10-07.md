@@ -437,3 +437,18 @@ Now that quality is where it should be, the direction turns to speed: primeval d
 **Where the time goes.** At the defaults (`any`, 100 shapes, `resize_input` 256) a painting takes 1.2 s at 10 threads and 5.0 s at 1 thread; quadratics take 4.9 s and 26 s. 10 threads give 3.4–5.2 times one thread's speed. The greedy search is the larger part for most kinds, more so at 1 thread; the refit passes and the final stage take 35–66% (14–19% for quadratics).
 
 **The first change: no `mul_add`.** The quadratic stroke rasterizer wrote twelve `f64::mul_add`, correctly rounded on every target but a software `fma` call in WebAssembly and on x86 without `+fma`. They are now an ordinary product and sum, and `Trapezoid::primitive` returns on its flat top before computing the ramp it would not use. A test keeps `mul_add` out of the engine's sources. In single-threaded wasm (warmed Node, Mona Lisa, 100 shapes) quadratics took 0.51 of their time and `any` 0.87, with SVG and PNG bytes equal to native; natively the change is within ±1%. No pinned digest moved on aarch64 or x86_64.
+
+**The second change: cheaper budgets where the loss is invisible.** Each proposal was measured with the engine runner's lab flags on the full corpus at 10 threads (two base runs, to read the noise) and on the two paintings at 1 thread. Quality is the change of the mean of the 100- and 200-shape median RMSEs of the export (negative is better); the worst row is the largest RMSE increase on one image, in levels out of 255.
+
+| Kind | New default | Time at 10 threads | Quality | Worst row |
+|---|---|---|---|---|
+| triangle | climb age 75 (was 100) | 0.87–0.88 | +0.33% | 0.01 |
+| polygon | climb age 75 | 0.87–0.89 | +0.09% | 0.06 |
+| circle | 500 candidates (was 1000), age 75 | 0.82–0.85 | +0.09% | 0.05 |
+| rotated ellipse | 500 candidates | 0.82–0.84 | +0.05% | 0.08 |
+| quadratic | 500 candidates (was 900) | 0.88–0.92 | −2.14% | 0.17 |
+| rotated rectangle | final joint iterations ×1 (was ×2) | 0.77–0.82 | +0.39% | 0.47 |
+
+Over all kinds the budgets save 10–12% of the time, at 10 threads and at 1 thread. `any`, rectangles and ellipses keep theirs. The kind's round (`RoundEffort::of`) now carries its actual climb age instead of a multiple of a base age, and the lab's `--search age=` replaces it outright. Run with the new defaults and no lab flag, the engine runner reproduced every non-time column of the measured lab runs (90 rows). The greedy and joint pins of the five changed kinds moved, the same on aarch64 and x86_64; the others stayed. Two render tests had fixtures fitted by the old search: the capped-quadratic gap test now searches with the round its bounds were measured with, and the final stage's guard test asks only that the aggressive joint result export worse than its input (1.8 times the error, where it had been more than twice).
+
+The remaining proposals are exact optimisations, with output unchanged: SIMD scoring kernels for wasm and x86, cheaper refit and colour fits, scratch and prepared-geometry reuse, and worker reuse in the browser. They are the next work list.

@@ -8,7 +8,7 @@ use crate::refine::RefineEffort;
 use crate::score;
 use crate::shapes::{Shape, ShapeKind};
 use crate::state::State;
-use crate::worker::{BASE_AGE, RoundEffort, SearchRound, WorkerCtx};
+use crate::worker::{RoundEffort, SearchRound, WorkerCtx};
 use crate::{Buffer, Color};
 use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
@@ -34,7 +34,7 @@ pub(crate) struct CommittedShape {
 
 /// How hard [`Model::step`] searches: its independent search rounds, of
 /// which the best is painted, and the multiples of each round's random
-/// candidates and base climb age ([`RoundEffort::of`], [`BASE_AGE`]).
+/// candidates and climb age ([`RoundEffort::of`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Effort {
     rounds: u64,
@@ -43,36 +43,26 @@ struct Effort {
 }
 
 impl Effort {
-    /// The effort for `kind`: 16 rounds, and the multiple of the base climb
-    /// age that the kind's round climbs ([`RoundEffort::of`]): twice for
-    /// quadratics.
+    /// Every kind runs 16 rounds, with candidate and age multiples of 1.
+    /// The actual per-kind candidates, climb ages and seeds belong to
+    /// [`RoundEffort::of`]; only the lab's `Model::set_search_effort`
+    /// changes these multiples.
     ///
-    /// Measured with the engine runner on its corpus, with the passes and
-    /// final stage `primeval-render` runs around the search, by the mean of
-    /// the 100- and 200-shape median RMSE of the export against the
-    /// previous `approximate` (16 rounds, then one refit pass) and by the
-    /// time over the same rows, on an Apple M2 Pro
-    /// (`docs/algorithm-leap-review-2026-10-07.md`). Twice the age buys
-    /// quadratics 2.6 points for 57% more time; it stays because they have
-    /// no cheaper lever in the pipeline. 32 rounds bought `any` 0.8 points
-    /// for 19% more time, and 32 rounds with twice the age bought rotated
-    /// ellipses 2.2 points for 90% more, so both went back to 16 rounds.
-    /// Polygons had gone back before them: the doubled rounds were most of
-    /// their pipeline's cost. For the other kinds, twice or four times the
-    /// rounds or the age never gained 0.5%. Climbing the best two or four
-    /// random candidates per round instead of one (the lab hook
-    /// `Model::set_search`) buys `any` and rotated ellipses 0.9 and 0.7
-    /// points at 1.1 times the time, and 2.4 points each at 1.3–1.6 times,
-    /// quadratics 2.1 points at 1.5 times with four; the refit's adapted
-    /// moves in place of the coarse ones lose on the per-image mean at every
-    /// age (`docs/algorithm-leap-review-2026-10-07.md`, section 18). Both
-    /// stay out: the seeds are a product choice of quality for time, left
-    /// open.
-    const fn of(kind: ShapeKind) -> Self {
+    /// The measured defaults trade invisible quality differences for speed:
+    /// together with the cheaper rotated-rectangle final joint stage, they
+    /// save 10–12% at both 10 threads on the default corpus and 1 thread on
+    /// the two paintings. See [`RoundEffort::of`] for each kind's budgets,
+    /// time ratios and quality changes.
+    ///
+    /// Earlier measurements returned polygons, rotated ellipses and `any`
+    /// from 32 to 16 rounds because the extra quality cost too much time;
+    /// quadratics retain their longer climb and two seeds
+    /// (`docs/algorithm-leap-review-2026-10-07.md`).
+    const fn of(_kind: ShapeKind) -> Self {
         Self {
             rounds: 16,
             candidates: 1,
-            age: RoundEffort::of(kind).age / BASE_AGE,
+            age: 1,
         }
     }
 }
@@ -90,12 +80,13 @@ pub struct Search {
     /// rotated ellipses and polygons), since only that many are rescored
     /// at full resolution.
     pub seeds: Option<usize>,
-    /// The random candidates of the round: by default 1000, and 900 for
-    /// quadratics.
+    /// The random candidates of the round: by default 500 for circles,
+    /// rotated ellipses and quadratics, and 1000 for the other kinds.
     pub candidates: Option<usize>,
-    /// The base climb age, the consecutive rejected moves that stop a
-    /// climb, which the kind's multiple (2 for quadratics) or
-    /// `Model::set_search_effort`'s still multiplies: by default 100.
+    /// The climb age, the consecutive rejected moves that stop a climb.
+    /// Replaces the kind's default outright: 75 for triangles, polygons
+    /// and circles, 200 for quadratics, and 100 for the other kinds.
+    /// Only `Model::set_search_effort`'s age multiple still multiplies it.
     pub age: Option<usize>,
 }
 
@@ -223,14 +214,31 @@ impl Model {
         }
     }
 
+    /// Resolves the kind's round, then the lab's explicit settings and
+    /// candidate and age multiples.
+    fn search_round_effort(&self, kind: ShapeKind) -> (u64, RoundEffort) {
+        let default = RoundEffort::of(kind);
+        let search = self.search;
+        let effort = self.effort.unwrap_or(Effort::of(kind));
+        (
+            effort.rounds,
+            RoundEffort {
+                candidates: search.candidates.unwrap_or(default.candidates) * effort.candidates,
+                age: search.age.unwrap_or(default.age) * effort.age,
+                seeds: search.seeds.unwrap_or(default.seeds),
+            },
+        )
+    }
+
     /// Searches for the best next shape of `kind` and paints it.
     ///
     /// Every step runs 16 independent search rounds as rayon tasks in the
     /// current pool: the global pool, unless the caller runs `step` inside
-    /// [`rayon::ThreadPool::install`]. A step of [`ShapeKind::Quadratic`]
-    /// climbs twice as long. Each round draws from its own random
-    /// stream, derived from the seed, the step index and the round index,
-    /// and the best round wins, ties going to the lowest round index, so the
+    /// [`rayon::ThreadPool::install`]. Each kind uses its default round's
+    /// candidates, climb age and seeds. Each round
+    /// draws from its own random stream, derived from the seed, the step
+    /// index and the round index, and the best round wins, ties going to
+    /// the lowest round index, so the
     /// result does not depend on the number of threads or on scheduling.
     ///
     /// Returns the number of candidate evaluations the search made.
@@ -251,21 +259,7 @@ impl Model {
         let seed = self.seed;
         // Each step commits exactly one shape, so this is the step index.
         let step = self.history.len() as u64;
-        // The kind's round, then the lab's settings: `Search`'s candidates
-        // and base age, and `Effort`'s multiples of them, which replace the
-        // kind's.
-        let default = RoundEffort::of(kind);
-        let search = self.search;
-        let Effort {
-            rounds,
-            candidates,
-            age,
-        } = self.effort.unwrap_or(Effort::of(kind));
-        let effort = RoundEffort {
-            candidates: search.candidates.unwrap_or(default.candidates) * candidates,
-            age: search.age.unwrap_or(BASE_AGE) * age,
-            seeds: search.seeds.unwrap_or(default.seeds),
-        };
+        let (rounds, effort) = self.search_round_effort(kind);
         let scratch = &self.scratch;
         #[cfg(test)]
         let pruning = self.pruning;
@@ -299,9 +293,9 @@ impl Model {
     /// Lab only: makes every later [`Model::step`] run `rounds` search
     /// rounds instead of 16, each sampling `candidates` times as many
     /// random candidates and climbing until `age` times as many moves in a
-    /// row are not kept, whatever the kind (by default only quadratics
-    /// climb twice as long). All three are at least 1. Not part of the
-    /// supported API.
+    /// row are not kept. The multiples apply to the kind's defaults, or
+    /// to the explicit values given by `Model::set_search`. All three are
+    /// at least 1. Not part of the supported API.
     #[cfg(feature = "lab")]
     #[doc(hidden)]
     pub fn set_search_effort(&mut self, rounds: u64, candidates: usize, age: usize) {
@@ -317,7 +311,7 @@ impl Model {
     }
 
     /// Lab only: makes every later [`Model::step`] search with `search`:
-    /// its seeds, random candidates and base climb age per round, each
+    /// its seeds, random candidates and climb age per round, each
     /// `None` keeping the kind's default; see [`Search`]. The numbers given
     /// are at least 1. Kinds that rank coarsely cap seeds at 128, the number
     /// rescored at full resolution. Not part of the supported API.
@@ -612,12 +606,16 @@ mod tests {
     use crate::shapes::{Rectangle, Shape};
     use crate::test_util::fixed_alpha;
 
-    /// Every kind's round samples 1000 candidates and climbs one seed for
-    /// the base age; quadratics keep their budget near it with 900
-    /// candidates, and climb two seeds twice as long. A step runs 16 such
-    /// rounds, and the kind's multiple of the base age is the round's.
+    /// Every kind keeps its measured candidates, climb age and seeds.
+    /// A step runs 16 rounds, with no candidate or age multiplier unless
+    /// the lab overrides it.
     #[test]
     fn each_kind_searches_its_default_round() {
+        let model = Model::new(
+            Buffer::new_from_color(8, 8, Color::new(255, 255, 255, 255)),
+            Color::new(0, 0, 0, 255),
+            ModelOptions::default(),
+        );
         let round = |candidates, age, seeds| RoundEffort {
             candidates,
             age,
@@ -628,19 +626,77 @@ mod tests {
             .copied()
             .chain([ShapeKind::Any])
         {
-            let (expected, multiple) = if kind == ShapeKind::Quadratic {
-                (round(900, 200, 2), 2)
-            } else {
-                (round(1000, 100, 1), 1)
+            let expected = match kind {
+                ShapeKind::Triangle | ShapeKind::Polygon => round(1000, 75, 1),
+                ShapeKind::Circle => round(500, 75, 1),
+                ShapeKind::RotatedEllipse => round(500, 100, 1),
+                ShapeKind::Quadratic => round(500, 200, 2),
+                _ => round(1000, 100, 1),
             };
             assert_eq!(RoundEffort::of(kind), expected, "{kind:?}");
             let effort = Effort {
                 rounds: 16,
                 candidates: 1,
-                age: multiple,
+                age: 1,
             };
             assert_eq!(Effort::of(kind), effort, "{kind:?}");
+            assert_eq!(model.search_round_effort(kind), (16, expected), "{kind:?}");
         }
+    }
+
+    /// An explicit age replaces even the quadratic's longer default;
+    /// only the lab's effort multiplies explicit values or kind defaults.
+    #[cfg(feature = "lab")]
+    #[test]
+    fn search_overrides_replace_defaults_before_effort_multiples() {
+        let mut model = Model::new(
+            Buffer::new_from_color(8, 8, Color::new(255, 255, 255, 255)),
+            Color::new(0, 0, 0, 255),
+            ModelOptions::default(),
+        );
+        model.set_search(Search {
+            candidates: Some(50),
+            age: Some(75),
+            seeds: Some(3),
+        });
+        for &kind in ShapeKind::all_kinds().iter().chain([&ShapeKind::Any]) {
+            assert_eq!(
+                model.search_round_effort(kind),
+                (
+                    16,
+                    RoundEffort {
+                        candidates: 50,
+                        age: 75,
+                        seeds: 3
+                    }
+                ),
+                "{kind:?}"
+            );
+        }
+        model.set_search_effort(2, 3, 4);
+        assert_eq!(
+            model.search_round_effort(ShapeKind::Quadratic),
+            (
+                2,
+                RoundEffort {
+                    candidates: 150,
+                    age: 300,
+                    seeds: 3
+                }
+            )
+        );
+        model.set_search(Search::default());
+        assert_eq!(
+            model.search_round_effort(ShapeKind::Quadratic),
+            (
+                2,
+                RoundEffort {
+                    candidates: 1500,
+                    age: 800,
+                    seeds: 2
+                }
+            )
+        );
     }
 
     #[test]
@@ -1054,18 +1110,24 @@ mod tests {
     /// conditional finite-neighbour coverage, reusing prepared geometry;
     /// sharper turns retain overlapping round joins (tan² > 1/8). Any,
     /// coarse any and the fixed-width move trace kept their values.
+    /// Triangle, polygon, circle, rotated ellipse and quadratic again
+    /// when the measured speed budgets shortened triangle, polygon and
+    /// circle climbs to age 75, and reduced circle, rotated ellipse and
+    /// quadratic candidates to 500. The new pins agree on aarch64 and
+    /// x86_64; any, coarse any, rectangle, ellipse and rotated rectangle
+    /// kept their values.
     #[test]
     fn seeded_greedy_output_is_pinned() {
         let pinned = [
             (ShapeKind::Any, 0xdf58536e3b570d1b),
-            (ShapeKind::Triangle, 0x550ccb3dea49c855),
+            (ShapeKind::Triangle, 0x284433ba17a39545),
             (ShapeKind::Rectangle, 0x05fec499b8a6dc99),
             (ShapeKind::Ellipse, 0x7c4c82a72acffcf9),
-            (ShapeKind::Circle, 0x59cfe3d24b9cc55f),
+            (ShapeKind::Circle, 0xaf1351c6bb5b8779),
             (ShapeKind::RotatedRectangle, 0x88d73cdfeca7a510),
-            (ShapeKind::Quadratic, 0x99743ce1939c5902),
-            (ShapeKind::RotatedEllipse, 0xf76bf821d5638e66),
-            (ShapeKind::Polygon, 0xb04e0c9956ea5777),
+            (ShapeKind::Quadratic, 0x2787cb791e0ff0fd),
+            (ShapeKind::RotatedEllipse, 0x8cf6f2ebba3a1204),
+            (ShapeKind::Polygon, 0x286eabf6a8e37995),
         ];
         assert_eq!(pinned.len(), every_kind().len());
         let actual: Vec<_> = pinned
@@ -1077,12 +1139,12 @@ mod tests {
                 )
             })
             .collect();
-        assert_eq!(actual, pinned);
         assert_eq!(
             digest(&seeded_drawing_of(42, 2, 2, ShapeKind::Any, true, COARSE)),
             0x10010aef3645248d,
             "with a coarse random phase"
         );
+        assert_eq!(actual, pinned);
     }
 
     #[test]

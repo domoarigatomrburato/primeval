@@ -1120,6 +1120,11 @@ mod tests {
     /// Pins every moving kind and the fixed masks in `Any`: eight greedy
     /// layers and four Adam iterations, otherwise default settings. Recorded
     /// before coverage caching, with identical pins on aarch64 and x86_64.
+    /// Triangle (both alphas), polygon, circle and rotated ellipse again
+    /// when their greedy inputs changed with the measured speed budgets:
+    /// ages 75 for triangle, polygon and circle, and 500 candidates for
+    /// circle and rotated ellipse. The new pins agree on aarch64 and
+    /// x86_64; rectangle, rotated rectangle, ellipse and any kept theirs.
     #[test]
     fn joint_output_is_pinned() {
         let target = target(32, 28);
@@ -1128,18 +1133,18 @@ mod tests {
             ..Settings::default()
         };
         let cases = [
-            (ShapeKind::Triangle, Alpha::Auto, 0x3aad98fb9c29c949),
-            (ShapeKind::Polygon, Alpha::Auto, 0xd47b3df543fbc241),
+            (ShapeKind::Triangle, Alpha::Auto, 0xa8bb659d54e6c88e),
+            (ShapeKind::Polygon, Alpha::Auto, 0x7990cb6d65cb99f3),
             (ShapeKind::Rectangle, Alpha::Auto, 0xace7ef4d487f4e01),
             (ShapeKind::RotatedRectangle, Alpha::Auto, 0xf4eedfaad9e22c2e),
             (ShapeKind::Ellipse, Alpha::Auto, 0xf5b465a25a28cbc3),
-            (ShapeKind::Circle, Alpha::Auto, 0x81c11981f947571e),
-            (ShapeKind::RotatedEllipse, Alpha::Auto, 0x88ecfd4140f91f45),
+            (ShapeKind::Circle, Alpha::Auto, 0x730692129b9235b6),
+            (ShapeKind::RotatedEllipse, Alpha::Auto, 0x7cac0bd5f2510ae8),
             (ShapeKind::Any, Alpha::Auto, 0x16289607d90d817a),
             (
                 ShapeKind::Triangle,
                 Alpha::Fixed(std::num::NonZeroU8::new(128).unwrap()),
-                0x3deb04ae38bc7576,
+                0x75d1a7f24e0474ae,
             ),
         ];
         let actual: Vec<_> = cases

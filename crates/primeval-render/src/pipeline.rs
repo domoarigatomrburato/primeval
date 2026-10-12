@@ -179,14 +179,18 @@ pub enum Refits {
 ///   optimisation, at 10–15% of the time for most kinds that run it, is
 ///   the most efficient stage.
 /// - Triangles, polygons, rectangles, rotated rectangles, ellipses and
-///   circles end with the joint optimisation of every shape, rotated
-///   rectangles with twice its default iterations; for the first four
+///   circles end with the joint optimisation of every shape, with its
+///   default iterations; for the first four
 ///   kinds, refit passes before it, or more iterations for the other
-///   three, gained less than 0.5%. Rotated rectangles
-///   refit after steps 20 and 40, then each half the step number: with
-///   the doubled iterations, 2.2% below no passes during the search and
-///   the default iterations; the doubled iterations alone gained 0.4%,
-///   and passes every 20 steps up to step 100 cost more and gained less.
+///   three, gained less than 0.5%. Rotated rectangles refit after steps
+///   20 and 40, then each half the step number. Earlier measurements kept
+///   twice the final iterations, 2.2% below no in-search passes and the
+///   default iterations; doubling alone gained 0.4%. The October 2026
+///   budget measurements returned them to the default iterations for
+///   speed at an invisible quality cost: 0.77–0.82 times the time at 10
+///   threads, +0.39% in the mean of the 100/200-shape median RMSEs, and
+///   at worst 0.47 of a level. Passes every 20 steps up to step 100 cost
+///   more and gained less.
 /// - Rectangles and polygons refit every 20 steps up to step 100, then
 ///   each fifth of the step number (`Spaced(20, 5)`). On triangles, with
 ///   the joint optimisation, that schedule was 12.9% below the previous
@@ -272,7 +276,7 @@ pub(crate) fn pipeline(shape: ShapeKind) -> Pipeline {
         ShapeKind::Any => (spaced(20, 5), one, Some(1)),
         ShapeKind::Triangle => (joint(20, 5, 20), none, Some(1)),
         ShapeKind::Rectangle | ShapeKind::Polygon => (spaced(20, 5), none, Some(1)),
-        ShapeKind::RotatedRectangle => (spaced(20, 2), none, Some(2)),
+        ShapeKind::RotatedRectangle => (spaced(20, 2), none, Some(1)),
         ShapeKind::Ellipse | ShapeKind::Circle => (spaced(20, 5), none, Some(1)),
         ShapeKind::RotatedEllipse => (spaced(10, 10), one, None),
         ShapeKind::Quadratic => (
@@ -692,10 +696,12 @@ mod tests {
     }
 
     /// On a finely fitted stack of polygons, aggressive joint steps
-    /// (`warmup: 0`, `step: 2`) export far worse than the input after the
+    /// (`warmup: 0`, `step: 2`) export worse than the input after the
     /// refit passes, so the final stage returns that input. The 2 px step
     /// keeps exercising this guard after the portable sampler changed the
     /// seeded stack; the default pipeline still uses its gentler tuning.
+    /// The guard needs only a worse export: with polygons' age 75 the
+    /// error grows 1.8 times, where it had more than doubled before.
     #[test]
     fn the_final_stage_keeps_its_input_when_the_joint_result_exports_worse() {
         let target = hard_shapes(24);
@@ -708,7 +714,7 @@ mod tests {
         };
         let joint = tuned_joint_result(&model, tuning);
         assert!(
-            png_error(&joint, &target) > 2 * png_error(&input, &target),
+            png_error(&joint, &target) > png_error(&input, &target),
             "the joint optimisation no longer worsens this case: {} -> {}",
             png_error(&input, &target),
             png_error(&joint, &target)
@@ -1020,6 +1026,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Rotated rectangles keep their refit schedule and use the measured
+    /// cheaper final joint budget.
+    #[test]
+    fn rotated_rectangles_end_with_one_joint_iteration_multiple() {
+        let stages = pipeline(ShapeKind::RotatedRectangle);
+        assert_eq!(stages.joint, Some(1));
+        assert_eq!(stages.refits, Refits::Passes(0));
+        assert_eq!(
+            stages.during,
+            During::Spaced {
+                interval: 20,
+                divisor: 2,
+            }
+        );
     }
 
     /// Ellipses and circles refit every 20 steps up to step 100, then each
@@ -1480,11 +1502,21 @@ mod tests {
     /// different fitted drawings, so their errors need not be ordered:
     /// clipping joins by true butt-cap tangents made butt's gap smaller
     /// than round's on this seed, while both still meet their bounds.
+    /// The search keeps the quadratic round the bounds were measured
+    /// with (900 candidates, age 200, two seeds): the gap of 16 curves on
+    /// one seed follows the drawing the search finds, and the default's
+    /// 500 candidates put butt at +1.29% and round at +1.15%, while the
+    /// corpus medians of the gap did not grow.
     #[cfg(feature = "lab")]
     #[test]
     fn capped_quadratics_export_as_the_engine_covers_them() {
         let gap_of = |cap| {
             let mut model = sized_model(ShapeKind::Quadratic, 0, 48, 40);
+            model.set_search(primeval_core::Search {
+                seeds: Some(2),
+                candidates: Some(900),
+                age: Some(200),
+            });
             model.set_quadratic_cap(cap);
             for _ in 0..16 {
                 model.step(ShapeKind::Quadratic, Alpha::Auto);

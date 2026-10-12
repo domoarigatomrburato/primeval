@@ -26,8 +26,8 @@ const BIASED_SAMPLING_RATE: f64 = 0.8;
 /// the best few lost quality at high step counts, where shapes are small
 /// and the half-resolution ranking is least reliable.
 const COARSE_RESCORED_SEEDS: usize = 128;
-/// The base climb age of a search round, which a kind's multiple
-/// multiplies ([`RoundEffort::of`]).
+/// The default climb age before per-kind adjustments: quadratics keep
+/// twice this age, while triangles, polygons and circles use 75.
 pub(crate) const BASE_AGE: usize = 100;
 
 /// What one search round ([`WorkerCtx::search_round`]) does: it samples
@@ -42,15 +42,49 @@ pub(crate) struct RoundEffort {
 }
 
 impl RoundEffort {
-    /// The default search round of `kind`, the one place a kind's greedy
-    /// search differs: 1000 random candidates, climbed from the best one
-    /// until [`BASE_AGE`] moves in a row are not kept. Quadratics sample
-    /// 900, which keeps their budget near the others', climb the best two
-    /// in turn, and climb twice as long.
+    /// The actual default round of `kind`, with candidates, climb age and
+    /// seeds chosen for speed at an invisible quality cost. Every step
+    /// runs 16 rounds; the lab's explicit settings replace these defaults
+    /// before its effort multiples are applied.
+    ///
+    /// | Kind | Candidates | Age | Seeds | Time ratio at 10 threads | Mean median RMSE change | Worst row, levels |
+    /// | --- | ---: | ---: | ---: | --- | ---: | ---: |
+    /// | triangle | 1000 | 75 | 1 | 0.87–0.88 | +0.33% | 0.01 |
+    /// | polygon | 1000 | 75 | 1 | 0.87–0.89 | +0.09% | 0.06 |
+    /// | circle | 500 | 75 | 1 | 0.82–0.85 | +0.09% | 0.05 |
+    /// | rotated ellipse | 500 | 100 | 1 | 0.82–0.84 | +0.05% | 0.08 |
+    /// | quadratic | 500 | 200 | 2 | 0.88–0.92 | −2.14% | 0.17 |
+    /// | rotated rectangle, final joint ×1 (`primeval-render`) | 1000 | 100 | 1 | 0.77–0.82 | +0.39% | 0.47 |
+    /// | any, rectangle, ellipse | 1000 | 100 | 1 | unchanged | unchanged | unchanged |
+    ///
+    /// Measured with the engine runner and the render pipeline on the full
+    /// default corpus at 10 threads, and on the two paintings at 1 thread;
+    /// quality is the mean of the 100/200-shape median RMSEs. Together with
+    /// rotated rectangles' final joint iteration multiple of 1 (their
+    /// round stays unchanged), these defaults save
+    /// 10–12% overall at both thread counts. Earlier rounds sampled 1000
+    /// candidates, or 900 for quadratics, whose longer age and two seeds
+    /// remain; the shortened ages and candidate counts reproduce the
+    /// October 2026 lab runs.
     pub(crate) const fn of(kind: ShapeKind) -> Self {
         match kind {
+            ShapeKind::Triangle | ShapeKind::Polygon => Self {
+                candidates: 1000,
+                age: 75,
+                seeds: 1,
+            },
+            ShapeKind::Circle => Self {
+                candidates: 500,
+                age: 75,
+                seeds: 1,
+            },
+            ShapeKind::RotatedEllipse => Self {
+                candidates: 500,
+                age: BASE_AGE,
+                seeds: 1,
+            },
             ShapeKind::Quadratic => Self {
-                candidates: 900,
+                candidates: 500,
                 age: 2 * BASE_AGE,
                 seeds: 2,
             },

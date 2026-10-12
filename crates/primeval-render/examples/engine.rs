@@ -69,17 +69,20 @@
 //!                       moved), for every kind
 //!   --effort R:C:A      the greedy search's rounds per step, and the
 //!                       multiples of each round's random candidates and
-//!                       climb age (default: the model's for the kind, 16
-//!                       rounds and 1 time the age, 2 for quadratics)
+//!                       climb age (default: 16 rounds and multiples of 1
+//!                       for every kind)
 //!   --search KEY=VALUE[,KEY=VALUE...]  the greedy search's settings per
 //!                       round (`Model::set_search`), each key left out
 //!                       keeping the kind's default: `seeds=K` the best
 //!                       random candidates climbed in turn (default 1, 2
 //!                       for quadratics), `candidates=N` the random
-//!                       candidates (default 1000, 900 for quadratics),
-//!                       `age=A` the base climb age, which the kind's and
-//!                       `--effort`'s multiples still multiply (default
-//!                       100); all numbers positive
+//!                       candidates (default 500 for circles, rotated
+//!                       ellipses and quadratics, 1000 for the others),
+//!                       `age=A` the climb age, replacing the kind's age
+//!                       outright (default 75 for triangles, polygons and
+//!                       circles, 200 for quadratics, 100 for the others);
+//!                       only `--effort`'s multiples still multiply the
+//!                       candidates and age; all numbers positive
 //!   --refine-effort R:A every refit pass's hill climbs per layer and the
 //!                       non-improving moves that stop a climb (default:
 //!                       the model's, 4 climbs of age 25)
