@@ -7,7 +7,7 @@
 
 Give it an input image and it searches for a layered approximation you can export as **clean SVG or PNG** output.
 
-**[Try it in your browser](https://domoarigatomrburato.github.io/primeval/)**: the demo runs the engine as WebAssembly, on every core (one in Safari), and your image never leaves the page.
+**[Try it in your browser](https://domoarigatomrburato.github.io/primeval/)**: the demo runs the engine as WebAssembly, on every core, and your image never leaves the page.
 
 <!-- markdownlint-disable MD033 -->
 
@@ -310,7 +310,7 @@ Browser notes:
   Cross-Origin-Embedder-Policy: require-corp
   ```
 
-- In Safari (WebKit), threads need these headers from the server. Isolation added by a service worker (as on hosts that cannot set headers) makes WebKit refuse module workers that start together, which the threaded build relies on ([WebKit bug 261734](https://bugs.webkit.org/show_bug.cgi?id=261734), open), so with a service worker only, a page should not rely on threads in Safari.
+- Threads work with these headers from the server and with isolation added by a service worker, as on hosts that cannot set headers. The runtime starts its workers one at a time, because WebKit (Safari) fails module workers started together under a service worker's isolation ([WebKit bug 261734](https://bugs.webkit.org/show_bug.cgi?id=261734)).
 - Each call runs in a Web Worker of its own, which ends when the call settles, so concurrent calls do not share memory and the page's main thread stays free. An `AbortSignal` terminates the worker at once.
 - A page downloads one of two WebAssembly builds, threaded or single-threaded, chosen before the download and compiled once per page: about 360 KB with brotli (about 460 KB with gzip), plus a few KB of JavaScript.
 - Both builds use WebAssembly SIMD, which Chrome 91, Firefox 89, Safari 16.4 and newer versions support. In a browser without it, `approximate()` rejects with an `InternalError` that says so.

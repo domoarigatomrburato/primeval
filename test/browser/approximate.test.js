@@ -3,6 +3,7 @@
 // build). Needs `npm run build`, `npm run build:wasm` and, for the
 // native-equality tripwire and the error parity checks, `npm run build:node`.
 import assert from "node:assert/strict";
+import http from "node:http";
 import { after, before, describe, test } from "node:test";
 import { chromium } from "playwright";
 
@@ -38,6 +39,43 @@ const SMALL = { count: 4, resizeInput: 16, outputSize: 32, seed: 7 };
 const LONG_RENDER = { count: 100000, resizeInput: 16, outputSize: 16, seed: 7 };
 // A render that never finishes on its own can only end through a timeout.
 const PANIC_TIMEOUT_MS = 10000;
+
+/** Whether `url` is the script of a call's worker or a pool worker, not a module it imports. */
+const isWorkerScript = (url) => /\/dist\/worker-(single|threaded)\.js$/.test(new URL(url).pathname);
+
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * A proxy to `origin` that serves every script of the package (`/dist/` and
+ * the wasm-bindgen glue) `delayMs` late and keeps the span of each one, from
+ * its request to its response, on one clock. Playwright's routes miss the
+ * requests of nested (pool) workers, so the tests delay them here instead.
+ */
+function startSlowScriptProxy(origin, delayMs) {
+  const spans = [];
+  const server = http.createServer(async (request, response) => {
+    const { pathname } = new URL(request.url, origin);
+    const slow = /^\/(dist|wasm)\/.*\.js$/.test(pathname);
+    const span = { pathname, start: performance.now(), end: Number.POSITIVE_INFINITY };
+    if (slow) {
+      spans.push(span);
+      await delay(delayMs);
+    }
+    const upstream = await fetch(`${origin}${request.url}`);
+    const body = Buffer.from(await upstream.arrayBuffer());
+    span.end = performance.now();
+    response.writeHead(upstream.status, Object.fromEntries(upstream.headers)).end(body);
+  });
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      resolve({
+        origin: `http://127.0.0.1:${server.address().port}`,
+        spans,
+        close: () => new Promise((done) => server.close(done)),
+      });
+    });
+  });
+}
 
 let browser;
 
@@ -95,12 +133,12 @@ for (const isolated of [true, false]) {
 
     // A fresh context per page, so its requests (workers included) and its
     // module cache are its own.
-    async function openPage() {
+    async function openPage(origin = server.origin) {
       const context = await browser.newContext();
       const requests = [];
       context.on("request", (request) => requests.push(new URL(request.url()).pathname));
       const page = await context.newPage();
-      await page.goto(`${server.origin}/test/browser/page.html`);
+      await page.goto(`${origin}/test/browser/page.html`);
       await page.waitForFunction(() => window.ready === true, undefined, { timeout: 10000 });
       return { context, page, requests };
     }
@@ -518,6 +556,199 @@ for (const isolated of [true, false]) {
       assert.deepEqual(outcome.concurrent, outcome.sequential);
       assert.equal(new Set(outcome.concurrent).size, 4);
     });
+
+    // WebKit fails module workers started together under service-worker
+    // isolation (WebKit bug 261734), so the runtime starts its workers one at
+    // a time: a worker's script is only requested once the previous worker,
+    // of the same call or of another, has loaded its modules.
+    test("workers load one at a time, also across concurrent calls", async () => {
+      // Every script is served late. A worker loads once all the scripts it
+      // requested arrived, so when a worker's own script is requested, every
+      // script requested before it must have been served, and the previous
+      // worker's imports took at least one more delay after its own script.
+      // (Chromium itself serves concurrent requests for one URL in turn.)
+      const delayMs = 30;
+      const proxy = await startSlowScriptProxy(server.origin, delayMs);
+      const { context, page } = await openPage(proxy.origin);
+      try {
+        const loadedPage = proxy.spans.length;
+        const { formats, threads } = await page.evaluate(
+          async ({ name, render }) => {
+            const input = await window.fixture(name);
+            const run = (seed) =>
+              window.primeval
+                .approximate({ input, output: "svg", render: { ...render, seed } })
+                .then((result) => result.format);
+            return {
+              formats: await Promise.all([run(1), run(2)]),
+              threads: navigator.hardwareConcurrency,
+            };
+          },
+          { name: FIXTURE, render: SMALL },
+        );
+
+        assert.deepEqual(formats, ["svg", "svg"]);
+        const spans = proxy.spans.slice(loadedPage);
+        const workers = spans.filter((span) => isWorkerScript(`${proxy.origin}${span.pathname}`));
+        assert.equal(workers.length, 2 * (isolated ? 1 + threads : 1));
+        for (const [k, worker] of workers.entries()) {
+          if (k === 0) {
+            continue;
+          }
+          const gap = worker.start - workers[k - 1].end;
+          assert.ok(
+            gap >= delayMs,
+            `worker script ${k} requested ${gap} ms after the previous one`,
+          );
+          const unserved = spans.filter(
+            (span) => span.start < worker.start && span.end > worker.start,
+          );
+          assert.deepEqual(
+            unserved.map((span) => span.pathname),
+            [],
+            `scripts still loading when a worker script was requested at ${worker.start}`,
+          );
+        }
+      } finally {
+        await context.close();
+        await proxy.close();
+      }
+    });
+
+    test("an aborted call waiting to start rejects at once and starts no worker", async () => {
+      const { context, page } = await openPage();
+      try {
+        // The first call's worker script is served late, so the calls after
+        // it wait for it to start.
+        let routed = 0;
+        await context.route(isWorkerScript, async (route) => {
+          routed += 1;
+          if (routed === 1) {
+            await delay(1000);
+          }
+          await route.continue();
+        });
+        const workers = [];
+        page.on("worker", (worker) => workers.push(worker.url()));
+        const firstRequested = context.waitForEvent("request", {
+          predicate: (request) => isWorkerScript(request.url()),
+        });
+        await page.evaluate(
+          async ({ name, render }) => {
+            window.input = await window.fixture(name);
+            const run = () =>
+              window.primeval
+                .approximate({ input: window.input, output: "svg", render })
+                .then((result) => result.format);
+            window.first = run();
+          },
+          { name: FIXTURE, render: SMALL },
+        );
+        await firstRequested;
+        const outcome = await page.evaluate(
+          async ({ render }) => {
+            const controller = new AbortController();
+            const waiting = window.primeval.approximate({
+              input: window.input,
+              output: "svg",
+              render,
+              execution: { signal: controller.signal },
+            });
+            // Behind the aborted call, also waiting.
+            const third = window.primeval
+              .approximate({ input: window.input, output: "svg", render })
+              .then((result) => result.format);
+            await new Promise((resolve) => setTimeout(resolve, 200));
+            const abortedAt = performance.now();
+            controller.abort(new Error("stop"));
+            let rejection;
+            try {
+              await waiting;
+            } catch (error) {
+              rejection = error;
+            }
+            const rejectedMs = performance.now() - abortedAt;
+            const formats = await Promise.all([window.first, third]);
+            return {
+              error: window.describeError(rejection),
+              causeIsReason: rejection?.cause === controller.signal.reason,
+              rejectedMs,
+              formats,
+              threads: navigator.hardwareConcurrency,
+            };
+          },
+          { render: SMALL },
+        );
+
+        assert.equal(outcome.error.constructorName, "AbortError");
+        assert.equal(outcome.error.code, "ABORTED");
+        assert.equal(outcome.causeIsReason, true);
+        assert.ok(outcome.rejectedMs < 100, `rejected after ${outcome.rejectedMs} ms`);
+        assert.deepEqual(outcome.formats, ["svg", "svg"]);
+        // The first and third calls' workers only.
+        assert.equal(workers.length, 2 * (isolated ? 1 + outcome.threads : 1));
+      } finally {
+        await context.close();
+      }
+    });
+
+    // How the first of two concurrent calls ends before it started, what it
+    // rejects with, and how its worker script is served.
+    for (const [how, firstError, serve, endFirst] of [
+      [
+        "fails to load",
+        "InternalError",
+        (route, first) => (first ? route.fulfill({ status: 404, body: "" }) : route.continue()),
+        () => undefined,
+      ],
+      [
+        "is aborted while it loads",
+        "AbortError",
+        async (route, first) => {
+          if (first) {
+            await delay(1000);
+          }
+          await route.continue();
+        },
+        (page) => page.evaluate(() => window.controller.abort()),
+      ],
+    ]) {
+      test(`a call still runs when the call before it ${how}`, async () => {
+        const { context, page } = await openPage();
+        try {
+          let scripts = 0;
+          await context.route(isWorkerScript, (route) => {
+            scripts += 1;
+            return serve(route, scripts === 1);
+          });
+          const firstRequested = context.waitForEvent("request", {
+            predicate: (request) => isWorkerScript(request.url()),
+          });
+          await page.evaluate(
+            async ({ name, render }) => {
+              const input = await window.fixture(name);
+              window.controller = new AbortController();
+              const run = (signal) =>
+                window.primeval
+                  .approximate({ input, output: "svg", render, execution: { signal } })
+                  .then(
+                    (result) => result.format,
+                    (error) => window.describeError(error).constructorName,
+                  );
+              window.outcomes = Promise.all([run(window.controller.signal), run(undefined)]);
+            },
+            { name: FIXTURE, render: SMALL },
+          );
+          await firstRequested;
+          await endFirst(page);
+          const outcomes = await page.evaluate(() => window.outcomes);
+
+          assert.deepEqual(outcomes, [firstError, "svg"]);
+        } finally {
+          await context.close();
+        }
+      });
+    }
 
     test(`fetches and compiles only the ${variant} build, once`, async () => {
       const { context, page, requests } = await openPage();

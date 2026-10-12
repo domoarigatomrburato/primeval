@@ -2,7 +2,7 @@
 // so that bundlers bundle it with its snippets and `.wasm` asset.
 import * as glueModule from "../wasm/single/primeval.js";
 import { type Glue, runRequest, scope } from "./worker-common.js";
-import type { WorkerRequest } from "./worker-protocol.js";
+import type { WorkerMessage, WorkerRequest } from "./worker-protocol.js";
 
 const glue: Glue = glueModule;
 
@@ -11,3 +11,7 @@ scope.onmessage = ({ data }: MessageEvent<WorkerRequest>) => {
   scope.onmessage = null;
   void runRequest(glue, data);
 };
+
+// Its modules are loaded and it starts no other worker: the page can start the
+// next call's worker.
+scope.postMessage({ type: "started" } satisfies WorkerMessage);

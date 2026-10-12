@@ -85,16 +85,9 @@ function showThreads() {
   const threads = isolated ? navigator.hardwareConcurrency : 1;
   ui.threads.dataset.isolated = String(isolated);
   ui.threads.textContent = `${threads} ${threads === 1 ? "thread" : "threads"}`;
-  // The isolation bootstrap in index.html marks a browser whose probe failed.
-  const fellBack = document.documentElement.dataset.coiThreads === "false";
-  if (isolated) {
-    ui.threads.title = "The page is cross-origin isolated, so the render uses a thread per core.";
-  } else if (fellBack) {
-    ui.threads.title =
-      "This browser cannot start the demo's threads through its service worker, so the render runs on one thread.";
-  } else {
-    ui.threads.title = "The page is not cross-origin isolated, so the render runs on one thread.";
-  }
+  ui.threads.title = isolated
+    ? "The page is cross-origin isolated, so the render uses a thread per core."
+    : "The page is not cross-origin isolated, so the render runs on one thread.";
 }
 
 // --- Controls ---
@@ -466,25 +459,11 @@ async function run() {
   timer.frame = requestAnimationFrame(tick);
 
   try {
-    // Both calls start at once. The first gives the frame of the live SVG:
-    // the same options give the same canvas and background at any count.
-    // The second's shapes wait for it.
-    const frame = approximate({
-      input: image.bytes,
-      output: "svg",
-      render: { ...options, count: 1 },
-      execution: { signal },
-    }).then((first) => {
-      // Not once the run has ended: the other call can fail or stop it first.
-      if (isCurrent() && outcome === "") {
-        setAspect(first.width, first.height);
-        live.start(svgFrame(first.data));
-        setView("result");
-        if (!searched()) {
-          setRunState("busy", "Drawing");
-        }
-      }
-    });
+    // Two calls run at once: the render, and a `count: 1` call that gives
+    // the frame of the live SVG, since the same options give the same canvas
+    // and background at any count. The runtime starts one call's workers at
+    // a time, in call order, so the long render is called first and starts
+    // first. Its shapes wait for the frame.
     const rendering = approximate({
       input: image.bytes,
       output: "svg",
@@ -502,7 +481,23 @@ async function run() {
         },
       },
     });
-    [, result] = await Promise.all([frame, rendering]);
+    const frame = approximate({
+      input: image.bytes,
+      output: "svg",
+      render: { ...options, count: 1 },
+      execution: { signal },
+    }).then((first) => {
+      // Not once the run has ended: the other call can fail or stop it first.
+      if (isCurrent() && outcome === "") {
+        setAspect(first.width, first.height);
+        live.start(svgFrame(first.data));
+        setView("result");
+        if (!searched()) {
+          setRunState("busy", "Drawing");
+        }
+      }
+    });
+    [result] = await Promise.all([rendering, frame]);
     if (!isCurrent()) {
       return;
     }

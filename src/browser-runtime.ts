@@ -6,6 +6,7 @@
 // pool (nested workers) with it. The page picks the build (threaded when
 // cross-origin isolated, single-threaded otherwise) before fetching anything,
 // compiles its `.wasm` once, and posts the compiled module to every worker.
+// Calls start their workers one at a time (see `queueStart`).
 import { InternalError, mapNativeError, messageOf } from "./errors.js";
 import { abortError, normalizeRequest } from "./request.js";
 import type { ProgressInfo } from "./types.js";
@@ -89,6 +90,32 @@ function compiledModule(variant: WasmVariant): Promise<WebAssembly.Module> {
   return module;
 }
 
+/**
+ * Resolves once the latest call's worker has started, or that call has
+ * settled, and so has every call before it. A worker has started once its
+ * modules are loaded and, in the threaded build, those of all its pool
+ * workers too.
+ */
+let startGate: Promise<void> = Promise.resolve();
+
+/**
+ * Queues a call at the start gate: `turn` resolves when the call may start its
+ * worker, and `release`, once its worker has started or the call has settled,
+ * lets the next call start its own. So the package never has two workers
+ * loading at once, which WebKit fails on a page isolated by a service worker
+ * (https://bugs.webkit.org/show_bug.cgi?id=261734). A call released before its
+ * turn, by an abort, still holds the next call until its own turn comes.
+ */
+function queueStart(): { turn: Promise<void>; release: () => void } {
+  const turn = startGate;
+  let release: () => void = () => undefined;
+  const started = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  startGate = Promise.all([turn, started]).then(() => undefined);
+  return { turn, release };
+}
+
 /** A name no other call or page uses, for the per-call panic channel. */
 function channelName(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
@@ -109,8 +136,9 @@ function errorFromWorker({ code, message, option, requirement }: WorkerError): u
 }
 
 /**
- * Runs `task` in a fresh worker. The first reason to stop wins: an abort, a
- * throwing `onProgress`, a panic, a worker failure, or the worker's outcome.
+ * Runs `task` in a fresh worker, started once the call's turn at the start
+ * gate comes. The first reason to stop wins: an abort, a throwing
+ * `onProgress`, a panic, a worker failure, or the worker's outcome.
  */
 function runInWorker(
   task: WorkerTask,
@@ -118,6 +146,7 @@ function runInWorker(
   signal: AbortSignal | undefined,
 ): Promise<WorkerResult> {
   const variant = selectVariant();
+  const { turn, release } = queueStart();
   return new Promise<WorkerResult>((resolve, reject) => {
     let settled = false;
     let worker: Worker | undefined;
@@ -131,6 +160,7 @@ function runInWorker(
       worker?.terminate();
       channel?.close();
       signal?.removeEventListener("abort", onAbort);
+      release();
       finish();
     };
     const fail = (error: unknown): void => settle(() => reject(error));
@@ -142,6 +172,11 @@ function runInWorker(
         return;
       }
       switch (message.type) {
+        case "loaded":
+          break;
+        case "started":
+          release();
+          break;
         case "progress":
           try {
             onProgress?.(message.info);
@@ -163,8 +198,9 @@ function runInWorker(
       }
     };
 
-    compiledModule(variant).then(
-      (module) => {
+    // The turn never rejects: a failure is the compile's.
+    Promise.all([compiledModule(variant), turn]).then(
+      ([module]) => {
         if (settled) {
           return;
         }

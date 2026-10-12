@@ -47,7 +47,23 @@ export interface WorkerResult {
   data: Uint8Array;
 }
 
+/**
+ * What every worker of the threaded build posts as soon as its modules are
+ * loaded, before it knows its role. A pool worker's caller waits for it before
+ * starting the next pool worker; the page ignores it.
+ */
+export interface LoadedMessage {
+  type: "loaded";
+}
+
 export type WorkerMessage =
+  | LoadedMessage
+  /**
+   * The worker no longer loads anything: its modules are loaded and, in the
+   * threaded build, so are all its pool workers. The page then lets the next
+   * call start its worker.
+   */
+  | { type: "started" }
   | { type: "progress"; info: ProgressInfo }
   | { type: "result"; result: WorkerResult }
   /** Also posted by the panic hook, before the trap, for a panic on the worker's own thread. */
@@ -64,5 +80,11 @@ export interface PoolWorkerInit {
   receiver: number;
 }
 
-/** What a pool worker posts once, before it blocks in its rayon thread. */
-export type PoolWorkerMessage = { type: "ready" } | { type: "failed"; message: string };
+/**
+ * What a pool worker posts: `loaded` once its modules are loaded, then
+ * `ready` or `failed` once, before it blocks in its rayon thread.
+ */
+export type PoolWorkerMessage =
+  | LoadedMessage
+  | { type: "ready" }
+  | { type: "failed"; message: string };

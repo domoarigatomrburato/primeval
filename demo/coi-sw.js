@@ -15,12 +15,11 @@
 // demo is same-origin, so `require-corp` blocks nothing. Cross-origin
 // requests (none are made) pass through untouched.
 //
-// WebKit (Safari) breaks under this kind of isolation: of several module
+// WebKit (Safari) has a bug under this kind of isolation: of several module
 // workers started at once that load the same modules, it refuses all but the
 // first for "Cross-Origin-Embedder-Policy", whatever headers this worker adds
-// (https://bugs.webkit.org/show_bug.cgi?id=261734, open). The threaded runtime
-// starts such workers, so the bootstrap probes for the bug (coi-probe.js) and,
-// in a browser that has it, unregisters this worker and stays on one thread.
+// (https://bugs.webkit.org/show_bug.cgi?id=261734, open). The package's
+// browser runtime starts its workers one at a time, so threads work there too.
 
 self.addEventListener("install", () => {
   // Take over without waiting for old tabs to close.

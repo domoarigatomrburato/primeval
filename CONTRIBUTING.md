@@ -49,6 +49,13 @@ npm run build && npm run build:wasm && npm run build:node
 npm run test:browser
 ```
 
+`test/browser/webkit.test.js` also runs the demo in Playwright's WebKit, isolated by the demo's service worker, where WebKit fails module workers started together (see Demo). It is skipped, saying so, unless WebKit is installed; CI does not install it. On macOS, install it once and run it alone with:
+
+```bash
+npx playwright install webkit
+node --test test/browser/webkit.test.js
+```
+
 ## Demo
 
 `demo/` is the browser demo published on GitHub Pages: plain HTML, CSS and ES modules, with no build step. `npm run demo:build` assembles it into `site/` with the package's browser files and the sample images; `npm run demo` builds and serves it on `http://127.0.0.1:8417/`:
@@ -58,7 +65,7 @@ npm run build && npm run build:wasm
 npm run demo
 ```
 
-The server sends no COOP/COEP headers, as on Pages, so the demo's service worker (`demo/coi-sw.js`) isolates the page after one reload. Safari (WebKit) refuses concurrently started module workers under that isolation, so the bootstrap in `demo/index.html` probes for this once per browser version (`demo/coi-probe.js`) and, when the probe fails, unregisters the service worker and reloads once more onto one thread. `npm run demo -- --isolated` sends the headers from the server instead. The demo's tests are part of `npm run test:browser`.
+The server sends no COOP/COEP headers, as on Pages, so the demo's service worker (`demo/coi-sw.js`) isolates the page after one reload. Under that isolation WebKit refuses module workers started together ([WebKit bug 261734](https://bugs.webkit.org/show_bug.cgi?id=261734)), so the package's browser runtime starts its workers one at a time, and Safari gets threads too. `npm run demo -- --isolated` sends the headers from the server instead. The demo's tests are part of `npm run test:browser`.
 
 ## Project Rules
 

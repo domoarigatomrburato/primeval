@@ -18,22 +18,8 @@
       // reload per tab session: if the reload does not isolate the page (no
       // service workers, a private mode, an old browser), the demo stays on
       // one thread instead of reloading forever.
-      //
-      // WebKit (Safari) has a bug with isolation that comes from a service
-      // worker (https://bugs.webkit.org/show_bug.cgi?id=261734): of several
-      // module workers started at once that load the same modules, only the
-      // first loads, so the threaded runtime fails. Once the worker isolates
-      // the page, a probe (coi-probe.js) starts such workers at once. If one
-      // fails, the demo falls back for good in this browser version: it
-      // unregisters the worker and reloads once more, now on one thread. The
-      // outcome is kept in localStorage per user agent, so a browser update
-      // probes again; an inconclusive probe keeps threads and stores nothing.
       (() => {
         const RELOADED = "primeval-coi-reloaded";
-        const FELL_BACK = "primeval-coi-fell-back";
-        const OUTCOME = "primeval-coi-threads";
-        const PROBE_WORKERS = 2;
-        const PROBE_TIMEOUT_MS = 5000;
 
         // Storage may be missing or throw (blocked site data, some private
         // modes): every access goes through this, which then returns `failed`.
@@ -44,128 +30,41 @@
             return failed;
           }
         };
-        // The stored probe outcome for this user agent: true, false, or
-        // undefined when there is none.
-        const storedThreads = () =>
-          attempt(() => {
-            const outcome = JSON.parse(localStorage.getItem(OUTCOME));
-            return outcome?.userAgent === navigator.userAgent &&
-              typeof outcome.threads === "boolean"
-              ? outcome.threads
-              : undefined;
-          }, undefined);
-        const storeThreads = (threads) =>
-          attempt(() =>
-            localStorage.setItem(
-              OUTCOME,
-              JSON.stringify({ userAgent: navigator.userAgent, threads }),
-            ),
-          );
-        // Reloads at most once per tab session for `flag`, and never when
-        // sessionStorage cannot record the flag.
-        const reloadOnce = (flag) => {
+        // Left by an earlier version of this page, which probed Safari for a
+        // bug the package now works around.
+        attempt(() => localStorage.removeItem("primeval-coi-threads"));
+
+        if (window.crossOriginIsolated) {
+          attempt(() => sessionStorage.removeItem(RELOADED));
+          return;
+        }
+        if (!window.isSecureContext || !("serviceWorker" in navigator)) {
+          return;
+        }
+        // Reloads at most once per tab session, and never when sessionStorage
+        // cannot record that it did.
+        const reloadOnce = () => {
           const first = attempt(() => {
-            if (sessionStorage.getItem(flag) !== null) {
+            if (sessionStorage.getItem(RELOADED) !== null) {
               return false;
             }
-            sessionStorage.setItem(flag, "1");
+            sessionStorage.setItem(RELOADED, "1");
             return true;
           }, false);
           if (first) {
             window.location.reload();
           }
         };
-        // One thread for good: unregister the worker and, if it controls the
-        // page, reload once so that the page is no longer isolated.
-        const fallBack = () => {
-          const controlled = navigator.serviceWorker.controller !== null;
-          const scope = new URL("./", window.location.href).href;
-          const reload = () => {
-            if (controlled) {
-              reloadOnce(FELL_BACK);
-            }
-          };
-          navigator.serviceWorker
-            .getRegistrations()
-            .then((registrations) =>
-              Promise.all(
-                registrations
-                  .filter((registration) => registration.scope === scope)
-                  .map((registration) => registration.unregister()),
-              ),
-            )
-            .then(reload, reload);
-        };
-        // Starts the probe's workers at once: true if all load, false if one
-        // fails, undefined if they have not settled within the timeout.
-        const probe = () =>
-          new Promise((resolve) => {
-            const workers = [];
-            let loaded = 0;
-            const settle = (outcome) => {
-              clearTimeout(timer);
-              for (const worker of workers) {
-                worker.terminate();
-              }
-              resolve(outcome);
-            };
-            const timer = setTimeout(() => settle(undefined), PROBE_TIMEOUT_MS);
-            try {
-              for (let i = 0; i < PROBE_WORKERS; i += 1) {
-                const worker = new Worker("./coi-probe.js", { type: "module" });
-                workers.push(worker);
-                worker.addEventListener("message", () => {
-                  loaded += 1;
-                  if (loaded === PROBE_WORKERS) {
-                    settle(true);
-                  }
-                });
-                worker.addEventListener("error", () => settle(false));
-              }
-            } catch {
-              settle(undefined);
-            }
-          });
-
-        if (!window.isSecureContext || !("serviceWorker" in navigator)) {
-          return;
-        }
-        // The session flag also covers a failed probe whose outcome could
-        // not be stored.
-        const fellBack = attempt(() => sessionStorage.getItem(FELL_BACK) !== null, false);
-        const threads = fellBack ? false : storedThreads();
-        if (threads === false) {
-          // The demo's badge explains the single thread (app.js).
-          document.documentElement.dataset.coiThreads = "false";
-          fallBack();
-          return;
-        }
-        if (window.crossOriginIsolated) {
-          attempt(() => sessionStorage.removeItem(RELOADED));
-          if (navigator.serviceWorker.controller !== null && threads === undefined) {
-            probe().then((outcome) => {
-              if (outcome !== undefined) {
-                storeThreads(outcome);
-              }
-              if (outcome === false) {
-                fallBack();
-              }
-            });
-          }
-          return;
-        }
         navigator.serviceWorker.register("./coi-sw.js").then(
           () => {
             if (navigator.serviceWorker.controller) {
               // Controlled but not isolated: the worker was installed by an
               // earlier visit, or the page loaded before it took control.
-              reloadOnce(RELOADED);
+              reloadOnce();
             } else {
-              navigator.serviceWorker.addEventListener(
-                "controllerchange",
-                () => reloadOnce(RELOADED),
-                { once: true },
-              );
+              navigator.serviceWorker.addEventListener("controllerchange", reloadOnce, {
+                once: true,
+              });
             }
           },
           () => {

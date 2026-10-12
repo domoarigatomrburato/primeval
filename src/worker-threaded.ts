@@ -5,7 +5,13 @@
 import * as glueModule from "../wasm/threaded/primeval.js";
 import { messageOf } from "./errors.js";
 import { runRequest, scope, type ThreadedGlue } from "./worker-common.js";
-import type { PoolWorkerInit, PoolWorkerMessage, WorkerRequest } from "./worker-protocol.js";
+import type {
+  LoadedMessage,
+  PoolWorkerInit,
+  PoolWorkerMessage,
+  WorkerMessage,
+  WorkerRequest,
+} from "./worker-protocol.js";
 
 const glue: ThreadedGlue = glueModule;
 
@@ -16,29 +22,49 @@ const glue: ThreadedGlue = glueModule;
 let builder: InstanceType<ThreadedGlue["PoolBuilder"]> | undefined;
 const poolWorkers: Worker[] = [];
 
-/** Starts one pool worker; resolves once it is about to run its rayon thread. */
-function spawnPoolWorker(init: PoolWorkerInit): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const worker = new Worker(new URL("./worker-threaded.js", import.meta.url), {
-      type: "module",
-    });
-    poolWorkers.push(worker);
-    worker.onmessage = ({ data }: MessageEvent<PoolWorkerMessage>) => {
-      if (data.type === "ready") {
-        resolve();
-      } else {
-        reject(new Error(data.message));
-      }
-    };
-    worker.onerror = (event) => {
-      event.preventDefault();
-      reject(new Error("a pool worker failed to load"));
-    };
-    worker.postMessage(init);
-  });
+interface PoolWorkerStart {
+  /** Resolves once the pool worker's modules are loaded. */
+  loaded: Promise<void>;
+  /** Resolves once it is about to run its rayon thread. */
+  ready: Promise<void>;
 }
 
-/** The rayon pool, one thread per logical core, each on a pool worker. */
+/** Starts one pool worker; both of its promises reject if it fails. */
+function spawnPoolWorker(init: PoolWorkerInit): PoolWorkerStart {
+  const worker = new Worker(new URL("./worker-threaded.js", import.meta.url), {
+    type: "module",
+  });
+  poolWorkers.push(worker);
+  const until = (expected: "loaded" | "ready"): Promise<void> =>
+    new Promise((resolve, reject) => {
+      worker.addEventListener("message", ({ data }: MessageEvent<PoolWorkerMessage>) => {
+        if (data.type === expected) {
+          resolve();
+        } else if (data.type === "failed") {
+          reject(new Error(data.message));
+        }
+      });
+      worker.addEventListener("error", (event) => {
+        event.preventDefault();
+        reject(new Error("a pool worker failed to load"));
+      });
+    });
+  const start = { loaded: until("loaded"), ready: until("ready") };
+  // Awaited only once every pool worker has loaded: a failure before then is
+  // handled there, not unhandled.
+  start.ready.catch(() => undefined);
+  worker.postMessage(init);
+  return start;
+}
+
+/**
+ * The rayon pool, one thread per logical core, each on a pool worker. The
+ * pool workers start one at a time, each once the previous one has loaded its
+ * modules, since WebKit fails module workers started together on a page
+ * isolated by a service worker (https://bugs.webkit.org/show_bug.cgi?id=261734);
+ * their instantiation still overlaps. Once the last one has loaded, the page
+ * is told that this call's workers have started.
+ */
 async function startPool(module: WebAssembly.Module): Promise<void> {
   builder = new glue.PoolBuilder(navigator.hardwareConcurrency);
   const init: PoolWorkerInit = {
@@ -47,7 +73,14 @@ async function startPool(module: WebAssembly.Module): Promise<void> {
     memory: glue.wasmMemory(),
     receiver: builder.receiver(),
   };
-  await Promise.all(Array.from({ length: builder.numThreads }, () => spawnPoolWorker(init)));
+  const ready: Promise<void>[] = [];
+  for (let k = 0; k < builder.numThreads; k += 1) {
+    const start = spawnPoolWorker(init);
+    ready.push(start.ready);
+    await start.loaded;
+  }
+  scope.postMessage({ type: "started" } satisfies WorkerMessage);
+  await Promise.all(ready);
   builder.build();
 }
 
@@ -74,3 +107,8 @@ scope.onmessage = ({ data }: MessageEvent<WorkerRequest | PoolWorkerInit>) => {
     void runRequest(glue, data, startPool);
   }
 };
+
+// Every worker of this file, whatever its role: its caller (the page, which
+// ignores it, or the calling worker of a pool worker) learns that its modules
+// are loaded.
+scope.postMessage({ type: "loaded" } satisfies LoadedMessage);
