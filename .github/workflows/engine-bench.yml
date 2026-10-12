@@ -1,0 +1,145 @@
+name: Engine benchmark
+
+# Manual tool: builds the lab engine runner from two git refs and runs both
+# interleaved (base, head, base, head, ...) on the same runner, once on all
+# cores and once on one thread. It compares nothing; the Markdown tables are
+# uploaded as artifacts for an offline comparison. Start it with
+#   gh workflow run engine-bench.yml -f head=<ref>   (optionally -f base=<ref>)
+# and fetch the tables with `gh run download <run id>`. The ratio between the
+# two baselines is the noise.
+
+on:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: Baseline ref (branch, tag or commit)
+        type: string
+        required: true
+        default: main
+      head:
+        description: Ref to time against the baseline
+        type: string
+        required: true
+      repeats:
+        description: Interleaved base/head pairs per job
+        type: string
+        required: true
+        default: "2"
+      shapes:
+        description: "Comma-separated shape kinds (default: all)"
+        type: string
+        required: false
+        default: ""
+      runner:
+        description: Runner image
+        type: choice
+        default: ubuntu-24.04
+        options:
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: bench (${{ matrix.name }})
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: all-cores
+            threads: all
+            extra: ""
+          - name: one-thread
+            threads: "1"
+            extra: --no-synthetic
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.base }}
+          path: base
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.head }}
+          path: head
+          persist-credentials: false
+
+      - name: Validate inputs
+        shell: bash
+        env:
+          REPEATS: ${{ inputs.repeats }}
+          SHAPES: ${{ inputs.shapes }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$REPEATS" =~ ^[1-9][0-9]?$ ]]; then
+            echo "repeats must be a number from 1 to 99" >&2
+            exit 1
+          fi
+          if [[ ! "$SHAPES" =~ ^[a-z_,-]*$ ]]; then
+            echo "shapes must be comma-separated lowercase shape kinds" >&2
+            exit 1
+          fi
+
+      - name: Build both runners
+        shell: bash
+        run: |
+          set -euo pipefail
+          for side in base head; do
+            (
+              cd "$side"
+              rustup toolchain install
+              cargo build --release --locked -p primeval-render --features lab --example engine
+            )
+          done
+
+      - name: Record the machine
+        shell: bash
+        env:
+          LEG: ${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          {
+            uname -a
+            echo "nproc: $(nproc)"
+            lscpu
+            if grep -qw avx2 /proc/cpuinfo; then echo "avx2: yes"; else echo "avx2: no"; fi
+            echo "base: $(git -C base rev-parse HEAD)"
+            echo "head: $(git -C head rev-parse HEAD)"
+          } > "results/machine-$LEG.txt"
+
+      - name: Run the interleaved benchmark
+        shell: bash
+        env:
+          LEG: ${{ matrix.name }}
+          THREADS: ${{ matrix.threads }}
+          EXTRA: ${{ matrix.extra }}
+          REPEATS: ${{ inputs.repeats }}
+          SHAPES: ${{ inputs.shapes }}
+        run: |
+          set -euo pipefail
+          if [[ "$THREADS" == all ]]; then THREADS="$(nproc)"; fi
+          args=(--refine final --steps "100,200")
+          if [[ -n "$EXTRA" ]]; then args+=("$EXTRA"); fi
+          if [[ -n "$SHAPES" ]]; then args+=(--shapes "$SHAPES"); fi
+          for i in $(seq 1 "$REPEATS"); do
+            for side in base head; do
+              echo "$(date -u +%T) $LEG $side $i/$REPEATS"
+              out="results/$LEG-$side-$i"
+              RAYON_NUM_THREADS="$THREADS" "$side/target/release/examples/engine" "${args[@]}" > "$out.md" 2> "$out.err"
+            done
+          done
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: engine-bench-${{ matrix.name }}
+          path: results/
+          retention-days: 30
+          if-no-files-found: error
