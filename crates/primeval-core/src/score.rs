@@ -8,7 +8,8 @@
 //! works on the three colour channels only. On aarch64, hot paths use NEON
 //! intrinsics to process 8 pixels per iteration; on wasm32 with `simd128`,
 //! which the browser builds enable, the energy's blend uses WebAssembly SIMD
-//! to process 16. Both give the scalar kernels' results bit for bit.
+//! to process 16; on x86_64 it uses AVX2 to process 32 when the CPU has it,
+//! chosen at run time. All give the scalar kernels' results bit for bit.
 //!
 //! The search scores every candidate against the same target and canvas, so
 //! [`fit`] reads each line's sums from the step's [`PrefixSums`] and the
@@ -248,13 +249,16 @@ impl ColorFit {
 const SHORT_LINE_PIXELS: usize = 2;
 
 /// The per-scanline kernels behind [`fit`] and the energies, in
-/// scalar code ([`Scalar`]), NEON ([`Neon`]) or WebAssembly SIMD
-/// ([`Simd128`]).
+/// scalar code ([`Scalar`]), NEON ([`Neon`]), WebAssembly SIMD
+/// ([`Simd128`]) or AVX2 ([`Avx2`]).
 ///
 /// # Safety
 ///
 /// For every method, `start + pixels * 3` must not exceed `t_pix.len()` or
-/// `c_pix.len()`.
+/// `c_pix.len()`. An [`Avx2`] method may only be called when the CPU
+/// supports AVX2, which the energies' run-time dispatch and the parity
+/// tests' guard establish; [`fit_with`] and [`energy_with`] leave that to
+/// their callers.
 trait LineKernels {
     /// Per-channel RGB sums of `pixels` pixels from byte offset `start` in
     /// the target and in the canvas.
@@ -289,8 +293,11 @@ trait LineKernels {
     ) -> u64;
 }
 
-/// The kernels for this target: NEON on aarch64, simd128 on wasm32 with that
-/// feature, scalar elsewhere.
+/// The kernels for this target, chosen at compile time: NEON on aarch64,
+/// simd128 on wasm32 with that feature, scalar elsewhere. x86_64 keeps the
+/// scalar kernels here, since its baseline is SSE2, and [`energy`] and
+/// [`energy_below`] switch to the [`Avx2`] kernels at run time when the CPU
+/// has AVX2.
 #[cfg(target_arch = "aarch64")]
 type Native = Neon;
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
@@ -450,8 +457,8 @@ fn energy_with<K: LineKernels>(
     Some(total as u64)
 }
 
-/// The scalar kernels, for targets without NEON or simd128 and as the
-/// reference the SIMD kernels are tested against.
+/// The scalar kernels, for targets without NEON or simd128 and x86_64 CPUs
+/// without AVX2, and as the reference the SIMD kernels are tested against.
 #[cfg_attr(
     any(
         target_arch = "aarch64",
@@ -558,6 +565,49 @@ impl LineKernels for Simd128 {
     ) -> u64 {
         // SAFETY: this method's contract is `simd128::line_after`'s.
         unsafe { simd128::line_after(t_pix, c_pix, start, pixels, blend) }
+    }
+}
+
+/// The AVX2 kernels: `line_after`, the energy of every search candidate, in
+/// AVX2; the line sums and the byte differences in scalar code, as in the
+/// WebAssembly kernels, since every search and climb fit reads prefix sums.
+/// x86_64's baseline is SSE2, so [`Native`] stays [`Scalar`] there and
+/// [`energy`] and [`energy_below`] choose these kernels at run time.
+///
+/// Beyond the trait's contract, `line_after` may only be called when the CPU
+/// supports AVX2: the energies' dispatch checks it with
+/// `is_x86_feature_detected!`, and so does every test before it calls one.
+#[cfg(target_arch = "x86_64")]
+struct Avx2;
+
+#[cfg(target_arch = "x86_64")]
+impl LineKernels for Avx2 {
+    #[inline]
+    unsafe fn line_sums(
+        t_pix: &[u8],
+        c_pix: &[u8],
+        start: usize,
+        pixels: usize,
+    ) -> ([u64; 3], [u64; 3]) {
+        scalar::line_sums(t_pix, c_pix, start, pixels)
+    }
+
+    #[inline]
+    fn difference_bytes(a_pix: &[u8], b_pix: &[u8]) -> u64 {
+        scalar::difference_full_raw_pixels(a_pix, b_pix)
+    }
+
+    #[inline]
+    unsafe fn line_after(
+        t_pix: &[u8],
+        c_pix: &[u8],
+        start: usize,
+        pixels: usize,
+        blend: LineBlend,
+    ) -> u64 {
+        // SAFETY: this method's contract, the CPU's AVX2 included, is
+        // `avx2::line_after`'s.
+        unsafe { avx2::line_after(t_pix, c_pix, start, pixels, blend) }
     }
 }
 
@@ -1229,6 +1279,342 @@ mod simd128 {
     }
 }
 
+/// The AVX2 kernel [`Avx2`] runs, `line_after`, on 32 pixels (three 32-byte
+/// vectors) at a time. As in the simd128 kernel, the RGB bytes stay
+/// interleaved: a block of 96 bytes starts on a pixel, so byte `o` of a
+/// block always holds channel `o % 3`, and the per-channel constants are
+/// laid out to match.
+///
+/// A block is processed in six halves of 16 bytes, half `h` holding the
+/// block's bytes `16h..16h + 16`, each zero-extended to sixteen 16-bit lanes
+/// in byte order: lane `e` of half `h` holds byte `16h + e`.
+///
+/// Every operation is exact integer arithmetic; each accumulator's bound is
+/// proved where it is declared. Every function here is compiled with AVX2
+/// and may only run on a CPU that has it, which [`Avx2`]'s callers check.
+#[cfg(target_arch = "x86_64")]
+mod avx2 {
+    use super::{BYTES_PER_PIXEL, LineBlend, scalar};
+    use core::arch::x86_64::*;
+
+    /// Bytes in a block of 32 RGB pixels, three vectors.
+    const BLOCK_BYTES: usize = 32 * BYTES_PER_PIXEL;
+
+    /// Loads the block of 96 bytes at `ptr`.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be valid for reads of 96 bytes. `_mm256_loadu_si256` has
+    /// no alignment requirement.
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    unsafe fn load_block(ptr: *const u8) -> [__m256i; 3] {
+        // SAFETY: the three loads read `ptr..ptr + 96`, valid by the
+        // caller's contract.
+        unsafe {
+            [
+                _mm256_loadu_si256(ptr.cast()),
+                _mm256_loadu_si256(ptr.add(32).cast()),
+                _mm256_loadu_si256(ptr.add(64).cast()),
+            ]
+        }
+    }
+
+    /// The six halves of a block, each zero-extended to sixteen 16-bit
+    /// lanes: half `2v` is the low 128 bits of vector `v`, half `2v + 1`
+    /// the high 128 bits, so half `h` holds the block's bytes
+    /// `16h..16h + 16` in order.
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    fn widen_block(block: [__m256i; 3]) -> [__m256i; 6] {
+        let [a, b, c] = block;
+        [
+            _mm256_cvtepu8_epi16(_mm256_castsi256_si128(a)),
+            _mm256_cvtepu8_epi16(_mm256_extracti128_si256::<1>(a)),
+            _mm256_cvtepu8_epi16(_mm256_castsi256_si128(b)),
+            _mm256_cvtepu8_epi16(_mm256_extracti128_si256::<1>(b)),
+            _mm256_cvtepu8_epi16(_mm256_castsi256_si128(c)),
+            _mm256_cvtepu8_epi16(_mm256_extracti128_si256::<1>(c)),
+        ]
+    }
+
+    /// All ones in the 16-bit lanes of the six halves whose byte is below
+    /// `bytes`, zero in the others: lane `e` of half `h` holds byte
+    /// `16h + e`.
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    fn block_mask(bytes: usize) -> [__m256i; 6] {
+        debug_assert!(bytes < BLOCK_BYTES, "a tail is shorter than a block");
+        // Byte offsets and `bytes` are below 96, so the signed 16-bit
+        // comparison is exact.
+        let limit = _mm256_set1_epi16(bytes as i16);
+        let offsets = _mm256_setr_epi16(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+        let mut mask = [_mm256_setzero_si256(); 6];
+        for (half, lanes) in mask.iter_mut().enumerate() {
+            let first = _mm256_set1_epi16(16 * half as i16);
+            *lanes = _mm256_cmpgt_epi16(limit, _mm256_add_epi16(offsets, first));
+        }
+        mask
+    }
+
+    /// The sum of the eight 32-bit lanes of `lanes`, read as unsigned.
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    fn sum_u32x8(lanes: __m256i) -> u64 {
+        // Zero-extending the lanes to 64 bits reads them as unsigned; each
+        // 64-bit sum below is under `8 · 2^32`, far from overflowing.
+        let wide = _mm256_add_epi64(
+            _mm256_cvtepu32_epi64(_mm256_castsi256_si128(lanes)),
+            _mm256_cvtepu32_epi64(_mm256_extracti128_si256::<1>(lanes)),
+        );
+        let pair = _mm_add_epi64(
+            _mm256_castsi256_si128(wide),
+            _mm256_extracti128_si256::<1>(wide),
+        );
+        _mm_cvtsi128_si64(pair) as u64 + _mm_extract_epi64::<1>(pair) as u64
+    }
+
+    /// `value / M` per 32-bit lane, as [`super::div_by_m`], exact for every
+    /// lane below `M · (M + 1)`; the logical shifts read the lanes as
+    /// unsigned, and `value + 1 + (value >> 16)` stays below `2^32`.
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    fn div_by_m_u32x8(value: __m256i) -> __m256i {
+        let adjusted = _mm256_add_epi32(
+            _mm256_add_epi32(value, _mm256_set1_epi32(1)),
+            _mm256_srli_epi32::<16>(value),
+        );
+        _mm256_srli_epi32::<16>(adjusted)
+    }
+
+    /// `keep` laid out for [`blend_u16x16`]: with `keep = 256 · kh + kl`
+    /// (`kh, kl <= 255`, since `keep = M − k <= M`), every 32-bit lane holds
+    /// the 16-bit pair `(128 · kh, kl)`, low half first.
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    fn keep_lanes(keep: u32) -> __m256i {
+        debug_assert!(keep <= super::M, "keep {keep} out of range");
+        let (high, low) = (keep >> 8, keep & 0xFF);
+        // `128 · kh <= 32_640` and `kl <= 255`: both halves are below
+        // `2^15`, so the lane is below `2^31` and the cast keeps it.
+        _mm256_set1_epi32(((low << 16) | (high << 7)) as i32)
+    }
+
+    /// [`super::blend_channel_scalar`] on the sixteen 16-bit lanes of
+    /// `current`, with `keep` laid out by [`keep_lanes`]; the blended values
+    /// in 16-bit lanes, in the order of `current`.
+    ///
+    /// The 32-bit products come from `_mm256_madd_epi16`, which multiplies
+    /// signed 16-bit pairs and adds each pair's two products into a 32-bit
+    /// lane. With `c = current <= 255` and `keep = 256 · kh + kl`,
+    /// `c · keep = (2c) · (128 · kh) + c · kl`, so the pairs `(2c, c)` against
+    /// `(128 · kh, kl)` give the product. Every operand fits a signed 16-bit
+    /// lane (`2c <= 510`, `128 · kh <= 32_640`, `c <= 255`, `kl <= 255`),
+    /// both products are non-negative, and their sum is at most
+    /// `255 · 65_535 = 16_711_425 < 2^31`, so the madd is exact; adding the
+    /// term keeps it exact, since `c · keep + term < 256 · M`
+    /// (`BLEND_VALUE_BOUND`). This beats the plainer `_mm256_mullo_epi16` and
+    /// `_mm256_mulhi_epu16` of `c` and `keep`: LLVM turns that `mulhi` of
+    /// zero-extended bytes, in the block loop, into 32-bit extensions, two
+    /// multiplies, a pack and a lane-crossing permute; the madd costs the
+    /// same add, two unpacks and two multiplies and is left as written. Plain
+    /// 32-bit lanes and `_mm256_mullo_epi32` would be two micro-ops with
+    /// twice the latency on most x86 cores.
+    ///
+    /// The pairs `(2c, c)` come from unpacking `c + c` with `c`, which
+    /// interleaves within each 128-bit lane: `_mm256_unpacklo_epi16` gives
+    /// the pairs of lanes 0–3 and 8–11 of `current`, in that order, and
+    /// `_mm256_unpackhi_epi16` those of lanes 4–7 and 12–15. So the 32-bit
+    /// lanes of `terms_low` hold the terms of lanes 0–3 and 8–11 and those of
+    /// `terms_high` the terms of lanes 4–7 and 12–15.
+    ///
+    /// `_mm256_packus_epi32(low, high)` packs the four low then the four high
+    /// quotients of each 128-bit lane, which restores the order 0–15; it
+    /// saturates signed 32-bit lanes to unsigned 16 bits, which leaves the
+    /// quotients unchanged since every one is below 256.
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    fn blend_u16x16(
+        current: __m256i,
+        keep: __m256i,
+        terms_low: __m256i,
+        terms_high: __m256i,
+    ) -> __m256i {
+        let doubled = _mm256_add_epi16(current, current);
+        let low = _mm256_add_epi32(
+            _mm256_madd_epi16(_mm256_unpacklo_epi16(doubled, current), keep),
+            terms_low,
+        );
+        let high = _mm256_add_epi32(
+            _mm256_madd_epi16(_mm256_unpackhi_epi16(doubled, current), keep),
+            terms_high,
+        );
+        _mm256_packus_epi32(div_by_m_u32x8(low), div_by_m_u32x8(high))
+    }
+
+    /// [`super::blend_channel_scalar`] on 8 values with one `term` and
+    /// `keep`, through the kernel's blend, which blends them in both 128-bit
+    /// lanes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the CPU lacks AVX2, or if the two 128-bit lanes disagree.
+    #[cfg(test)]
+    pub(super) fn blend_chunk_u8x8(current: [u8; 8], term: u32, keep: u32) -> [u8; 8] {
+        assert!(
+            std::arch::is_x86_feature_detected!("avx2"),
+            "the AVX2 blend needs a CPU with AVX2"
+        );
+        // SAFETY: the CPU supports AVX2 (asserted above).
+        let out = unsafe { blend_chunk_u16x16(current, term, keep) };
+        assert_eq!(out[..8], out[8..], "both 128-bit lanes blend alike");
+        std::array::from_fn(|lane| out[lane] as u8)
+    }
+
+    /// [`blend_u16x16`] on `current` twice, with one `term` and `keep`.
+    #[cfg(test)]
+    #[target_feature(enable = "avx2")]
+    fn blend_chunk_u16x16(current: [u8; 8], term: u32, keep: u32) -> [u16; 16] {
+        let [c0, c1, c2, c3, c4, c5, c6, c7] = current.map(i16::from);
+        let current = _mm256_setr_epi16(
+            c0, c1, c2, c3, c4, c5, c6, c7, c0, c1, c2, c3, c4, c5, c6, c7,
+        );
+        // `term < 256 · M < 2^31`: the cast keeps the value.
+        let terms = _mm256_set1_epi32(term as i32);
+        let blended = blend_u16x16(current, keep_lanes(keep), terms, terms);
+        let mut out = [0_u16; 16];
+        // SAFETY: `_mm256_storeu_si256` writes 32 bytes, unaligned, to the
+        // local `[u16; 16]`.
+        unsafe { _mm256_storeu_si256(out.as_mut_ptr().cast(), blended) };
+        out
+    }
+
+    /// Blocks of 32 pixels per flush of the 32-bit lanes of [`line_after`]:
+    /// [`block_after`] adds six `_mm256_madd_epi16` results, each the sum of
+    /// two squares, to the same eight lanes, so each block adds the squares
+    /// of 12 channel values, at most `12 · 255² = 780_300`, to every lane.
+    /// The masked tail adds one block to the last flush, so a flush holds at
+    /// most 4096 blocks: `4096 · 780_300 = 3_196_108_800 < 2^32`. (The
+    /// bound is 5504 blocks: `5504 · 780_300 < 2^32 < 5505 · 780_300`.)
+    const AFTER_BLOCKS_PER_FLUSH: usize = 4096;
+
+    /// The squared differences between the 96 target bytes `t` and the 96
+    /// canvas bytes `c` blended with `keep` and `terms`, in 32-bit lanes of
+    /// at most `12 · 255²`; bytes outside `mask`, when there is one, add
+    /// nothing.
+    ///
+    /// The terms follow the products of [`blend_u16x16`]: in half `h`, the
+    /// low products hold lanes 0–3 and 8–11, whose bytes `16h + e` have
+    /// channel `(16h + e) % 3 = (h + e) % 3`, since `16 % 3 = 1`. With
+    /// `e = 0, 1, 2, 3, 8, 9, 10, 11` that is channel `(h + r) % 3` for
+    /// `r = 0, 1, 2, 0, 2, 0, 1, 2`, the lanes of `terms[h % 3]` (see
+    /// [`line_after`]). The high products hold lanes `e + 4`, one channel
+    /// further on (`4 % 3 = 1`), so they take `terms[(h + 1) % 3]`.
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    fn block_after(
+        t: [__m256i; 3],
+        c: [__m256i; 3],
+        keep: __m256i,
+        terms: &[__m256i; 3],
+        mask: Option<&[__m256i; 6]>,
+    ) -> __m256i {
+        let (t, c) = (widen_block(t), widen_block(c));
+        let mut lanes = _mm256_setzero_si256();
+        for half in 0..6 {
+            let after = blend_u16x16(c[half], keep, terms[half % 3], terms[(half + 1) % 3]);
+            // Both operands are in `0..=255`, so the 16-bit difference is
+            // exact, and `_mm256_madd_epi16` sums the squares of two of them
+            // per 32-bit lane: at most `2 · 255² = 130_050`.
+            let mut difference = _mm256_sub_epi16(t[half], after);
+            if let Some(mask) = mask {
+                difference = _mm256_and_si256(difference, mask[half]);
+            }
+            lanes = _mm256_add_epi32(lanes, _mm256_madd_epi16(difference, difference));
+        }
+        lanes
+    }
+
+    /// The squared channel differences between the target and the canvas
+    /// blended with `blend`; matches [`scalar::line_after`].
+    ///
+    /// # Safety
+    ///
+    /// `start + pixels * 3` must not exceed `t_pix.len()` or `c_pix.len()`,
+    /// and the CPU must support AVX2.
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    pub(super) unsafe fn line_after(
+        t_pix: &[u8],
+        c_pix: &[u8],
+        start: usize,
+        pixels: usize,
+        blend: LineBlend,
+    ) -> u64 {
+        // Lines of one or two pixels, common at anti-aliased edges, would
+        // take the scalar tail below anyway: skip the vector set-up.
+        if pixels < 3 {
+            return scalar::line_after(t_pix, c_pix, start, pixels, blend);
+        }
+        let LineBlend { keep, terms } = blend;
+        // Every term is below `256 · M < 2^31`, so the casts keep the value.
+        let [r, g, b] = terms.map(|term| term as i32);
+        // `terms[j]` holds, lane by lane, the term of channel `(j + r) % 3`
+        // for `r = 0, 1, 2, 0, 2, 0, 1, 2` (see `block_after`).
+        let block_terms = [
+            _mm256_setr_epi32(r, g, b, r, b, r, g, b),
+            _mm256_setr_epi32(g, b, r, g, r, g, b, r),
+            _mm256_setr_epi32(b, r, g, b, g, b, r, g),
+        ];
+        let keep = keep_lanes(keep);
+        let mut total = 0_u64;
+        let mut lanes = _mm256_setzero_si256();
+        let mut blocks = 0;
+        let mut byte_index = start;
+
+        for _ in 0..pixels / 32 {
+            // SAFETY: the loop reads `pixels / 32` blocks of 96 bytes from
+            // `start`, which end at or below `start + pixels * 3`, within
+            // both slices by the caller's contract.
+            let (t, c) = unsafe {
+                (
+                    load_block(t_pix.as_ptr().add(byte_index)),
+                    load_block(c_pix.as_ptr().add(byte_index)),
+                )
+            };
+            lanes = _mm256_add_epi32(lanes, block_after(t, c, keep, &block_terms, None));
+            byte_index += BLOCK_BYTES;
+            blocks += 1;
+            if blocks == AFTER_BLOCKS_PER_FLUSH {
+                total += sum_u32x8(lanes);
+                lanes = _mm256_setzero_si256();
+                blocks = 0;
+            }
+        }
+
+        // Three or more tail pixels take one block with the bytes past the
+        // line masked out, when the buffers extend that far; shorter tails,
+        // and tails too close to the end of the buffers, take scalar code.
+        let tail = pixels % 32;
+        if tail > 2 && byte_index + BLOCK_BYTES <= t_pix.len().min(c_pix.len()) {
+            let mask = block_mask(tail * BYTES_PER_PIXEL);
+            // SAFETY: the block is the 96 bytes from `byte_index`, within
+            // both slices by the check above.
+            let (t, c) = unsafe {
+                (
+                    load_block(t_pix.as_ptr().add(byte_index)),
+                    load_block(c_pix.as_ptr().add(byte_index)),
+                )
+            };
+            lanes = _mm256_add_epi32(lanes, block_after(t, c, keep, &block_terms, Some(&mask)));
+        } else {
+            total += scalar::line_after(t_pix, c_pix, byte_index, tail, blend);
+        }
+
+        total + sum_u32x8(lanes)
+    }
+}
+
 /// Computes the optimal color for drawing `lines` onto `current` to
 /// best approximate `target` at the given `alpha` level, which must be
 /// `1..=255`; [`fit`] without prefix sums.
@@ -1441,8 +1827,15 @@ pub(crate) fn energy(
     fit: Fit,
     score: u64,
 ) -> u64 {
-    energy_with::<Native>(target, current, lines, fit, score, None)
-        .expect("an evaluation without a limit runs to the end")
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: `avx2` is true only if the CPU supports AVX2.
+    let energy = unsafe {
+        let avx2 = std::arch::is_x86_feature_detected!("avx2");
+        energy_x86(avx2, target, current, lines, fit, score, None)
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    let energy = energy_with::<Native>(target, current, lines, fit, score, None);
+    energy.expect("an evaluation without a limit runs to the end")
 }
 
 /// The [`energy`] if it is below `bound`, `None` otherwise.
@@ -1467,8 +1860,58 @@ pub(crate) fn energy_below(
     // A bound beyond `i64::MAX` is never reached by a total that fits in
     // `i64`, so the evaluation runs to the end and the check below decides.
     let limit = i64::try_from(bound).ok();
-    energy_with::<Native>(target, current, lines, fit, score, limit)
-        .filter(|&energy| energy < bound)
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: `avx2` is true only if the CPU supports AVX2.
+    let energy = unsafe {
+        let avx2 = std::arch::is_x86_feature_detected!("avx2");
+        energy_x86(avx2, target, current, lines, fit, score, limit)
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    let energy = energy_with::<Native>(target, current, lines, fit, score, limit);
+    energy.filter(|&energy| energy < bound)
+}
+
+/// [`energy_with`] on x86_64, with the [`Avx2`] kernels if `avx2` and the
+/// [`Scalar`] ones otherwise. [`energy`] and [`energy_below`] pass
+/// `is_x86_feature_detected!("avx2")`, which std caches after the first
+/// call: one check per evaluation, outside the loop over its lines.
+///
+/// # Safety
+///
+/// `avx2` may be true only if the CPU supports AVX2.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+unsafe fn energy_x86(
+    avx2: bool,
+    target: &Buffer,
+    current: &Buffer,
+    lines: &[Scanline],
+    fit: Fit,
+    score: u64,
+    limit: Option<i64>,
+) -> Option<u64> {
+    if avx2 {
+        // SAFETY: the CPU supports AVX2, by this function's contract.
+        unsafe { energy_avx2(target, current, lines, fit, score, limit) }
+    } else {
+        energy_with::<Scalar>(target, current, lines, fit, score, limit)
+    }
+}
+
+/// [`energy_with`] with the [`Avx2`] kernels, compiled with AVX2 so that
+/// the loop over the lines and `line_after` compile into this one function,
+/// with no call per line.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn energy_avx2(
+    target: &Buffer,
+    current: &Buffer,
+    lines: &[Scanline],
+    fit: Fit,
+    score: u64,
+    limit: Option<i64>,
+) -> Option<u64> {
+    energy_with::<Avx2>(target, current, lines, fit, score, limit)
 }
 
 /// [`energy`] for `color` instead of a fit: the old error comes from the
@@ -1517,10 +1960,12 @@ mod fixtures {
         sums
     }
 
-    /// Canvas sizes around the 8- and 16-pixel chunks of the SIMD kernels.
+    /// Canvas sizes around the 8-, 16- and 32-pixel chunks of the SIMD
+    /// kernels.
     #[cfg(any(
         target_arch = "aarch64",
-        all(target_arch = "wasm32", target_feature = "simd128")
+        all(target_arch = "wasm32", target_feature = "simd128"),
+        target_arch = "x86_64"
     ))]
     pub(super) fn sizes() -> impl Iterator<Item = (u32, u32)> {
         [
@@ -1534,7 +1979,16 @@ mod fixtures {
             (17, 6),
         ]
         .into_iter()
-        .chain([(23, 7), (31, 2), (33, 9), (64, 3), (65, 4)])
+        .chain([
+            (23, 7),
+            (31, 2),
+            (32, 2),
+            (33, 9),
+            (63, 2),
+            (64, 3),
+            (65, 4),
+        ])
+        .chain([(95, 2), (96, 3), (97, 2)])
     }
 
     pub(super) fn random_buffer(rng: &mut ChaCha8Rng, width: u32, height: u32) -> Buffer {
@@ -2400,35 +2854,83 @@ fn wasm32_builds_enable_simd128() {
     );
 }
 
-/// The [`Native`] kernels and the target's SIMD module must agree with the
-/// scalar ones bit for bit, since release builds run only the native ones.
-/// CI runs these tests with NEON on the macOS arm64 leg, and
-/// `node scripts/build-wasm.mjs test-kernels` runs them with simd128 on
-/// wasm32-wasip1 under Node.
+/// The target's SIMD kernels and SIMD module must agree with the scalar ones
+/// bit for bit, since release builds run only the SIMD ones: the [`Native`]
+/// kernels on aarch64 and wasm32, and on x86_64 the AVX2 kernels, which the
+/// energies choose at run time. CI runs these tests with NEON on the macOS
+/// arm64 leg and with AVX2 on the ubuntu x86_64 leg, which sets
+/// `PRIMEVAL_REQUIRE_AVX2` so that a runner without AVX2 fails instead of
+/// skipping them; `node scripts/build-wasm.mjs test-kernels` runs them with
+/// simd128 on wasm32-wasip1 under Node.
 #[cfg(all(
     test,
     any(
         target_arch = "aarch64",
-        all(target_arch = "wasm32", target_feature = "simd128")
+        all(target_arch = "wasm32", target_feature = "simd128"),
+        target_arch = "x86_64"
     )
 ))]
 mod simd_parity {
     use super::fixtures::{prefix_sums, random_buffer, random_lines, sizes};
     use super::{
-        Fit, LineBlend, LineKernels, M, Native, Scalar, blend_channel_scalar, energy_with, fit_with,
+        Fit, LineBlend, LineKernels, M, Scalar, blend_channel_scalar, energy_with, fit_with,
     };
     use crate::buffer::Buffer;
     use crate::color::Color;
     use rand::{RngExt, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
+    #[cfg(target_arch = "x86_64")]
+    use super::avx2 as simd;
     #[cfg(target_arch = "aarch64")]
     use super::neon as simd;
     #[cfg(target_arch = "wasm32")]
     use super::simd128 as simd;
 
+    /// The kernels under test.
+    #[cfg(not(target_arch = "x86_64"))]
+    type Simd = super::Native;
+    #[cfg(target_arch = "x86_64")]
+    type Simd = super::Avx2;
+
+    /// Whether the CPU runs [`Simd`]; every test returns early without it.
+    /// NEON is baseline on aarch64, and the wasm32 build enables simd128.
+    #[cfg(not(target_arch = "x86_64"))]
+    fn simd_available() -> bool {
+        true
+    }
+
+    /// Whether the CPU runs [`Simd`], the AVX2 kernels, whose methods may
+    /// only be called when it does; every test returns early without it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the CPU lacks AVX2 and `PRIMEVAL_REQUIRE_AVX2` is set and
+    /// not empty, as on CI's x86_64 leg, so that the tests fail there
+    /// instead of skipping.
+    #[cfg(target_arch = "x86_64")]
+    fn simd_available() -> bool {
+        if std::arch::is_x86_feature_detected!("avx2") {
+            return true;
+        }
+        let required =
+            std::env::var_os("PRIMEVAL_REQUIRE_AVX2").is_some_and(|value| !value.is_empty());
+        assert!(
+            !required,
+            "PRIMEVAL_REQUIRE_AVX2 is set, but this CPU lacks AVX2, so the AVX2 kernels cannot be tested"
+        );
+        eprintln!(
+            "note: this CPU lacks AVX2, so the AVX2 kernel test is skipped \
+             (set PRIMEVAL_REQUIRE_AVX2=1 to make that a failure)"
+        );
+        false
+    }
+
     #[test]
     fn compute_color_matches_scalar_for_every_alpha() {
+        if !simd_available() {
+            return;
+        }
         let mut rng = ChaCha8Rng::seed_from_u64(0xc010);
         for (width, height) in sizes() {
             let target = random_buffer(&mut rng, width, height);
@@ -2438,7 +2940,7 @@ mod simd_parity {
                 let lines = random_lines(&mut rng, width as i32, height as i32);
                 for sums in [None, Some(&sums)] {
                     let expected = fit_with::<Scalar>(&target, &current, sums, &lines, alpha);
-                    let actual = fit_with::<Native>(&target, &current, sums, &lines, alpha);
+                    let actual = fit_with::<Simd>(&target, &current, sums, &lines, alpha);
                     assert_eq!(actual, expected, "{width}x{height} alpha={alpha}");
                 }
             }
@@ -2450,6 +2952,9 @@ mod simd_parity {
     /// every lane towards its overflow bound.
     #[test]
     fn compute_color_matches_scalar_on_long_lines() {
+        if !simd_available() {
+            return;
+        }
         let mut rng = ChaCha8Rng::seed_from_u64(0x1086);
         let (width, height) = (2 * 8 * 256 + 13, 3);
         let mut target = Buffer::new_from_color(width, height, Color::new(255, 255, 255, 255));
@@ -2460,7 +2965,7 @@ mod simd_parity {
             let lines = random_lines(&mut rng, width as i32, height as i32);
             for sums in [None, Some(&sums)] {
                 let expected = fit_with::<Scalar>(&target, &current, sums, &lines, alpha);
-                let actual = fit_with::<Native>(&target, &current, sums, &lines, alpha);
+                let actual = fit_with::<Simd>(&target, &current, sums, &lines, alpha);
                 assert_eq!(actual, expected, "alpha={alpha}");
             }
         }
@@ -2468,6 +2973,9 @@ mod simd_parity {
 
     #[test]
     fn energy_matches_scalar_for_every_alpha() {
+        if !simd_available() {
+            return;
+        }
         let mut rng = ChaCha8Rng::seed_from_u64(0xe4e7);
         for (width, height) in sizes() {
             let target = random_buffer(&mut rng, width, height);
@@ -2482,8 +2990,7 @@ mod simd_parity {
                 for limit in [None, limit] {
                     let expected =
                         energy_with::<Scalar>(&target, &current, &lines, fit, score, limit);
-                    let actual =
-                        energy_with::<Native>(&target, &current, &lines, fit, score, limit);
+                    let actual = energy_with::<Simd>(&target, &current, &lines, fit, score, limit);
                     assert_eq!(actual, expected, "{width}x{height} {color:?} {limit:?}");
                 }
             }
@@ -2491,11 +2998,16 @@ mod simd_parity {
     }
 
     /// Every line kernel on every start and length of a few rows, so the
-    /// masked tails meet the end of the buffer and fall back to scalar code.
+    /// masked tails meet the end of the buffer and fall back to scalar code;
+    /// the rows of 70 pixels are longer than two 32-pixel blocks, so every
+    /// tail length of every kernel meets it.
     #[test]
     fn line_kernels_match_scalar_on_every_span() {
+        if !simd_available() {
+            return;
+        }
         let mut rng = ChaCha8Rng::seed_from_u64(0x11e5);
-        for (width, height) in [(1, 1), (9, 2), (23, 3)] {
+        for (width, height) in [(1, 1), (9, 2), (23, 3), (70, 2)] {
             let target = random_buffer(&mut rng, width, height);
             let current = random_buffer(&mut rng, width, height);
             let (t_pix, c_pix) = (target.pixels(), current.pixels());
@@ -2507,20 +3019,21 @@ mod simd_parity {
                     let coverage = rng.random_range(0..=M);
                     let blend = LineBlend::new(color, coverage);
                     // SAFETY: `start + pixels * 3` is at most `total * 3`,
-                    // the length of both buffers.
+                    // the length of both buffers, and `simd_available`
+                    // returned true.
                     unsafe {
                         assert_eq!(
-                            Native::line_sums(t_pix, c_pix, start, pixels),
+                            Simd::line_sums(t_pix, c_pix, start, pixels),
                             Scalar::line_sums(t_pix, c_pix, start, pixels),
                             "{first} {pixels}"
                         );
                         assert_eq!(
-                            Native::line_error(t_pix, c_pix, start, pixels),
+                            Simd::line_error(t_pix, c_pix, start, pixels),
                             Scalar::line_error(t_pix, c_pix, start, pixels),
                             "{first} {pixels}"
                         );
                         assert_eq!(
-                            Native::line_after(t_pix, c_pix, start, pixels, blend),
+                            Simd::line_after(t_pix, c_pix, start, pixels, blend),
                             Scalar::line_after(t_pix, c_pix, start, pixels, blend),
                             "{first} {pixels} {color:?} {coverage}"
                         );
@@ -2530,35 +3043,41 @@ mod simd_parity {
         }
     }
 
-    /// Lines of twice 4096 blocks of 16 pixels and a tail: the simd128
-    /// `line_after` flushes its 32-bit lanes every 4096 blocks, mid-line,
-    /// and would overflow them with a constant above its bound (5504
-    /// blocks); the NEON line sums flush their 16-bit lanes every 128
-    /// blocks, many times. A white target over a black canvas, with an
-    /// opaque black blend, puts every lane at its overflow bound;
+    /// Lines of `2 · 4096 + 1` blocks of 32 pixels and a 5-pixel tail: the
+    /// AVX2 and simd128 `line_after` (blocks of 32 and 16 pixels) flush
+    /// their 32-bit lanes every 4096 blocks, mid-line, and a constant above
+    /// their bound (5504 blocks for both, each block adding 12 squares to
+    /// every lane) would overflow them within the line; the NEON line sums
+    /// flush their 16-bit lanes every 128 blocks of 16 pixels, many times.
+    /// A white target over a black canvas, with an opaque black blend, puts
+    /// every lane at its overflow bound;
     /// [`compute_color_matches_scalar_on_long_lines`] cannot show a wrong
     /// line sum there, since the fitted colour clamps to white.
     #[test]
     fn line_kernels_match_scalar_past_the_flushes() {
-        let (width, height) = (2 * 16 * 4096 + 16 + 5, 2);
+        if !simd_available() {
+            return;
+        }
+        let (width, height) = (2 * 32 * 4096 + 32 + 5, 2);
         let target = Buffer::new_from_color(width, height, Color::new(255, 255, 255, 255));
         let mut current = Buffer::new_from_color(width, height, Color::new(0, 0, 0, 255));
         let (t_pix, c_pix) = (target.pixels(), current.pixels());
         let pixels = width as usize;
         let black = LineBlend::new(Color::new(0, 0, 0, 255), M);
-        // SAFETY: the line is the first row of both buffers.
+        // SAFETY: the line is the first row of both buffers, and
+        // `simd_available` returned true.
         unsafe {
             let white = 255 * u64::from(width);
             assert_eq!(
-                Native::line_sums(t_pix, c_pix, 0, pixels),
+                Simd::line_sums(t_pix, c_pix, 0, pixels),
                 ([white; 3], [0; 3])
             );
             assert_eq!(
-                Native::line_sums(c_pix, t_pix, 0, pixels),
+                Simd::line_sums(c_pix, t_pix, 0, pixels),
                 ([0; 3], [white; 3])
             );
             assert_eq!(
-                Native::line_after(t_pix, c_pix, 0, pixels, black),
+                Simd::line_after(t_pix, c_pix, 0, pixels, black),
                 u64::from(width) * 3 * 255 * 255
             );
         }
@@ -2570,15 +3089,16 @@ mod simd_parity {
             let color = Color::new(rng.random(), rng.random(), rng.random(), rng.random());
             let blend = LineBlend::new(color, rng.random_range(0..=M));
             for (start, pixels) in [(0, pixels), (3, pixels), (0, 2 * pixels)] {
-                // SAFETY: `start + pixels * 3` is within the two rows.
+                // SAFETY: `start + pixels * 3` is within the two rows, and
+                // `simd_available` returned true.
                 unsafe {
                     assert_eq!(
-                        Native::line_sums(t_pix, c_pix, start, pixels),
+                        Simd::line_sums(t_pix, c_pix, start, pixels),
                         Scalar::line_sums(t_pix, c_pix, start, pixels),
                         "{start} {pixels}"
                     );
                     assert_eq!(
-                        Native::line_after(t_pix, c_pix, start, pixels, blend),
+                        Simd::line_after(t_pix, c_pix, start, pixels, blend),
                         Scalar::line_after(t_pix, c_pix, start, pixels, blend),
                         "{start} {pixels} {color:?}"
                     );
@@ -2589,12 +3109,15 @@ mod simd_parity {
 
     #[test]
     fn difference_bytes_matches_scalar() {
+        if !simd_available() {
+            return;
+        }
         let mut rng = ChaCha8Rng::seed_from_u64(0xd1ff);
         for (width, height) in sizes() {
             let a = random_buffer(&mut rng, width, height);
             let b = random_buffer(&mut rng, width, height);
             let expected = Scalar::difference_bytes(a.pixels(), b.pixels());
-            let actual = Native::difference_bytes(a.pixels(), b.pixels());
+            let actual = Simd::difference_bytes(a.pixels(), b.pixels());
             assert_eq!(actual, expected, "{width}x{height}");
         }
     }
@@ -2604,21 +3127,27 @@ mod simd_parity {
     /// overflow bound.
     #[test]
     fn difference_bytes_matches_scalar_on_large_extreme_buffers() {
+        if !simd_available() {
+            return;
+        }
         let (width, height) = (7_301, 9);
         let mut black = Buffer::new_from_color(width, height, Color::new(0, 0, 0, 255));
         let white = Buffer::new_from_color(width, height, Color::new(255, 255, 255, 255));
-        let actual = Native::difference_bytes(black.pixels(), white.pixels());
+        let actual = Simd::difference_bytes(black.pixels(), white.pixels());
         assert_eq!(actual, u64::from(width * height) * 3 * 255 * 255);
 
         let mut rng = ChaCha8Rng::seed_from_u64(0xb16);
         rng.fill(&mut black.pixels_mut()[..4096]);
         let expected = Scalar::difference_bytes(black.pixels(), white.pixels());
-        let actual = Native::difference_bytes(black.pixels(), white.pixels());
+        let actual = Simd::difference_bytes(black.pixels(), white.pixels());
         assert_eq!(actual, expected);
     }
 
     #[test]
     fn blend_matches_scalar_for_every_alpha_and_channel_value() {
+        if !simd_available() {
+            return;
+        }
         let mut rng = ChaCha8Rng::seed_from_u64(0xb1e4);
         for alpha in 1..=255 {
             let color = Color::new(rng.random(), rng.random(), rng.random(), alpha);
@@ -2635,6 +3164,76 @@ mod simd_parity {
                             "alpha={alpha} coverage={coverage} lane={lane}"
                         );
                     }
+                }
+            }
+        }
+    }
+}
+
+/// On x86_64, [`energy`] and [`energy_below`] choose the AVX2 kernels at run
+/// time when the CPU has AVX2: whichever kernels they run, and the scalar
+/// path that `energy_x86(false, …)` forces, must give the scalar kernels'
+/// results. Unlike [`simd_parity`], these tests run on every x86_64 CPU.
+#[cfg(all(test, target_arch = "x86_64"))]
+mod x86_dispatch {
+    use super::fixtures::{random_buffer, random_lines, sizes};
+    use super::{
+        Fit, LineKernels, Scalar, energy, energy_below, energy_with, energy_x86, fit_with,
+    };
+    use crate::color::Color;
+    use rand::{RngExt, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
+
+    #[test]
+    fn energies_match_scalar() {
+        let mut rng = ChaCha8Rng::seed_from_u64(0xd15a);
+        for (width, height) in sizes() {
+            let target = random_buffer(&mut rng, width, height);
+            let current = random_buffer(&mut rng, width, height);
+            let score = Scalar::difference_bytes(target.pixels(), current.pixels());
+            for alpha in [1, 2, 64, 128, 254, 255] {
+                let lines = random_lines(&mut rng, width as i32, height as i32);
+                let color = Color::new(rng.random(), rng.random(), rng.random(), alpha);
+                let before = fit_with::<Scalar>(&target, &current, None, &lines, 255).before;
+                let fit = Fit { color, before };
+                let expected = energy_with::<Scalar>(&target, &current, &lines, fit, score, None)
+                    .expect("an evaluation without a limit runs to the end");
+                let actual = energy(&target, &current, &lines, fit, score);
+                assert_eq!(actual, expected, "{width}x{height} {color:?}");
+                let random = rng.random_range(0..=2 * score);
+                for bound in [0, expected, expected.saturating_add(1), random, u64::MAX] {
+                    let limit = i64::try_from(bound).ok();
+                    let expected =
+                        energy_with::<Scalar>(&target, &current, &lines, fit, score, limit)
+                            .filter(|&energy| energy < bound);
+                    let actual = energy_below(&target, &current, &lines, fit, score, bound);
+                    assert_eq!(actual, expected, "{width}x{height} {color:?} {bound}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dispatch_without_avx2_matches_scalar() {
+        let mut rng = ChaCha8Rng::seed_from_u64(0x5ca1);
+        for (width, height) in sizes() {
+            let target = random_buffer(&mut rng, width, height);
+            let current = random_buffer(&mut rng, width, height);
+            let score = Scalar::difference_bytes(target.pixels(), current.pixels());
+            for alpha in [1, 2, 64, 128, 254, 255] {
+                let lines = random_lines(&mut rng, width as i32, height as i32);
+                let color = Color::new(rng.random(), rng.random(), rng.random(), alpha);
+                let before = fit_with::<Scalar>(&target, &current, None, &lines, 255).before;
+                let fit = Fit { color, before };
+                let limit = Some(rng.random_range(0..=score as i64));
+                for limit in [None, limit] {
+                    let expected =
+                        energy_with::<Scalar>(&target, &current, &lines, fit, score, limit);
+                    // SAFETY: `false` selects the scalar kernels, which every
+                    // CPU runs.
+                    let actual =
+                        unsafe { energy_x86(false, &target, &current, &lines, fit, score, limit) };
+                    assert_eq!(actual, expected, "{width}x{height} {color:?} {limit:?}");
                 }
             }
         }

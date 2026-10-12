@@ -35,7 +35,7 @@ npm run build:wasm
 
 The single-threaded build uses the pinned stable toolchain, whose `wasm32-unknown-unknown` target `rust-toolchain.toml` installs. Both builds enable WebAssembly SIMD (`simd128`), which every current browser supports. `npm run build:wasm` writes `wasm/single/` and `wasm/threaded/` and prints each `.wasm` file's raw and gzip size; `node scripts/build-wasm.mjs build single` builds one variant.
 
-The scoring kernels in `crates/primeval-core/src/score.rs` have NEON and simd128 versions that must equal the scalar ones bit for bit. `node scripts/build-wasm.mjs test-kernels` (also part of `npm run verify`) runs the `score` tests on the `wasm32-wasip1` target, which `install-tools` added above, under Node's WASI; the aarch64 tests cover NEON:
+The scoring kernels in `crates/primeval-core/src/score.rs` have NEON, simd128 and AVX2 versions that must equal the scalar ones bit for bit (the AVX2 one, `line_after`, is chosen at run time on x86_64). `node scripts/build-wasm.mjs test-kernels` (also part of `npm run verify`) runs the `score` tests on the `wasm32-wasip1` target, which `install-tools` added above, under Node's WASI; the aarch64 tests cover NEON, and the x86_64 tests cover AVX2 on a CPU that has it and skip it with a note otherwise (Rosetta reports none). CI's ubuntu x86_64 leg sets `PRIMEVAL_REQUIRE_AVX2`, which turns that skip into a failure:
 
 ```bash
 node scripts/build-wasm.mjs test-kernels

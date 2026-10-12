@@ -364,7 +364,7 @@ CLI notes:
 
 ### Platforms
 
-Prebuilt addons cover macOS (arm64, x64), Linux GNU libc (arm64, x64), and Windows (x64), on Node 22.12+. The Linux addons are built against glibc 2.17, so they run on any distribution with glibc 2.17 or newer; musl-based systems such as Alpine are not supported. Every addon targets the baseline instruction set of its architecture: the release checks that none needs AVX-512 on x86_64 or SVE on aarch64.
+Prebuilt addons cover macOS (arm64, x64), Linux GNU libc (arm64, x64), and Windows (x64), on Node 22.12+. The Linux addons are built against glibc 2.17, so they run on any distribution with glibc 2.17 or newer; musl-based systems such as Alpine are not supported. Every addon targets the baseline instruction set of its architecture: the release checks that none needs AVX-512 on x86_64 or SVE on aarch64. The x64 addons score with AVX2 when the CPU has it, with the same output.
 
 ### Memory
 

@@ -31,7 +31,7 @@ Generated output (gitignored; never edit by hand):
 ## Repo Direction
 
 - The npm package is ESM-only and targets Node 22.12+.
-- Browsers are supported through WebAssembly (`binding-wasm`), following `docs/plans/2026-10-wasm-browser-plan.md`: a single-threaded build on the pinned stable toolchain and a threaded build that needs the dated nightly pinned in `scripts/build-wasm.mjs`. Only the threaded build uses the nightly; clippy for wasm32 runs on the stable toolchain. Both builds require WebAssembly SIMD (`simd128`), and the scoring kernels in `primeval-core` have simd128 versions that must equal the scalar ones bit for bit, like the NEON ones; there is no non-SIMD build.
+- Browsers are supported through WebAssembly (`binding-wasm`), following `docs/plans/2026-10-wasm-browser-plan.md`: a single-threaded build on the pinned stable toolchain and a threaded build that needs the dated nightly pinned in `scripts/build-wasm.mjs`. Only the threaded build uses the nightly; clippy for wasm32 runs on the stable toolchain. Both builds require WebAssembly SIMD (`simd128`), and the scoring kernels in `primeval-core` have simd128 versions that must equal the scalar ones bit for bit, like the NEON ones and the AVX2 `line_after` that x86_64 chooses at run time; there is no non-SIMD build.
 - CommonJS support is explicitly out of scope.
 - Rust is the runtime source of truth for accepted vocabularies, defaults, and validation semantics.
 - The final Rust API is the only source of truth for render-option defaults. If a value is omitted, `undefined`, or intentionally left unset, wrapper and binding layers should pass that absence through so Rust can decide the default.
