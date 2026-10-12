@@ -17,6 +17,7 @@ use crate::buffer::Buffer;
 use crate::color::Color;
 use crate::error_grid::ErrorGrid;
 use crate::model::{Model, ModelOptions};
+use crate::refine::{Above, Layer};
 use crate::rng::create_rng;
 use crate::scanline::Scanline;
 use crate::score;
@@ -202,6 +203,50 @@ fn energy_from_lines_raw(bencher: Bencher<'_, '_>, kind: ShapeKind) {
                 fit,
                 fixture.score,
             ));
+        }
+    });
+}
+
+/// Sums for [`SHAPES`] candidates at a layer inside an exact composite.
+/// The translucent layers attenuate candidates and add RGB offsets; the
+/// opaque patch hides some pixels completely.
+#[divan::bench(args = CONCRETE_KINDS)]
+fn refine_sums(bencher: Bencher<'_, '_>, kind: ShapeKind) {
+    let fixture = Fixture::new();
+    let lines = fixture.lines(kind);
+    let patch = |x1, x2, y1, y2| {
+        (y1..y2)
+            .map(|y| Scanline {
+                y,
+                x1,
+                x2,
+                alpha: score::M,
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut below = fixture.current.clone();
+    score::draw_lines(
+        &mut below,
+        Color::new(45, 180, 95, 137),
+        &patch(24, 195, 48, 224),
+    );
+    score::draw_lines(
+        &mut below,
+        Color::new(210, 60, 135, 85),
+        &patch(110, 250, 16, 150),
+    );
+    let mut above = Above::new(SIZE, SIZE);
+    above.fold(&patch(0, 255, 0, 256), Color::new(60, 90, 180, 45));
+    above.fold(&patch(90, 240, 60, 240), Color::new(190, 45, 80, 128));
+    above.fold(&patch(16, 112, 32, 180), Color::new(30, 200, 110, 255));
+    let layer = Layer {
+        target: &fixture.target,
+        below: &below,
+        above: &above,
+    };
+    bencher.counter(ItemsCount::new(SHAPES)).bench_local(|| {
+        for shape_lines in &lines {
+            divan::black_box(divan::black_box(&layer).sums(shape_lines, ALPHA));
         }
     });
 }

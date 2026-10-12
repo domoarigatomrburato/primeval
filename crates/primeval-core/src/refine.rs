@@ -285,27 +285,34 @@ impl Layer<'_> {
                 continue;
             };
             let row = line.y as usize * above.width as usize;
-            for p in row + x1 as usize..=row + x2 as usize {
-                let a = above.transmittance[p];
+            let start = row + x1 as usize;
+            let end = row + x2 as usize + 1;
+            // Clamp once, then slice all four planes to the same span.
+            // Each RGB chunk has three channels, so constant channel
+            // indices need no checks in the pixel loop.
+            let t = t[3 * start..3 * end].as_chunks::<3>().0;
+            let d = d[3 * start..3 * end].as_chunks::<3>().0;
+            let b = above.offset[3 * start..3 * end].as_chunks::<3>().0;
+            let a = &above.transmittance[start..end];
+            for (j, (((t, d), b), &a)) in t.iter().zip(d).zip(b).zip(a).enumerate() {
                 if a == 0.0 {
                     continue;
                 }
                 let mut q = [0.0; 3];
                 let mut r = [0.0; 3];
                 for c in 0..3 {
-                    let i = 3 * p + c;
-                    let rest = f32::from(t[i]) - above.offset[i];
-                    let d = f32::from(d[i]);
+                    let rest = f32::from(t[c]) - b[c];
+                    let d = f32::from(d[c]);
                     q[c] = rest - a * blend.keep * d;
                     r[c] = rest - a * d;
                 }
-                visit(p, a * blend.paint, q, r);
+                visit(start + j, a * blend.paint, q, r);
             }
         }
     }
 
     /// The model's sums over the pixels of `lines` drawn at `alpha`.
-    fn sums(&self, lines: &[Scanline], alpha: u8) -> Sums {
+    pub(crate) fn sums(&self, lines: &[Scanline], alpha: u8) -> Sums {
         let mut sums = Sums::default();
         self.visit(lines, alpha, |_, g, q, r| {
             let g = f64::from(g);
@@ -353,7 +360,7 @@ impl Layer<'_> {
 /// `Σ (q − g · s)²` is the quadratic `Σ q² − 2 s Σ g · q + s² Σ g²`, so no
 /// second pass over the pixels is needed for any colour.
 #[derive(Default)]
-struct Sums {
+pub(crate) struct Sums {
     numerators: [f64; 3],
     weights: f64,
     errors: f64,
@@ -747,6 +754,120 @@ mod tests {
         let mut pixels = vec![0_u8; (width * height * 3) as usize];
         rng.fill(&mut pixels[..]);
         Buffer::from_rgb(width, height, pixels).expect("valid length")
+    }
+
+    /// The original serial additions, independent of the production loop.
+    fn serial_sums(layer: &Layer<'_>, lines: &[Scanline], alpha: u8) -> Sums {
+        let mut sums = Sums::default();
+        for line in lines {
+            let Some((x1, x2)) = clamp_line(line, layer.above.width, layer.above.height) else {
+                continue;
+            };
+            let Some(blend) = Blend::new(alpha, line.alpha) else {
+                continue;
+            };
+            let row = line.y as usize * layer.above.width as usize;
+            for p in row + x1 as usize..=row + x2 as usize {
+                let a = layer.above.transmittance[p];
+                if a == 0.0 {
+                    continue;
+                }
+                let g = f64::from(a * blend.paint);
+                sums.weights += g * g;
+                for c in 0..3 {
+                    let i = 3 * p + c;
+                    let rest = f32::from(layer.target.pixels()[i]) - layer.above.offset[i];
+                    let d = f32::from(layer.below.pixels()[i]);
+                    let q = f64::from(rest - a * blend.keep * d);
+                    let r = f64::from(rest - a * d);
+                    sums.numerators[c] += g * q;
+                    sums.errors += q * q;
+                    sums.removed += r * r;
+                }
+            }
+        }
+        sums
+    }
+
+    fn sum_bits(sums: Sums) -> [u64; 6] {
+        let [r, g, b] = sums.numerators;
+        [r, g, b, sums.weights, sums.errors, sums.removed].map(f64::to_bits)
+    }
+
+    /// Random folded layers, all short lengths and tails, long lines,
+    /// clipping, overlap, coverage/alpha extremes and hidden pixels.
+    fn check_sums(reference: impl Fn(&Layer<'_>, &[Scanline], u8) -> Sums) {
+        let mut rng = create_rng(0x5a45);
+        for width in [2, 17, 257] {
+            let height = 5;
+            let target = noise(&mut rng, width, height);
+            let below = noise(&mut rng, width, height);
+            let mut above = Above::new(width, height);
+            for _ in 0..24 {
+                let lines: Vec<_> = (0..12)
+                    .map(|_| Scanline {
+                        y: rng.random_range(-1..=height as i32),
+                        x1: rng.random_range(-10..width as i32),
+                        x2: rng.random_range(0..width as i32 + 10),
+                        alpha: rng.random_range(0..=score::M),
+                    })
+                    .collect();
+                above.fold(
+                    &lines,
+                    Color::new(rng.random(), rng.random(), rng.random(), rng.random()),
+                );
+            }
+            above.fold(
+                &[Scanline {
+                    y: 1,
+                    x1: 1,
+                    x2: width as i32 / 2,
+                    alpha: score::M,
+                }],
+                Color::new(30, 60, 90, 255),
+            );
+            assert!(above.transmittance.contains(&0.0));
+            let layer = Layer {
+                target: &target,
+                below: &below,
+                above: &above,
+            };
+            let mut lines = Vec::new();
+            for length in (0..=13).chain([width as i32, width as i32 + 20]) {
+                for x1 in [-9, 0, 1, width as i32 - 3, width as i32, width as i32 + 3] {
+                    for y in [-1, 0, 1, 4, 5] {
+                        for coverage in [0, 1, 255, 256, 32768, score::M - 1, score::M] {
+                            let line = Scanline {
+                                y,
+                                x1,
+                                x2: x1 + length - 1,
+                                alpha: coverage,
+                            };
+                            for alpha in [0, 1, 128, 255] {
+                                assert_eq!(
+                                    sum_bits(layer.sums(&[line], alpha)),
+                                    sum_bits(reference(&layer, &[line], alpha)),
+                                    "width {width}, {line:?}, alpha {alpha}"
+                                );
+                            }
+                            lines.push(line);
+                        }
+                    }
+                }
+            }
+            for alpha in [0, 1, 128, 255] {
+                assert_eq!(
+                    sum_bits(layer.sums(&lines, alpha)),
+                    sum_bits(reference(&layer, &lines, alpha)),
+                    "width {width}, overlapping lines, alpha {alpha}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sums_keep_serial_visit_order() {
+        check_sums(serial_sums);
     }
 
     fn opaque(rng: &mut ChaCha8Rng) -> Color {
