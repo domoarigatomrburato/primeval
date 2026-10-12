@@ -439,9 +439,9 @@ pub(crate) fn final_stage(
 /// That raster (tiny-skia's high-precision pipeline) computes in `f32`
 /// with `+ − × ÷` and `sqrt`, converts to fixed point with `as`, and
 /// rounds to nearest even, alike on NEON, SSE2 and WebAssembly's scalar
-/// path, so native and WebAssembly builds agree; the one platform
-/// function it calls is the `sin` and `cos` of a rotated ellipse's angle,
-/// which only `any` can draw and which the export itself depends on too.
+/// path, so native and WebAssembly builds agree. The raster calls no platform
+/// transcendental function: an ellipse's rotation takes its sine and cosine
+/// from [`primeval_core::sin_cos_degrees`].
 fn better_export(target: &Buffer, input: Drawing, joint: Drawing) -> (Drawing, Chosen) {
     if exports_closer(target, &input, &joint) {
         (joint, Chosen::Joint)

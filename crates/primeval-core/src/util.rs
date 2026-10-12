@@ -31,19 +31,21 @@ fn sin_cos_octant(x: f64) -> (f64, f64) {
 
 /// `sin` and `cos` of `degrees`, by `+ − × ÷` and `floor` alone: the
 /// angle reduced to a turn and then to `0..=45°` by the symmetries of the
-/// circle, then [`sin_cos_octant`]. Every rotation in the engine takes its
+/// circle, then `sin_cos_octant`. Every rotation in the engine takes its
 /// sine and cosine from here, never from the platform's `sin_cos`, whose
 /// last bit differs between libms: the greedy search's rotated rectangles
 /// (from their integer angle) and rotated ellipses (from their continuous
 /// one), and the joint optimisation's starting `u` of a rotated rectangle
-/// and semi-axis vector of a rotated ellipse. So every platform and
-/// WebAssembly compute the same shapes. Within `1e-14` of the platform's.
+/// and semi-axis vector of a rotated ellipse; outside the engine, the
+/// render crate's PNG writer rotates ellipses with it. So every platform
+/// and WebAssembly compute the same shapes and pixels. Within `1e-14` of
+/// the platform's.
 ///
 /// Whole degrees reduce exactly, so a whole angle's quadrant is exact
 /// (`sin_cos_degrees(90.0) == (1.0, 0.0)`); a continuous angle's reduction
 /// rounds once or twice, deterministically.
 #[must_use]
-pub(crate) fn sin_cos_degrees(degrees: f64) -> (f64, f64) {
+pub fn sin_cos_degrees(degrees: f64) -> (f64, f64) {
     let degrees = degrees - 360.0 * (degrees / 360.0).floor();
     // `degrees / 90` can round up to the next whole quadrant, leaving `rest`
     // a rounding below zero, where the octant's series holds as well.

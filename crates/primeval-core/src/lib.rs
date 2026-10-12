@@ -47,3 +47,4 @@ pub use error::ParseError;
 pub use model::Search;
 pub use model::{Model, ModelOptions};
 pub use shapes::ShapeKind;
+pub use util::sin_cos_degrees;

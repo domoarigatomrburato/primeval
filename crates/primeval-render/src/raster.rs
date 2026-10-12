@@ -1,4 +1,6 @@
 //! Raster writer for a [`Drawing`]: tiny-skia rendering and PNG encoding.
+//! The raster calls no platform transcendental function: ellipse rotations
+//! take their sine and cosine from [`primeval_core::sin_cos_degrees`].
 
 use image::ImageEncoder;
 use primeval_core::{Buffer, Color, Drawing, Geometry};
@@ -111,7 +113,7 @@ fn render(drawing: &Drawing, width: u32, height: u32) -> Option<Pixmap> {
                 let Some(path) = fill_path(&shape.geometry) else {
                     continue;
                 };
-                let transform = transform.pre_rotate_at(*rotation as f32, *cx as f32, *cy as f32);
+                let transform = ellipse_transform(transform, *cx as f32, *cy as f32, *rotation);
                 pixmap.fill_path(&path, &paint, FillRule::Winding, transform, None);
             }
             Geometry::Rect { .. } | Geometry::Polygon(_) => {
@@ -123,6 +125,24 @@ fn render(drawing: &Drawing, width: u32, height: u32) -> Option<Pixmap> {
         }
     }
     Some(pixmap)
+}
+
+/// `base` pre-concatenated with the rotation by `rotation` degrees about
+/// `(cx, cy)`, composed as tiny-skia's `Transform::from_rotate_at` composes
+/// it but with the sine and cosine of [`primeval_core::sin_cos_degrees`]
+/// instead of the platform's `f32::sin` and `f32::cos`, so that native and
+/// WebAssembly builds draw the same pixels. A rotation of `0.0` gives
+/// tiny-skia's transform bit for bit.
+fn ellipse_transform(base: Transform, cx: f32, cy: f32, rotation: f64) -> Transform {
+    let (sin, cos) = primeval_core::sin_cos_degrees(rotation);
+    let (sin, cos) = (sin as f32, cos as f32);
+    let rotate = Transform::from_row(cos, sin, -sin, cos, 0.0, 0.0);
+    base.pre_concat(
+        Transform::identity()
+            .pre_translate(cx, cy)
+            .pre_concat(rotate)
+            .pre_translate(-cx, -cy),
+    )
 }
 
 /// The unrotated outline of a filled geometry, in canvas coordinates.
@@ -326,6 +346,187 @@ mod tests {
         // Rotated by 90 degrees, the long axis is vertical.
         assert_eq!(pixel(&rgb, 40, 20, 6), [255, 0, 0]);
         assert_eq!(pixel(&rgb, 40, 6, 20), [255, 255, 255]);
+    }
+
+    #[test]
+    fn ellipse_rotation_takes_the_portable_sine_and_cosine() {
+        use rand::{RngExt, SeedableRng};
+        use rand_chacha::ChaCha8Rng;
+
+        let mut angles = vec![
+            0.0,
+            -0.0,
+            1.0,
+            45.0,
+            90.0,
+            180.0,
+            270.0,
+            360.0,
+            -90.0,
+            720.0,
+            13.125,
+            -47.8125,
+            359.999_999,
+            428.375,
+            -731.0625,
+        ];
+        let mut rng = ChaCha8Rng::seed_from_u64(0xe11_1a5e);
+        angles.extend((0..4096).map(|_| rng.random_range(-1080.0..1080.0)));
+        let different = angles
+            .iter()
+            .filter(|&&angle| {
+                let (sin, cos) = primeval_core::sin_cos_degrees(angle);
+                let radians = (angle as f32).to_radians();
+                radians.sin().to_bits() != (sin as f32).to_bits()
+                    || radians.cos().to_bits() != (cos as f32).to_bits()
+            })
+            .count();
+        assert!(
+            different > 0,
+            "the angles must expose platform trigonometry"
+        );
+
+        // Compare bits, including signed zeros, under identity, canvas scaling
+        // and a general base transform, with off-origin ellipse centres.
+        let bits = |t: Transform| [t.sx, t.ky, t.kx, t.sy, t.tx, t.ty].map(f32::to_bits);
+        for angle in angles {
+            let (sin, cos) = primeval_core::sin_cos_degrees(angle);
+            let (sin, cos) = (sin as f32, cos as f32);
+            let rotation = Transform::from_row(cos, sin, -sin, cos, 0.0, 0.0);
+            for base in [
+                Transform::identity(),
+                Transform::from_scale(1.75, 0.625),
+                Transform::from_row(1.5, 0.25, -0.5, 2.0, 7.0, -3.0),
+            ] {
+                for (cx, cy) in [(0.0, 0.0), (4.125, 7.75), (-3.25, 2.5)] {
+                    let expected = base.pre_concat(
+                        Transform::identity()
+                            .pre_translate(cx, cy)
+                            .pre_concat(rotation)
+                            .pre_translate(-cx, -cy),
+                    );
+                    assert_eq!(
+                        bits(ellipse_transform(base, cx, cy, angle)),
+                        bits(expected),
+                        "angle {angle}, centre ({cx}, {cy}), base {base:?}"
+                    );
+                    if angle == 0.0 {
+                        assert_eq!(
+                            bits(expected),
+                            bits(base.pre_rotate_at(angle as f32, cx, cy)),
+                            "zero rotation must preserve the old transform bits"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The 64-bit FNV-1a digest of `bytes`, as `primeval_core`'s tests
+    /// digest a drawing.
+    fn fnv(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        })
+    }
+
+    /// Axis-aligned ellipses and circles, rotation `0.0` or `-0.0`, which
+    /// render exactly as with tiny-skia's own rotation.
+    fn unrotated_drawing() -> Drawing {
+        drawing(
+            [
+                (3.25, 4.5, 2.75, 1.125, 0.0, Color::new(230, 35, 80, 147)),
+                (5.0, 5.0, 2.0, 2.0, 0.0, Color::new(20, 190, 75, 91)),
+                (6.375, 5.75, 1.375, 3.0, 0.0, Color::new(45, 60, 225, 183)),
+                (4.25, 6.5, 1.875, 1.875, 0.0, Color::new(210, 150, 20, 119)),
+                (5.5, 3.75, 3.125, 0.875, -0.0, Color::new(75, 15, 180, 163)),
+                (6.0, 4.25, 1.625, 1.625, -0.0, Color::new(30, 180, 210, 73)),
+            ]
+            .into_iter()
+            .map(|(cx, cy, rx, ry, rotation, color)| DrawnShape {
+                geometry: Geometry::Ellipse {
+                    cx,
+                    cy,
+                    rx,
+                    ry,
+                    rotation,
+                },
+                color,
+            })
+            .collect(),
+        )
+    }
+
+    #[test]
+    fn unrotated_ellipses_render_as_before() {
+        let rgb = render_rgb(&unrotated_drawing(), 97, 83).expect("render");
+        let digest = fnv(&rgb);
+        // The same with tiny-skia's own rotation and with the portable one.
+        assert_eq!(digest, 17_268_577_630_932_387_282);
+    }
+
+    #[test]
+    fn raster_output_is_pinned() {
+        let mut drawing = unrotated_drawing();
+        drawing.shapes.extend([
+            DrawnShape {
+                geometry: Geometry::Rect {
+                    x: 0.625,
+                    y: 1.375,
+                    width: 6.125,
+                    height: 3.75,
+                },
+                color: Color::new(25, 110, 190, 137),
+            },
+            DrawnShape {
+                geometry: Geometry::Polygon(vec![
+                    Point::new(1.125, 1.875),
+                    Point::new(8.375, 0.625),
+                    Point::new(6.75, 4.125),
+                    Point::new(9.125, 8.75),
+                    Point::new(2.375, 7.625),
+                ]),
+                color: Color::new(210, 65, 35, 113),
+            },
+        ]);
+        for (i, cap) in [LineCap::Butt, LineCap::Round, LineCap::Square]
+            .into_iter()
+            .enumerate()
+        {
+            let y = i as f64 * 2.375;
+            drawing.shapes.push(DrawnShape {
+                geometry: Geometry::Quadratic {
+                    start: Point::new(0.875, 2.125 + y),
+                    control: Point::new(4.625, -1.25 + y),
+                    end: Point::new(8.75, 3.375 + y),
+                    width: 0.625 + i as f64 * 0.25,
+                    cap,
+                },
+                color: Color::new(80, 205, 45, 171),
+            });
+        }
+        for (i, rotation) in [
+            0.125, 13.731, 28.5625, 47.8123, 63.375, 89.9997, 112.9375, 145.625, 183.3125, 224.875,
+            269.0625, 318.4375, 359.9999, -17.375, -428.125, 731.0625,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            drawing.shapes.push(DrawnShape {
+                geometry: Geometry::Ellipse {
+                    cx: 1.25 + (i % 4) as f64 * 2.375,
+                    cy: 1.375 + (i / 4) as f64 * 2.25,
+                    rx: 1.875,
+                    ry: 0.4375 + (i % 3) as f64 * 0.1875,
+                    rotation,
+                },
+                color: Color::new(30 + i as u8 * 11, 220 - i as u8 * 9, 125, 97 + i as u8 * 7),
+            });
+        }
+        let rgb = render_rgb(&drawing, 173, 149).expect("render");
+        let digest = fnv(&rgb);
+        // Portable rotation, pinned identically on aarch64 and x86_64.
+        assert_eq!(digest, 2_885_471_127_306_215_023);
     }
 
     /// The exact composite of opaque `background` and the `layers` drawn over

@@ -691,9 +691,9 @@ for (const isolated of [true, false]) {
       });
     }
 
-    // A tripwire, not a guarantee: native and wasm output were observed to be
-    // identical for fixed seeds, but libm differences between platforms are
-    // only absorbed by rounding today (see the WebAssembly plan, W0 results).
+    // The engine and the PNG writer call no platform transcendental function
+    // on any path they take, so native and wasm output are expected to agree.
+    // These tripwires catch a regression (see the WebAssembly plan, W0 results).
     test(`SVG output equals the native addon's for fixed seeds (${variant} build)`, async () => {
       // Every shape kind, with enough steps that each kind's search runs at
       // least one refit pass (the first comes at step 10 or 20) before
@@ -730,6 +730,36 @@ for (const isolated of [true, false]) {
       for (const [index, render] of renders.entries()) {
         const expected = await native.approximate({ input: fixture, output: "svg", render });
         assert.equal(browserSvgs[index], expected.data, JSON.stringify(render));
+      }
+    });
+
+    test(`PNG output equals the native addon's for fixed seeds (${variant} build)`, async () => {
+      const renders = [];
+      for (const seed of [1, 2, 3]) {
+        for (const shape of ["rotated-ellipse", "any"]) {
+          renders.push({ count: 20, resizeInput: 64, outputSize: 128, seed, shape });
+        }
+      }
+
+      const browserPngs = await shared.page.evaluate(
+        async ({ name, renders }) => {
+          const input = await window.fixture(name);
+          const pngs = [];
+          for (const render of renders) {
+            pngs.push(
+              Array.from(
+                (await window.primeval.approximate({ input, output: "png", render })).data,
+              ),
+            );
+          }
+          return pngs;
+        },
+        { name: FIXTURE, renders },
+      );
+
+      for (const [index, render] of renders.entries()) {
+        const expected = await native.approximate({ input: fixture, output: "png", render });
+        assert.deepEqual(browserPngs[index], Array.from(expected.data), JSON.stringify(render));
       }
     });
   });
