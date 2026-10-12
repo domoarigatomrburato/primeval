@@ -488,3 +488,30 @@ A fourth proposal, summing full-coverage lines before weighting them in the colo
 The `.wasm` shrinks by about 25 KiB gzip. Quadratics' 2% did not go away with a different masked-tail threshold (3, 8, 12 pixels or never) or with short lines sent to the scalar kernels (which cost the other kinds 1–1.5%), so it most likely comes from the flag's effect on code outside the kernels, which the speed review had already seen alone.
 
 Still open from the review, all exact: x86 kernels (in a cloud x86 session), SIMD in the refit's pixel loop, prepared-geometry reuse in the joint optimisation, cheaper rejection before the colour fit, and worker reuse in the browser. Caching the second Gaussian variate would change the random streams, so it needs a quality measurement first.
+
+## 24. AVX2 scoring on x86_64 (2026-10-12)
+
+The energy of every search candidate now runs an AVX2 `line_after` on x86_64 CPUs that have AVX2, and the output is unchanged: every pin stays on aarch64 and x86_64, and every non-time column of the engine runner's runs below is identical. The prebuilt addons keep the baseline instruction set, so `energy` and `energy_below` check `is_x86_feature_detected!("avx2")` once per evaluation and call a target-feature function that compiles the loop over the lines and the kernel together; a CPU without AVX2 runs the scalar kernels as before. The fits, line sums and byte differences stay scalar, as in WebAssembly, since the search's fits read prefix sums.
+
+The kernel follows the simd128 one on blocks of 32 RGB pixels, three 32-byte vectors. The blend's products come from `_mm256_madd_epi16` on the pairs `(2c, c)` against `(128 kh, kl)`, where `keep = 256 kh + kl`: the plainer `mullo`/`mulhi` pair was correct, but LLVM compiled its `mulhi` of zero-extended bytes into extra extensions and a lane-crossing permute. Squares go through madd into 32-bit lanes flushed every 4096 blocks (the bound is 5504), and tails of three or more pixels take one masked block.
+
+The parity suite now runs on x86_64. Without AVX2 it skips with a note, and with `PRIMEVAL_REQUIRE_AVX2` set, as on CI's ubuntu leg, it fails instead. Two deliberate faults, a wrong term lane and a flush every 8192 blocks, failed the expected tests on an AVX2 runner. Rosetta on macOS 15 executes AVX2 although CPUID hides it, so the kernel can also be tested on an Apple machine by forcing the check in an uncommitted patch.
+
+The maintainer's machine cannot time x86 code, so GitHub-hosted runners (4 vCPU) did, through the new manual workflow `.github/workflows/engine-bench.yml`. It builds the engine runner from two refs and runs them interleaved, base and head twice each, on all cores over the corpus and on one thread over the paintings, with `--refine final --steps 100,200`. A first run of `main` against itself gave per-kind ratios within 0.99–1.01. Time, new over base, at 100 and 200 shapes:
+
+| Kind | All cores (EPYC 7763) | 1 thread (EPYC 9V74) |
+|---|---|---|
+| circle | 0.729–0.767 | 0.715–0.743 |
+| ellipse | 0.731–0.779 | 0.738–0.771 |
+| rectangle | 0.802–0.828 | 0.787–0.788 |
+| triangle | 0.804–0.856 | 0.834–0.872 |
+| rotated rectangle | 0.832–0.852 | 0.836–0.840 |
+| any | 0.904–0.930 | 0.889–0.912 |
+| rotated ellipse | 0.927–0.946 | 0.902–0.912 |
+| polygon | 0.941–0.957 | 0.945–0.957 |
+| quadratic | 0.972–0.977 | 0.966–0.968 |
+| all | 0.917 | 0.912 |
+
+The baselines' ratio stayed within 0.989–1.009. No SSE4.1 path was built: almost every x86_64 CPU since 2013 has AVX2.
+
+Still open from the review, all exact: SIMD in the refit's pixel loop, prepared-geometry reuse in the joint optimisation, cheaper rejection before the colour fit, and worker reuse in the browser. Caching the second Gaussian variate would change the random streams, so it needs a quality measurement first.
