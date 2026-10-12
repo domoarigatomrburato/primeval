@@ -11,6 +11,29 @@ import { startServer } from "../../scripts/static-server.mjs";
 import { assertPreviewsSvg } from "../helpers/svg.js";
 
 const FIXTURE = "monalisa.jpg";
+const SHAPES = [
+  "triangle",
+  "rectangle",
+  "ellipse",
+  "circle",
+  "rotated-rectangle",
+  "rotated-ellipse",
+  "quadratic",
+  "polygon",
+  "any",
+];
+// Every shape kind, with enough steps that each kind's search runs at least
+// one refit pass (the first comes at step 10 or 20) before its final stage.
+const TRIPWIRE_RENDERS = [1, 2, 3].flatMap((seed) =>
+  SHAPES.map((shape) => ({ count: 20, resizeInput: 64, outputSize: 128, seed, shape })),
+);
+// The same at a quarter of the pixels, for the PNG writer: the SVG tripwire
+// already covers the search at the larger size.
+const PNG_TRIPWIRE_RENDERS = TRIPWIRE_RENDERS.map((render) => ({
+  ...render,
+  resizeInput: 32,
+  outputSize: 64,
+}));
 const SMALL = { count: 4, resizeInput: 16, outputSize: 32, seed: 7 };
 const LONG_RENDER = { count: 100000, resizeInput: 16, outputSize: 16, seed: 7 };
 // A render that never finishes on its own can only end through a timeout.
@@ -39,6 +62,17 @@ function describeError(error) {
     requirement: error?.requirement,
     hasOption: error instanceof Error && Object.hasOwn(error, "option"),
   };
+}
+
+// The native addon's tripwire outputs, rendered once for both builds.
+const nativeOutputs = new Map();
+
+function nativeOutput(input, output, render) {
+  const key = JSON.stringify([output, render]);
+  if (!nativeOutputs.has(key)) {
+    nativeOutputs.set(key, native.approximate({ input, output, render }));
+  }
+  return nativeOutputs.get(key);
 }
 
 async function nativeRejection(request) {
@@ -650,6 +684,75 @@ for (const isolated of [true, false]) {
       }
     });
 
+    describe("a browser without WebAssembly SIMD", () => {
+      const SIMD_MESSAGE =
+        "this browser does not support WebAssembly SIMD, which primeval needs: " +
+        "use Chrome 91, Firefox 89, Safari 16.4 or newer";
+
+      // Fails the page's compile, as a browser without SIMD fails it, with
+      // `WebAssembly.validate` answering `validates`; the stubs are undone
+      // after the call, so a later call compiles for real.
+      async function failedCompile(validates) {
+        const { context, page } = await openPage();
+        try {
+          return await page.evaluate(
+            async ({ name, render, validates }) => {
+              const { compileStreaming, validate } = WebAssembly;
+              const probes = [];
+              WebAssembly.compileStreaming = async (source) => {
+                await source;
+                throw new WebAssembly.CompileError("stub: invalid opcode 0xfd");
+              };
+              WebAssembly.validate = (bytes) => {
+                probes.push(Array.from(bytes));
+                return validates;
+              };
+              const input = await window.fixture(name);
+              let failure = null;
+              try {
+                await window.primeval.approximate({ input, output: "svg", render });
+              } catch (error) {
+                failure = { ...window.describeError(error), cause: String(error.cause) };
+              } finally {
+                WebAssembly.compileStreaming = compileStreaming;
+                WebAssembly.validate = validate;
+              }
+              const next = await window.primeval.approximate({ input, output: "svg", render });
+              return { failure, probes, nextFormat: next.format };
+            },
+            { name: FIXTURE, render: SMALL, validates },
+          );
+        } finally {
+          await context.close();
+        }
+      }
+
+      test("rejects with InternalError naming the browsers that have it", async () => {
+        const outcome = await failedCompile(false);
+
+        assert.equal(outcome.failure?.constructorName, "InternalError");
+        assert.equal(outcome.failure.code, "INTERNAL");
+        assert.equal(outcome.failure.isPrimevalError, true);
+        assert.equal(outcome.failure.message, SIMD_MESSAGE);
+        assert.equal(outcome.failure.cause, "CompileError: stub: invalid opcode 0xfd");
+        // One probe, a module with a SIMD instruction.
+        assert.equal(outcome.probes.length, 1);
+        assert.ok(outcome.probes[0].includes(0xfd), "the probe has the SIMD opcode prefix");
+        assert.equal(outcome.nextFormat, "svg");
+      });
+
+      test("is not blamed when the browser has SIMD", async () => {
+        const outcome = await failedCompile(true);
+
+        assert.equal(outcome.failure?.constructorName, "InternalError");
+        assert.equal(
+          outcome.failure.message,
+          "could not load the WebAssembly module: stub: invalid opcode 0xfd",
+        );
+        assert.equal(outcome.nextFormat, "svg");
+      });
+    });
+
     const panicSites = isolated
       ? [
           ["on the calling thread", "caller", "on the calling thread"],
@@ -692,29 +795,12 @@ for (const isolated of [true, false]) {
     }
 
     // The engine and the PNG writer call no platform transcendental function
-    // on any path they take, so native and wasm output are expected to agree.
-    // These tripwires catch a regression (see the WebAssembly plan, W0 results).
+    // on any path they take, and the simd128 scoring kernels equal the scalar
+    // and NEON ones bit for bit, so native and wasm output are expected to
+    // agree. These tripwires catch a regression (see the WebAssembly plan, W0
+    // results).
     test(`SVG output equals the native addon's for fixed seeds (${variant} build)`, async () => {
-      // Every shape kind, with enough steps that each kind's search runs at
-      // least one refit pass (the first comes at step 10 or 20) before
-      // its final stage.
-      const renders = [];
-      for (const seed of [1, 2, 3]) {
-        for (const shape of [
-          "triangle",
-          "rectangle",
-          "ellipse",
-          "circle",
-          "rotated-rectangle",
-          "rotated-ellipse",
-          "quadratic",
-          "polygon",
-          "any",
-        ]) {
-          renders.push({ count: 20, resizeInput: 64, outputSize: 128, seed, shape });
-        }
-      }
-
+      const renders = TRIPWIRE_RENDERS;
       const browserSvgs = await shared.page.evaluate(
         async ({ name, renders }) => {
           const input = await window.fixture(name);
@@ -728,18 +814,13 @@ for (const isolated of [true, false]) {
       );
 
       for (const [index, render] of renders.entries()) {
-        const expected = await native.approximate({ input: fixture, output: "svg", render });
+        const expected = await nativeOutput(fixture, "svg", render);
         assert.equal(browserSvgs[index], expected.data, JSON.stringify(render));
       }
     });
 
     test(`PNG output equals the native addon's for fixed seeds (${variant} build)`, async () => {
-      const renders = [];
-      for (const seed of [1, 2, 3]) {
-        for (const shape of ["rotated-ellipse", "any"]) {
-          renders.push({ count: 20, resizeInput: 64, outputSize: 128, seed, shape });
-        }
-      }
+      const renders = PNG_TRIPWIRE_RENDERS;
 
       const browserPngs = await shared.page.evaluate(
         async ({ name, renders }) => {
@@ -758,7 +839,7 @@ for (const isolated of [true, false]) {
       );
 
       for (const [index, render] of renders.entries()) {
-        const expected = await native.approximate({ input: fixture, output: "png", render });
+        const expected = await nativeOutput(fixture, "png", render);
         assert.deepEqual(browserPngs[index], Array.from(expected.data), JSON.stringify(render));
       }
     });

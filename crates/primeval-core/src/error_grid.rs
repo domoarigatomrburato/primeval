@@ -331,7 +331,9 @@ mod tests {
     fn cell_count_does_not_wrap_in_u32() {
         assert_eq!(cell_count(16, 16), 256);
         assert_eq!(cell_count(1, 1), 1);
-        // 65536 * 65536 is 0 in wrapping u32 arithmetic.
+        // 65536 * 65536 is 0 in wrapping u32 arithmetic. Only a 64-bit
+        // `usize` holds it; the wasm32 kernel tests compile this module too.
+        #[cfg(target_pointer_width = "64")]
         assert_eq!(cell_count(65_536, 65_536), 1_usize << 32);
     }
 

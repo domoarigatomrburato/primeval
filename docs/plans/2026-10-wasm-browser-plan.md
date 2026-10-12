@@ -11,7 +11,7 @@ Status: W0–W5 done (2026-10-02, PR #10); Pages is enabled, so the demo goes li
 - **Threads need nightly Rust.** Threaded WebAssembly needs the standard library rebuilt with atomics (`-Z build-std=panic_abort,std`), which is nightly-only; an in-repo pool (`binding-wasm/src/pool.rs`) runs rayon on self-spawning module workers. The main gate stays on the pinned stable toolchain; only the threaded wasm build uses a second, dated nightly pin (`nightly-2026-09-25` works).
 - **Threads need cross-origin isolation.** `SharedArrayBuffer` exists only on pages served with COOP/COEP headers (`crossOriginIsolated === true`). Many sites cannot set them. So the package ships **two wasm builds**: threaded (used when the page is isolated) and single-threaded on stable (used otherwise), chosen at runtime; only one is fetched.
 - **GitHub Pages cannot set headers.** The demo registers its own service worker (`demo/coi-sw.js`) that adds COOP/COEP, with one guarded reload.
-- **No NEON in wasm.** The scalar kernels run (bit-identical to NEON by test). SIMD128 kernels are a later, optional step.
+- **SIMD is required.** Both builds enable `simd128` and run WebAssembly SIMD scoring kernels (done 2026-10-12), bit-identical to the scalar and NEON ones by test: `node scripts/build-wasm.mjs test-kernels` runs them on wasm32-wasip1 under Node's WASI, in `verify:wasm`. There is no non-SIMD build; a browser without SIMD (older than Chrome 91, Firefox 89 or Safari 16.4) gets an `InternalError` that says so.
 - **`SystemTime::now()` panics on wasm32-unknown-unknown.** The engine seeds an absent seed from `getrandom` (OS entropy; `crypto.getRandomValues` in browsers), not the clock.
 - **`panic = "abort"` on wasm.** A panic kills the instance, so a worker that panicked is never reused.
 
@@ -89,7 +89,7 @@ Before the stroke arithmetic change, wasm was 1.5–1.9× slower than native per
 | W3b bundler fixture | A Vite 8 build of the packed package in Chromium, both builds (`test/browser/vite.test.js`; no Vite config needed; webpack dropped); README says what is tested. | Done. |
 | W4 live shapes | `onProgress` `shape`, in Rust render, binding, wasm and TypeScript, documented. | Done. |
 | W5 demo | `demo/`: drop an image, pick shape, count and alpha, watch it draw, compare with the original, download SVG/PNG; deployed to GitHub Pages by a workflow, with the COOP/COEP service worker. | Done; deploys to `https://domoarigatomrburato.github.io/primeval/` on merge, linked from the README. |
-| Later | WASM fallback on Node where no native prebuild exists (StackBlitz/WebContainers, musl before REL-7); SIMD128 kernels; Firefox and WebKit in the browser tests (Playwright browsers not yet downloaded); `libm` everywhere for cross-platform identical output (engine redesign). | Separate decisions. |
+| Later | WASM fallback on Node where no native prebuild exists (StackBlitz/WebContainers, musl before REL-7); Firefox and WebKit in the browser tests (Playwright browsers not yet downloaded); `libm` everywhere for cross-platform identical output (engine redesign). | Separate decisions. |
 
 ## Risks
 

@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 
 import {
   cargoBuildCommand,
   cargoClippyCommand,
+  cargoKernelTestCommand,
+  checkBuildOutput,
   checkSizeBudget,
   GZIP_BUDGET_BYTES,
   importedMemory,
@@ -14,7 +17,9 @@ import {
   NIGHTLY_TOOLCHAIN,
   OUTPUT_FILES,
   parseWasmBindgenVersion,
+  SIMD_RUSTFLAGS,
   THREADS_RUSTFLAGS,
+  targetFeatures,
   VARIANTS,
   wasmBindgenArgs,
 } from "../../scripts/build-wasm.mjs";
@@ -90,6 +95,109 @@ test("importedMemory rejects bytes that are not a wasm module", () => {
   assert.throws(() => importedMemory(wasm(funcImport).slice(0, -2)), /truncated/);
 });
 
+const targetFeaturesSection = (...features) =>
+  section(0, [
+    ...name("target_features"),
+    ...vector(features.map((feature) => [feature[0].charCodeAt(0), ...name(feature.slice(1))])),
+  ]);
+
+test("targetFeatures reads the features LLVM records in the target_features section", () => {
+  const bytes = Uint8Array.from([
+    ...wasm(funcImport),
+    ...targetFeaturesSection("+bulk-memory", "+simd128", "-atomics"),
+  ]);
+
+  assert.deepEqual(targetFeatures(bytes), ["+bulk-memory", "+simd128", "-atomics"]);
+});
+
+test("targetFeatures returns null without a target_features section", () => {
+  assert.equal(targetFeatures(wasm(funcImport)), null);
+  assert.throws(() => targetFeatures(Uint8Array.from([0x7f, 0x45, 0x4c, 0x46])), /not a wasm/);
+});
+
+test("checkBuildOutput requires SIMD, and a shared memory exactly in the threaded build", () => {
+  const sharedMemory = memoryImport([0x03, ...leb128(17), ...leb128(16384)]);
+  const unsharedMemory = memoryImport([0x00, ...leb128(17)]);
+  const simd = targetFeaturesSection("+bulk-memory", "+simd128");
+  const noSimd = targetFeaturesSection("+bulk-memory");
+  const module = (memory, features) => Uint8Array.from([...wasm(memory), ...features]);
+
+  checkBuildOutput(VARIANTS.single, "single.wasm", module(unsharedMemory, simd));
+  checkBuildOutput(VARIANTS.threaded, "threaded.wasm", module(sharedMemory, simd));
+  assert.throws(
+    () => checkBuildOutput(VARIANTS.single, "single.wasm", module(sharedMemory, simd)),
+    {
+      message:
+        "single.wasm must not import a shared memory; " +
+        "check the threaded RUSTFLAGS and that CARGO_ENCODED_RUSTFLAGS is unset",
+    },
+  );
+  assert.throws(
+    () => checkBuildOutput(VARIANTS.threaded, "threaded.wasm", module(unsharedMemory, simd)),
+    { message: /^threaded\.wasm must import a shared memory; / },
+  );
+  for (const [build, memory] of [
+    [VARIANTS.single, unsharedMemory],
+    [VARIANTS.threaded, sharedMemory],
+  ]) {
+    for (const features of [noSimd, []]) {
+      assert.throws(() => checkBuildOutput(build, "out.wasm", module(memory, features)), {
+        message:
+          "out.wasm must enable WebAssembly SIMD (simd128); " +
+          "check SIMD_RUSTFLAGS and that CARGO_ENCODED_RUSTFLAGS is unset",
+      });
+    }
+  }
+});
+
+// The signed LEB128 of a non-negative `i32.const` below 2^13.
+const sleb128 = (value) => (value < 64 ? [value] : [0x80 | (value & 0x7f), value >> 7]);
+
+// A WASI command whose `_start` returns, or calls `proc_exit(code)`.
+function wasiCommand(code) {
+  const body = code === null ? [0x00, 0x0b] : [0x00, 0x41, ...sleb128(code), 0x10, 0x00, 0x0b];
+  return Uint8Array.from([
+    ...[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00],
+    ...section(
+      1,
+      vector([
+        [0x60, 0x01, 0x7f, 0x00],
+        [0x60, 0x00, 0x00],
+      ]),
+    ),
+    ...section(2, vector([[...name("wasi_snapshot_preview1"), ...name("proc_exit"), 0x00, 0x00]])),
+    ...section(3, vector([[0x01]])),
+    ...section(5, vector([[0x00, 0x01]])),
+    ...section(
+      7,
+      vector([
+        [...name("_start"), 0x00, 0x01],
+        [...name("memory"), 0x02, 0x00],
+      ]),
+    ),
+    ...section(10, vector([[...leb128(body.length), ...body]])),
+  ]);
+}
+
+test("the WASI runner exits with the status of the module it runs", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "primeval-wasi-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const config = cargoKernelTestCommand().args.find((arg) => arg.startsWith("target."));
+  const [command, ...flags] = JSON.parse(config.slice(config.indexOf("=") + 1));
+  for (const [code, status] of [
+    [null, 0],
+    [0, 0],
+    [3, 3],
+    [101, 101],
+  ]) {
+    const file = path.join(dir, `exit-${code}.wasm`);
+    fs.writeFileSync(file, wasiCommand(code));
+    const result = spawnSync(command, [...flags, file, "--some-arg"], { encoding: "utf8" });
+    assert.equal(result.status, status, `${code}: ${result.stderr}`);
+    assert.equal(result.stderr, "", `${code}`);
+  }
+});
+
 // --- Versions ---
 
 test("each .wasm has a budget of 512 KiB gzip -9", () => {
@@ -132,6 +240,14 @@ test("the threaded build uses exactly the W0 RUSTFLAGS", () => {
   ]);
 });
 
+test("both builds and clippy enable WebAssembly SIMD", () => {
+  assert.deepEqual(SIMD_RUSTFLAGS, ["-C", "target-feature=+simd128"]);
+  for (const build of Object.values(VARIANTS)) {
+    assert.match(cargoBuildCommand(build).env.RUSTFLAGS, /^-C target-feature=\+simd128( |$)/);
+  }
+  assert.equal(cargoClippyCommand().env.RUSTFLAGS, "-C target-feature=+simd128");
+});
+
 test("the single-threaded build uses the pinned stable toolchain", () => {
   const { command, args, env } = cargoBuildCommand(VARIANTS.single);
 
@@ -147,7 +263,7 @@ test("the single-threaded build uses the pinned stable toolchain", () => {
     "--target-dir",
     "target",
   ]);
-  assert.deepEqual(env, {});
+  assert.deepEqual(env, { RUSTFLAGS: "-C target-feature=+simd128" });
   assert.equal(
     VARIANTS.single.wasm,
     path.join("target", "wasm32-unknown-unknown", "wasm-release", "primeval_wasm.wasm"),
@@ -176,7 +292,7 @@ test("the threaded build uses the nightly, build-std and its own target dir", ()
     "-Z",
     "build-std=panic_abort,std",
   ]);
-  assert.deepEqual(env, { RUSTFLAGS: THREADS_RUSTFLAGS.join(" ") });
+  assert.deepEqual(env, { RUSTFLAGS: [...SIMD_RUSTFLAGS, ...THREADS_RUSTFLAGS].join(" ") });
   assert.equal(
     VARIANTS.threaded.wasm,
     path.join(
@@ -206,7 +322,32 @@ test("clippy checks the single-threaded variant on the pinned stable toolchain",
     "-D",
     "warnings",
   ]);
-  assert.deepEqual(command.env, {});
+  assert.deepEqual(command.env, { RUSTFLAGS: "-C target-feature=+simd128" });
+});
+
+test("the kernel tests run the score module's tests on wasm32-wasip1 with SIMD, under Node's WASI", () => {
+  const command = cargoKernelTestCommand();
+  const runner = [
+    process.execPath,
+    "--disable-warning=ExperimentalWarning",
+    path.join(repoRoot, "scripts", "wasi-runner.mjs"),
+  ];
+
+  assert.equal(command.command, "cargo");
+  assert.deepEqual(command.args, [
+    "test",
+    "-p",
+    "primeval-core",
+    "--lib",
+    "--target",
+    "wasm32-wasip1",
+    "--config",
+    `target.wasm32-wasip1.runner=${JSON.stringify(runner)}`,
+    "--",
+    "score::",
+    "--nocapture",
+  ]);
+  assert.deepEqual(command.env, { RUSTFLAGS: "-C target-feature=+simd128" });
 });
 
 test("wasm-bindgen emits web glue without the name section", () => {
@@ -327,8 +468,11 @@ test("the nightly and wasm-bindgen-cli pins have one source", () => {
   }
 });
 
-test("the pinned stable toolchain has the wasm target", () => {
-  assert.match(readRepoFile("rust-toolchain.toml"), /^targets = \["wasm32-unknown-unknown"\]$/m);
+test("the pinned stable toolchain has the wasm targets", () => {
+  assert.match(
+    readRepoFile("rust-toolchain.toml"),
+    /^targets = \["wasm32-unknown-unknown", "wasm32-wasip1"\]$/m,
+  );
 });
 
 test("verify runs the wasm checks", () => {
@@ -337,7 +481,7 @@ test("verify runs the wasm checks", () => {
   assert.equal(scripts["build:wasm"], "node scripts/build-wasm.mjs");
   assert.equal(
     scripts["verify:wasm"],
-    "node scripts/build-wasm.mjs clippy && npm run build:wasm && npm run build && npm run build:node && node scripts/release-packages.mjs verify-root && npm run test:browser",
+    "node scripts/build-wasm.mjs clippy && node scripts/build-wasm.mjs test-kernels && npm run build:wasm && npm run build && npm run build:node && node scripts/release-packages.mjs verify-root && npm run test:browser",
   );
   assert.equal(scripts["test:browser"], "node --test test/browser/*.test.js");
   assert.match(scripts.verify, /npm run verify:wasm/);

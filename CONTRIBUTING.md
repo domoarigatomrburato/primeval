@@ -33,7 +33,13 @@ node scripts/build-wasm.mjs install-tools
 npm run build:wasm
 ```
 
-The single-threaded build uses the pinned stable toolchain, whose `wasm32-unknown-unknown` target `rust-toolchain.toml` installs. `npm run build:wasm` writes `wasm/single/` and `wasm/threaded/` and prints each `.wasm` file's raw and gzip size; `node scripts/build-wasm.mjs build single` builds one variant.
+The single-threaded build uses the pinned stable toolchain, whose `wasm32-unknown-unknown` target `rust-toolchain.toml` installs. Both builds enable WebAssembly SIMD (`simd128`), which every current browser supports. `npm run build:wasm` writes `wasm/single/` and `wasm/threaded/` and prints each `.wasm` file's raw and gzip size; `node scripts/build-wasm.mjs build single` builds one variant.
+
+The scoring kernels in `crates/primeval-core/src/score.rs` have NEON and simd128 versions that must equal the scalar ones bit for bit. `node scripts/build-wasm.mjs test-kernels` (also part of `npm run verify`) runs the `score` tests on the `wasm32-wasip1` target, which `rust-toolchain.toml` also lists, under Node's WASI; the aarch64 tests cover NEON:
+
+```bash
+node scripts/build-wasm.mjs test-kernels
+```
 
 The browser tests (`npm run test:browser`, also part of `npm run verify`) drive Chromium's headless shell through Playwright. Install the shell once per machine, at the version the Playwright in `package-lock.json` pins; on Linux, add `--with-deps` for its system libraries:
 

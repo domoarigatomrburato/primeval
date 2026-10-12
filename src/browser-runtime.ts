@@ -39,6 +39,40 @@ function startWorker(variant: WasmVariant): Worker {
     : new Worker(new URL("./worker-single.js", import.meta.url), { type: "module" });
 }
 
+/**
+ * The smallest module with a SIMD instruction (`i8x16.popcnt` of an
+ * `i8x16.splat`), from the final SIMD proposal: browsers without WebAssembly
+ * SIMD do not validate it.
+ */
+const SIMD_PROBE = Uint8Array.from([
+  ...[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00], // magic, version
+  ...[0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7b], // types: () -> v128
+  ...[0x03, 0x02, 0x01, 0x00], // functions: one of that type
+  ...[0x0a, 0x0a, 0x01, 0x08, 0x00, 0x41, 0x00, 0xfd, 0x0f, 0xfd, 0x62, 0x0b], // its code
+]);
+
+/**
+ * The error for a `.wasm` that failed to load or compile: both builds need
+ * WebAssembly SIMD, so a browser without it is told which browsers have it.
+ */
+function loadError(error: unknown): InternalError {
+  let simd = false;
+  try {
+    simd = WebAssembly.validate(SIMD_PROBE);
+  } catch {
+    // An engine that cannot even validate the probe has no SIMD.
+  }
+  return simd
+    ? new InternalError(`could not load the WebAssembly module: ${messageOf(error)}`, {
+        cause: error,
+      })
+    : new InternalError(
+        "this browser does not support WebAssembly SIMD, which primeval needs: " +
+          "use Chrome 91, Firefox 89, Safari 16.4 or newer",
+        { cause: error },
+      );
+}
+
 /** The compiled module of `variant`, once per page; a failure is retried next call. */
 function compiledModule(variant: WasmVariant): Promise<WebAssembly.Module> {
   let module = modules.get(variant);
@@ -165,12 +199,7 @@ function runInWorker(
           );
         }
       },
-      (error: unknown) =>
-        fail(
-          new InternalError(`could not load the WebAssembly module: ${messageOf(error)}`, {
-            cause: error,
-          }),
-        ),
+      (error: unknown) => fail(loadError(error)),
     );
   });
 }

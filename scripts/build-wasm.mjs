@@ -5,10 +5,15 @@
 // - `wasm/threaded/`: rayon on Web Workers, on the dated nightly below, with
 //   the standard library rebuilt for atomics.
 //
-// This file is the single source of truth for the nightly pin, the threaded
-// RUSTFLAGS, the build-std flags, the output layout and the size budget; CI
-// and the docs call its subcommands (`install-tools` installs what the builds
-// need) instead of repeating them, and the other scripts import the layout.
+// Both require WebAssembly SIMD (simd128), for the scoring kernels of
+// `primeval-core`; `test-kernels` runs their parity tests on wasm32-wasip1
+// under Node's WASI.
+//
+// This file is the single source of truth for the nightly pin, the SIMD and
+// threaded RUSTFLAGS, the build-std flags, the output layout and the size
+// budget; CI and the docs call its subcommands (`install-tools` installs what
+// the builds need) instead of repeating them, and the other scripts import
+// the layout.
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -19,6 +24,8 @@ import { lockedVersion } from "./napi-targets.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TARGET = "wasm32-unknown-unknown";
+/** The target the kernel tests run on: libtest needs WASI for its output. */
+const TEST_TARGET = "wasm32-wasip1";
 const PROFILE = "wasm-release";
 const CRATE = "primeval-wasm";
 const OUT_NAME = "primeval";
@@ -35,6 +42,13 @@ export const OUTPUT_FILES = { glue: `${OUT_NAME}.js`, wasm: `${OUT_NAME}_bg.wasm
  * feature, which nightly is phasing out (rust-lang/rust#162235).
  */
 export const NIGHTLY_TOOLCHAIN = "nightly-2026-09-25";
+
+/**
+ * Every wasm32 build enables SIMD, which every current browser supports
+ * (Chrome 91, Firefox 89, Safari 16.4); `primeval-core` then compiles its
+ * simd128 scoring kernels.
+ */
+export const SIMD_RUSTFLAGS = ["-C", "target-feature=+simd128"];
 
 /**
  * Threads need atomics, and a memory that is imported, shared and capped
@@ -96,7 +110,7 @@ export const VARIANTS = {
     targetDir: "target",
     toolchain: null,
     cargoArgs: [],
-    env: {},
+    env: { RUSTFLAGS: SIMD_RUSTFLAGS.join(" ") },
     shared: false,
   }),
   // A target dir of its own, so the two builds do not invalidate each other.
@@ -105,7 +119,7 @@ export const VARIANTS = {
     targetDir: path.join("target", "wasm-threads"),
     toolchain: NIGHTLY_TOOLCHAIN,
     cargoArgs: ["--features", "threads", ...BUILD_STD],
-    env: { RUSTFLAGS: THREADS_RUSTFLAGS.join(" ") },
+    env: { RUSTFLAGS: [...SIMD_RUSTFLAGS, ...THREADS_RUSTFLAGS].join(" ") },
     shared: true,
   }),
 };
@@ -144,6 +158,40 @@ export function cargoClippyCommand() {
   const command = cargoCommand(VARIANTS.single, "clippy", []);
   command.args.push("--all-targets", "--", "-D", "warnings");
   return command;
+}
+
+/**
+ * The tests of `primeval-core`'s `score` module, its scoring kernels, on
+ * wasm32-wasip1 with SIMD: the simd128 kernels against the scalar ones, and a
+ * test that fails without the flag. Cargo runs the test binary with
+ * `wasi-runner.mjs` under this Node. The rest of the suite needs threads,
+ * which WASI preview 1 lacks.
+ */
+export function cargoKernelTestCommand() {
+  const runner = [
+    process.execPath,
+    "--disable-warning=ExperimentalWarning",
+    path.join(REPO_ROOT, "scripts", "wasi-runner.mjs"),
+  ];
+  return {
+    command: "cargo",
+    args: [
+      "test",
+      "-p",
+      "primeval-core",
+      "--lib",
+      "--target",
+      TEST_TARGET,
+      "--config",
+      `target.${TEST_TARGET}.runner=${JSON.stringify(runner)}`,
+      "--",
+      "score::",
+      // A failing test aborts the run (panic = "abort"), so print its
+      // message as it happens.
+      "--nocapture",
+    ],
+    env: { RUSTFLAGS: SIMD_RUSTFLAGS.join(" ") },
+  };
 }
 
 /** wasm-bindgen arguments: ES-module glue for the web, name section removed. */
@@ -197,40 +245,79 @@ export function installToolsCommands({ required, installed }) {
   return commands;
 }
 
+/** A reader of the LEB128 integers and byte runs of a wasm module. */
+function wasmReader(bytes) {
+  const magic = [0x00, 0x61, 0x73, 0x6d];
+  if (bytes.length < 8 || magic.some((byte, index) => bytes[index] !== byte)) {
+    throw new Error("not a wasm module");
+  }
+  const reader = {
+    offset: 8,
+    done: () => reader.offset >= bytes.length,
+    byte() {
+      if (reader.offset >= bytes.length) {
+        throw new Error("truncated wasm module");
+      }
+      return bytes[reader.offset++];
+    },
+    u32() {
+      let result = 0;
+      let shift = 0;
+      let next;
+      do {
+        next = reader.byte();
+        result += (next & 0x7f) * 2 ** shift;
+        shift += 7;
+      } while (next & 0x80);
+      return result;
+    },
+    skip(length) {
+      if (reader.offset + length > bytes.length) {
+        throw new Error("truncated wasm module");
+      }
+      reader.offset += length;
+    },
+    string() {
+      const length = reader.u32();
+      const start = reader.offset;
+      reader.skip(length);
+      return new TextDecoder().decode(bytes.subarray(start, start + length));
+    },
+  };
+  return reader;
+}
+
+/**
+ * The features LLVM recorded in a wasm module's `target_features` custom
+ * section, each with its prefix (`+simd128`), or null without one;
+ * wasm-bindgen keeps the section.
+ */
+export function targetFeatures(bytes) {
+  const reader = wasmReader(bytes);
+  while (!reader.done()) {
+    const id = reader.byte();
+    const size = reader.u32();
+    const end = reader.offset + size;
+    if (id === 0 && reader.string() === "target_features") {
+      const features = [];
+      for (let count = reader.u32(); count > 0; count--) {
+        const prefix = String.fromCharCode(reader.byte());
+        features.push(`${prefix}${reader.string()}`);
+      }
+      return features;
+    }
+    reader.skip(end - reader.offset);
+  }
+  return null;
+}
+
 /**
  * The memory a wasm module imports, as `{ shared, minimum, maximum }` (in
  * 64 KiB pages; `maximum` is null without one), or null if it imports none.
  * Reads only the import section.
  */
 export function importedMemory(bytes) {
-  const magic = [0x00, 0x61, 0x73, 0x6d];
-  if (bytes.length < 8 || magic.some((byte, index) => bytes[index] !== byte)) {
-    throw new Error("not a wasm module");
-  }
-  let offset = 8;
-  const byte = () => {
-    if (offset >= bytes.length) {
-      throw new Error("truncated wasm module");
-    }
-    return bytes[offset++];
-  };
-  const u32 = () => {
-    let result = 0;
-    let shift = 0;
-    let next;
-    do {
-      next = byte();
-      result += (next & 0x7f) * 2 ** shift;
-      shift += 7;
-    } while (next & 0x80);
-    return result;
-  };
-  const skip = (length) => {
-    if (offset + length > bytes.length) {
-      throw new Error("truncated wasm module");
-    }
-    offset += length;
-  };
+  const { byte, u32, skip, done } = wasmReader(bytes);
   const limits = () => {
     const flags = byte();
     const minimum = u32();
@@ -238,7 +325,7 @@ export function importedMemory(bytes) {
     return { shared: (flags & 0x02) !== 0, minimum, maximum };
   };
 
-  while (offset < bytes.length) {
+  while (!done()) {
     const id = byte();
     const size = u32();
     if (id !== 2) {
@@ -275,6 +362,27 @@ export function importedMemory(bytes) {
     return null;
   }
   return null;
+}
+
+/**
+ * Fails if `bytes`, the `.wasm` written to `output` by `build`, lacks SIMD or
+ * does not import a shared memory exactly when the build is threaded. A set
+ * `CARGO_ENCODED_RUSTFLAGS` overrides `RUSTFLAGS` and would drop the flags.
+ */
+export function checkBuildOutput(build, output, bytes) {
+  const shared = importedMemory(bytes)?.shared ?? false;
+  if (shared !== build.shared) {
+    throw new Error(
+      `${output} must ${build.shared ? "" : "not "}import a shared memory; ` +
+        "check the threaded RUSTFLAGS and that CARGO_ENCODED_RUSTFLAGS is unset",
+    );
+  }
+  if (!(targetFeatures(bytes) ?? []).includes("+simd128")) {
+    throw new Error(
+      `${output} must enable WebAssembly SIMD (simd128); ` +
+        "check SIMD_RUSTFLAGS and that CARGO_ENCODED_RUSTFLAGS is unset",
+    );
+  }
 }
 
 function run({ command, args, env = {} }) {
@@ -340,15 +448,9 @@ function build(names) {
 
     const output = `${variantBuild.outDir}/${OUTPUT_FILES.wasm}`;
     const bytes = fs.readFileSync(path.join(REPO_ROOT, output));
-    const shared = importedMemory(bytes)?.shared ?? false;
     const gzip = gzipSync(bytes, { level: 9 }).length;
     try {
-      if (shared !== variantBuild.shared) {
-        throw new Error(
-          `${output} must ${variantBuild.shared ? "" : "not "}import a shared memory; ` +
-            "check the threaded RUSTFLAGS and that CARGO_ENCODED_RUSTFLAGS is unset",
-        );
-      }
+      checkBuildOutput(variantBuild, output, bytes);
       checkSizeBudget(output, gzip);
     } catch (error) {
       // Never leave a failed build where packaging would find it.
@@ -357,7 +459,7 @@ function build(names) {
     }
     console.log(
       `${output}: ${bytes.length} bytes raw, ${gzip} bytes gzip -9, ` +
-        `${shared ? "shared" : "unshared"} memory`,
+        `${variantBuild.shared ? "shared" : "unshared"} memory, SIMD`,
     );
   }
 }
@@ -368,6 +470,7 @@ function usage() {
       "Usage:",
       "  node scripts/build-wasm.mjs [build [single|threaded]]  build into wasm/ (default: both)",
       "  node scripts/build-wasm.mjs clippy                     clippy for wasm32 on the pinned stable",
+      "  node scripts/build-wasm.mjs test-kernels               the scoring kernels' tests on wasm32-wasip1",
       "  node scripts/build-wasm.mjs install-tools              install the nightly and wasm-bindgen-cli",
       "  node scripts/build-wasm.mjs wasm-bindgen-version       print the required wasm-bindgen-cli version",
     ].join("\n"),
@@ -389,6 +492,9 @@ function main([command = "build", ...args]) {
       }
       case "clippy":
         run(cargoClippyCommand());
+        break;
+      case "test-kernels":
+        run(cargoKernelTestCommand());
         break;
       case "install-tools": {
         const required = requiredWasmBindgenVersion();

@@ -311,7 +311,8 @@ Browser notes:
   ```
 
 - Each call runs in a Web Worker of its own, which ends when the call settles, so concurrent calls do not share memory and the page's main thread stays free. An `AbortSignal` terminates the worker at once.
-- A page downloads one of two WebAssembly builds, threaded or single-threaded, chosen before the download and compiled once per page: about 330 KB with brotli (about 440 KB with gzip), plus a few KB of JavaScript.
+- A page downloads one of two WebAssembly builds, threaded or single-threaded, chosen before the download and compiled once per page: about 360 KB with brotli (about 460 KB with gzip), plus a few KB of JavaScript.
+- Both builds use WebAssembly SIMD, which Chrome 91, Firefox 89, Safari 16.4 and newer versions support. In a browser without it, `approximate()` rejects with an `InternalError` that says so.
 - The same seed and options give the same output. Native and browser output currently match for the same seed, but this is not guaranteed across platforms. The engine and the PNG writer compute rotations with portable arithmetic, and the engine draws its random moves with a pure Rust logarithm, on every target.
 
 ## Alpha Comparison (Mona Lisa, 200 steps, mixed shape)
