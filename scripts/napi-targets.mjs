@@ -14,12 +14,14 @@ const TARGET_SUFFIXES = {
 // Each target builds on a runner of its own platform, so the release workflow
 // can execute (smoke test) the addon it just built. Labels from
 // https://github.com/actions/runner-images (checked 2026-10): `macos-15-intel`
-// is the standard x64 macOS runner, `ubuntu-24.04-arm` the arm64 Linux one.
+// is the standard x64 macOS runner, `ubuntu-24.04-arm` the arm64 Linux one. The
+// Linux x64 runner is pinned to `ubuntu-24.04` rather than `ubuntu-latest`, so
+// that the image does not change under the release.
 const TARGET_RUNNERS = {
   "aarch64-apple-darwin": "macos-15",
   "x86_64-apple-darwin": "macos-15-intel",
   "aarch64-unknown-linux-gnu": "ubuntu-24.04-arm",
-  "x86_64-unknown-linux-gnu": "ubuntu-latest",
+  "x86_64-unknown-linux-gnu": "ubuntu-24.04",
   "x86_64-pc-windows-msvc": "windows-latest",
 };
 

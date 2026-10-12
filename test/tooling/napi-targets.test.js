@@ -80,7 +80,7 @@ test("release matrix runners are derived from napi targets", () => {
   assert.deepEqual(releaseMatrixForTargets(["x86_64-unknown-linux-gnu"]), {
     include: [
       {
-        runner: "ubuntu-latest",
+        runner: "ubuntu-24.04",
         target: "x86_64-unknown-linux-gnu",
         "napi-cross": true,
       },
@@ -96,7 +96,7 @@ test("every release target builds and smoke tests on a runner of its own platfor
     // Intel runner, so the x64 addon runs natively rather than under Rosetta.
     "x86_64-apple-darwin": "macos-15-intel",
     "aarch64-unknown-linux-gnu": "ubuntu-24.04-arm",
-    "x86_64-unknown-linux-gnu": "ubuntu-latest",
+    "x86_64-unknown-linux-gnu": "ubuntu-24.04",
     "x86_64-pc-windows-msvc": "windows-latest",
   });
   // Linux GNU builds link against the glibc 2.17 sysroot of the napi-rs cross toolchain.
@@ -148,7 +148,7 @@ test("rust checks also run on arm64 macOS so the NEON paths are tested", () => {
   assert.ok(runners, "missing runner matrix in rust-checks job");
   assert.deepEqual(
     runners[1].split(",").map((runner) => runner.trim()),
-    ["ubuntu-latest", "macos-15"],
+    ["ubuntu-24.04", "macos-15"],
   );
   assert.match(rustChecks[1], /runs-on: \$\{\{ matrix\.runner \}\}/);
   assert.match(rustChecks[1], /run: npm run verify:rust/);
