@@ -64,7 +64,9 @@
 //! `powi` or `powf`, whose results can differ in the last bit between
 //! platforms. Tests may use them. The engine does not use `mul_add`: it is
 //! a software call in WebAssembly and on x86 without FMA, so the engine
-//! writes the product and the sum, rounding each separately.
+//! writes the product and the sum, rounding each separately. The crate's
+//! `clippy.toml` bans these methods (`disallowed-methods`) in the whole
+//! engine, outside tests and benches, so the clippy gate enforces the list.
 //! The masks of the fixed layers
 //! are not computed here: they are the scanlines of the engine's
 //! rasterizers, which the greedy search's own output already depends on,
@@ -484,13 +486,8 @@ fn parts<F: Real>(
             let mut params = [0.0; COORDS];
             let outline = match &committed.shape {
                 Shape::Triangle(_) => Outline::Triangle,
-                Shape::Polygon(polygon) if matches!(polygon.order, 3 | 4) => {
-                    if polygon.order == 3 {
-                        Outline::Triangle
-                    } else {
-                        Outline::Quad
-                    }
-                }
+                Shape::Polygon(polygon) if polygon.order == 3 => Outline::Triangle,
+                Shape::Polygon(polygon) if polygon.order == 4 => Outline::Quad,
                 Shape::Rectangle(_) => Outline::Rect,
                 // Keep the engine's angle-based c, u, h: its geometry is a
                 // corner polygon, which cannot recover u and h bit for bit.
@@ -613,41 +610,17 @@ fn score_shapes(
         let color = shape.color;
         layer.alpha = f64::from(color.a);
         layer.color = [color.r, color.g, color.b].map(f64::from);
-        match (layer.outline, &shape.geometry) {
-            (Outline::Fixed(index), geometry) => {
-                assert_eq!(geometry, &fixed[index], "a fixed shape moved");
-                continue;
-            }
-            (Outline::Rect, Geometry::Rect { .. }) => {}
-            (
-                outline @ (Outline::Circle | Outline::Ellipse | Outline::RotatedEllipse),
-                &Geometry::Ellipse {
-                    rx, ry, rotation, ..
-                },
-            ) => match outline {
-                Outline::Circle => {
-                    assert!(rx == ry && rotation == 0.0, "not a circle: {rx} {ry}");
-                }
-                Outline::Ellipse => {
-                    assert!(rotation == 0.0, "not axis-aligned: {rotation}");
-                }
-                _ => {}
-            },
-            (outline, Geometry::Polygon(points))
-                if points.len() == outline.sides()
-                    && outline.sides() > 0
-                    && outline != Outline::Rect =>
-            {
-                // A rotated rectangle's coverage is its corners' as a
-                // quadrilateral's.
-                if outline == Outline::Rotated {
-                    layer.outline = Outline::Quad;
-                }
-            }
-            (_, geometry) => panic!("not the model's shape: {geometry:?}"),
+        if let Outline::Fixed(index) = layer.outline {
+            assert_eq!(shape.geometry, fixed[index], "a fixed shape moved");
+            continue;
+        }
+        // A rotated rectangle's coverage is its corners' as a
+        // quadrilateral's.
+        if layer.outline == Outline::Rotated {
+            layer.outline = Outline::Quad;
         }
         layer.params = Layer::from_geometry(layer.outline, &shape.geometry)
-            .expect("the drawing geometry matches its outline");
+            .unwrap_or_else(|| panic!("not the model's shape: {:?}", shape.geometry));
     }
     let loss = diff::loss(&scene, &layers, &mut Workspace::default());
     (loss / (3 * scene.width * scene.height) as f64).sqrt() / 255.0

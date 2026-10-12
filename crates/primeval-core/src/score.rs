@@ -7,8 +7,8 @@
 //! coverage. Buffers are opaque RGB, so every kernel
 //! works on the three colour channels only. On aarch64, hot paths use NEON
 //! intrinsics to process 8 pixels per iteration; on wasm32 with `simd128`,
-//! which the browser builds enable, WebAssembly SIMD to process 16. Both give
-//! the scalar kernels' results bit for bit.
+//! which the browser builds enable, the energy's blend uses WebAssembly SIMD
+//! to process 16. Both give the scalar kernels' results bit for bit.
 //!
 //! The search scores every candidate against the same target and canvas, so
 //! [`fit`] reads each line's sums from the step's [`PrefixSums`] and the
@@ -267,7 +267,16 @@ trait LineKernels {
 
     /// The sum of squared channel differences between the target and the
     /// canvas over `pixels` pixels from byte offset `start`.
-    unsafe fn line_error(t_pix: &[u8], c_pix: &[u8], start: usize, pixels: usize) -> u64;
+    #[inline]
+    unsafe fn line_error(t_pix: &[u8], c_pix: &[u8], start: usize, pixels: usize) -> u64 {
+        let end = start + pixels * BYTES_PER_PIXEL;
+        Self::difference_bytes(&t_pix[start..end], &c_pix[start..end])
+    }
+
+    /// The sum of squared differences of every pair of bytes, which for two
+    /// RGB buffers of the same size is the raw score: every byte is a colour
+    /// channel, so the pixel boundaries do not matter.
+    fn difference_bytes(a_pix: &[u8], b_pix: &[u8]) -> u64;
 
     /// The same sum after blending the canvas with `blend`, as
     /// [`draw_lines`] would.
@@ -464,9 +473,8 @@ impl LineKernels for Scalar {
     }
 
     #[inline]
-    unsafe fn line_error(t_pix: &[u8], c_pix: &[u8], start: usize, pixels: usize) -> u64 {
-        let end = start + pixels * BYTES_PER_PIXEL;
-        scalar::difference_full_raw_pixels(&t_pix[start..end], &c_pix[start..end])
+    fn difference_bytes(a_pix: &[u8], b_pix: &[u8]) -> u64 {
+        scalar::difference_full_raw_pixels(a_pix, b_pix)
     }
 
     #[inline]
@@ -499,9 +507,8 @@ impl LineKernels for Neon {
     }
 
     #[inline]
-    unsafe fn line_error(t_pix: &[u8], c_pix: &[u8], start: usize, pixels: usize) -> u64 {
-        let end = start + pixels * BYTES_PER_PIXEL;
-        neon::difference_bytes(&t_pix[start..end], &c_pix[start..end])
+    fn difference_bytes(a_pix: &[u8], b_pix: &[u8]) -> u64 {
+        neon::difference_bytes(a_pix, b_pix)
     }
 
     #[inline]
@@ -517,7 +524,10 @@ impl LineKernels for Neon {
     }
 }
 
-/// The WebAssembly SIMD kernels.
+/// The WebAssembly SIMD kernels: `line_after`, the energy of every search
+/// candidate, in simd128; the line sums and the byte differences in scalar
+/// code, since every search and climb fit reads prefix sums, which leaves
+/// them only the one fit per committed shape and the full-canvas scores.
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 struct Simd128;
 
@@ -530,14 +540,12 @@ impl LineKernels for Simd128 {
         start: usize,
         pixels: usize,
     ) -> ([u64; 3], [u64; 3]) {
-        // SAFETY: this method's contract is `simd128::line_sums`'s.
-        unsafe { simd128::line_sums(t_pix, c_pix, start, pixels) }
+        scalar::line_sums(t_pix, c_pix, start, pixels)
     }
 
     #[inline]
-    unsafe fn line_error(t_pix: &[u8], c_pix: &[u8], start: usize, pixels: usize) -> u64 {
-        let end = start + pixels * BYTES_PER_PIXEL;
-        simd128::difference_bytes(&t_pix[start..end], &c_pix[start..end])
+    fn difference_bytes(a_pix: &[u8], b_pix: &[u8]) -> u64 {
+        scalar::difference_full_raw_pixels(a_pix, b_pix)
     }
 
     #[inline]
@@ -553,8 +561,10 @@ impl LineKernels for Simd128 {
     }
 }
 
+// On aarch64 only the reference `Scalar` reads the line kernels.
+#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
 mod scalar {
-    use super::{BYTES_PER_PIXEL, Buffer, LineBlend, SpanSums, blend_channel_scalar};
+    use super::{BYTES_PER_PIXEL, LineBlend, SpanSums, blend_channel_scalar};
 
     /// The sums of [`SpanSums`] over `pixels` pixels from byte offset
     /// `start`, in one pass over the pixels; for the short lines that are
@@ -600,13 +610,6 @@ mod scalar {
 
     /// Per-channel RGB sums of `pixels` pixels from byte offset `start` in
     /// the target and in the canvas.
-    #[cfg_attr(
-        any(
-            target_arch = "aarch64",
-            all(target_arch = "wasm32", target_feature = "simd128")
-        ),
-        allow(dead_code)
-    )]
     #[inline]
     pub(super) fn line_sums(
         t_pix: &[u8],
@@ -628,19 +631,6 @@ mod scalar {
         (target_sums, current_sums)
     }
 
-    /// The sum of squared channel differences between two buffers of the
-    /// same size, the raw score.
-    #[cfg_attr(
-        any(
-            target_arch = "aarch64",
-            all(target_arch = "wasm32", target_feature = "simd128")
-        ),
-        allow(dead_code)
-    )]
-    pub(super) fn difference_full_raw(a: &Buffer, b: &Buffer) -> u64 {
-        difference_full_raw_pixels(a.pixels(), b.pixels())
-    }
-
     /// Sum of squared differences of every byte: every byte of an RGB
     /// buffer is a colour channel, so the pixel boundaries do not matter.
     pub(super) fn difference_full_raw_pixels(a_pix: &[u8], b_pix: &[u8]) -> u64 {
@@ -656,13 +646,6 @@ mod scalar {
 
     /// The squared channel differences between the target and the canvas
     /// blended with `blend`, over `pixels` pixels from byte offset `start`.
-    #[cfg_attr(
-        any(
-            target_arch = "aarch64",
-            all(target_arch = "wasm32", target_feature = "simd128")
-        ),
-        allow(dead_code)
-    )]
     #[inline]
     pub(super) fn line_after(
         t_pix: &[u8],
@@ -690,7 +673,7 @@ mod scalar {
 
 #[cfg(target_arch = "aarch64")]
 mod neon {
-    use super::{BYTES_PER_PIXEL, Buffer, LineBlend, blend_channel_scalar, scalar};
+    use super::{BYTES_PER_PIXEL, LineBlend, blend_channel_scalar, scalar};
     use std::arch::aarch64::*;
 
     /// Bytes in a chunk of 8 RGB pixels, the unit of every `vld3_u8`.
@@ -736,11 +719,9 @@ mod neon {
         }
     }
 
-    /// # Safety
-    ///
-    /// Requires NEON, which every aarch64 target provides.
+    /// [`blend_channel_scalar`] on 8 values with one `term` and `keep`.
     #[cfg(test)]
-    pub(super) unsafe fn blend_chunk_u8x8(current: [u8; 8], term: u32, keep: u32) -> [u8; 8] {
+    pub(super) fn blend_chunk_u8x8(current: [u8; 8], term: u32, keep: u32) -> [u8; 8] {
         let mut out = [0_u8; 8];
         // SAFETY: `vld1_u8` reads and `vst1_u8` writes exactly 8 bytes, and both
         // pointers come from local `[u8; 8]` arrays. The remaining calls are
@@ -897,15 +878,9 @@ mod neon {
     /// and `4096 * 4 * 65_025 < 2^32`.
     const SQUARES_PER_BLOCK: usize = 4096;
 
-    /// Sum of squared differences of every byte; matches
-    /// [`scalar::difference_full_raw`]. Every byte of an RGB buffer is a
-    /// colour channel, so plain 16-byte loads need no deinterleaving.
-    pub(super) fn difference_full_raw(a: &Buffer, b: &Buffer) -> u64 {
-        difference_bytes(a.pixels(), b.pixels())
-    }
-
     /// Sum of squared differences of every pair of bytes; matches
-    /// [`scalar::difference_full_raw_pixels`].
+    /// [`scalar::difference_full_raw_pixels`]. Every byte of an RGB buffer
+    /// is a colour channel, so plain 16-byte loads need no deinterleaving.
     ///
     /// # Panics
     ///
@@ -1023,9 +998,9 @@ mod neon {
     }
 }
 
-/// The WebAssembly SIMD kernels, on 16 pixels (three 16-byte vectors) at a
-/// time. WebAssembly has no deinterleaving load, so the kernels keep the RGB
-/// bytes interleaved: a block of 48 bytes starts on a pixel, so the channel
+/// The WebAssembly SIMD kernel [`Simd128`] runs, `line_after`, on 16 pixels
+/// (three 16-byte vectors) at a time. WebAssembly has no deinterleaving
+/// load, so the kernel keeps the RGB bytes interleaved: a block of 48 bytes starts on a pixel, so the channel
 /// of every byte lane is fixed, and the per-channel constants are laid out
 /// to match.
 ///
@@ -1033,7 +1008,7 @@ mod neon {
 /// proved where it is declared.
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 mod simd128 {
-    use super::{BYTES_PER_PIXEL, Buffer, LineBlend, blend_channel_scalar, scalar};
+    use super::{BYTES_PER_PIXEL, LineBlend, scalar};
     use core::arch::wasm32::*;
 
     /// Bytes in a block of 16 RGB pixels, three vectors.
@@ -1048,14 +1023,6 @@ mod simd128 {
         u8x16(
             32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
         ),
-    ];
-
-    /// `CHANNEL_LANES[r]` is 1 in the 16-bit lanes `i` with `i % 3 == r`
-    /// and 0 in the others.
-    const CHANNEL_LANES: [v128; 3] = [
-        u16x8(1, 0, 0, 1, 0, 0, 1, 0),
-        u16x8(0, 1, 0, 0, 1, 0, 0, 1),
-        u16x8(0, 0, 1, 0, 0, 1, 0, 0),
     ];
 
     /// Loads the block of 48 bytes at `ptr`.
@@ -1095,190 +1062,6 @@ mod simd128 {
             + u64::from(u32x4_extract_lane::<3>(lanes))
     }
 
-    /// Per-lane byte sums of the 16-bit halves of blocks, by the channel of
-    /// the half's first byte: a block's halves start at bytes 0, 8, 16, 24,
-    /// 32 and 40, that is at channels 0, 2, 1, 0, 2 and 1, and lane `i` of a
-    /// half starting at channel `s` holds channel `(s + i) % 3`.
-    ///
-    /// Each block adds two bytes, at most `2 · 255 = 510`, to every lane.
-    /// A line flushes every [`BLOCKS_PER_FLUSH`] full blocks and its masked
-    /// tail adds one block to the last flush, so a flush holds at most 64
-    /// blocks: `64 · 510 = 32_640`, within the signed 16-bit lanes that
-    /// `i32x4_dot_i16x8` reads in [`ChannelLanes::flush`].
-    struct ChannelLanes([v128; 3]);
-
-    impl ChannelLanes {
-        fn new() -> Self {
-            Self([u16x8_splat(0); 3])
-        }
-
-        #[inline]
-        fn add(&mut self, [v0, v1, v2]: [v128; 3]) {
-            let [by_0, by_1, by_2] = &mut self.0;
-            let (low_0, high_0) = (u16x8_extend_low_u8x16(v0), u16x8_extend_high_u8x16(v0));
-            let (low_1, high_1) = (u16x8_extend_low_u8x16(v1), u16x8_extend_high_u8x16(v1));
-            let (low_2, high_2) = (u16x8_extend_low_u8x16(v2), u16x8_extend_high_u8x16(v2));
-            *by_0 = u16x8_add(*by_0, u16x8_add(low_0, high_1));
-            *by_2 = u16x8_add(*by_2, u16x8_add(high_0, low_2));
-            *by_1 = u16x8_add(*by_1, u16x8_add(low_1, high_2));
-        }
-
-        /// Adds the lanes to the channel `sums` and clears them. Channel `c`
-        /// is lane `i` of the half starting at `s` when
-        /// `i % 3 == (c − s) % 3`, so it is the dot product with
-        /// `CHANNEL_LANES[(c − s) % 3]`: each dot lane is at most
-        /// `2 · 32_640`, three of them `195_840`, exact in 32 bits.
-        #[inline]
-        fn flush(&mut self, sums: &mut [u64; 3]) {
-            for (channel, sum) in sums.iter_mut().enumerate() {
-                let mut lanes = u32x4_splat(0);
-                for (start, half) in self.0.iter().enumerate() {
-                    let mask = CHANNEL_LANES[(channel + 3 - start) % 3];
-                    lanes = u32x4_add(lanes, i32x4_dot_i16x8(*half, mask));
-                }
-                *sum += sum_u32x4(lanes);
-            }
-            *self = Self::new();
-        }
-    }
-
-    /// Full blocks per flush of [`ChannelLanes`].
-    const BLOCKS_PER_FLUSH: usize = 64;
-
-    /// Per-channel RGB sums of `pixels` pixels from byte offset `start` in
-    /// the target and in the canvas; matches [`scalar::line_sums`].
-    ///
-    /// # Safety
-    ///
-    /// `start + pixels * 3` must not exceed `t_pix.len()` or `c_pix.len()`.
-    #[inline]
-    pub(super) unsafe fn line_sums(
-        t_pix: &[u8],
-        c_pix: &[u8],
-        start: usize,
-        pixels: usize,
-    ) -> ([u64; 3], [u64; 3]) {
-        let mut target_sums = [0_u64; 3];
-        let mut current_sums = [0_u64; 3];
-        let mut target_lanes = ChannelLanes::new();
-        let mut current_lanes = ChannelLanes::new();
-        let mut blocks = 0;
-        let mut byte_index = start;
-
-        for _ in 0..pixels / 16 {
-            // SAFETY: the loop reads `pixels / 16` blocks of 48 bytes from
-            // `start`, which end at or below `start + pixels * 3`, within
-            // both slices by the caller's contract.
-            unsafe {
-                target_lanes.add(load_block(t_pix.as_ptr().add(byte_index)));
-                current_lanes.add(load_block(c_pix.as_ptr().add(byte_index)));
-            }
-            byte_index += BLOCK_BYTES;
-            blocks += 1;
-            if blocks == BLOCKS_PER_FLUSH {
-                target_lanes.flush(&mut target_sums);
-                current_lanes.flush(&mut current_sums);
-                blocks = 0;
-            }
-        }
-
-        // Three or more tail pixels take one block with the bytes past the
-        // line masked out, when the buffers extend that far; shorter tails,
-        // common at anti-aliased edges, are cheaper in scalar code.
-        let tail = pixels % 16;
-        if tail > 2 && byte_index + BLOCK_BYTES <= t_pix.len().min(c_pix.len()) {
-            let mask = block_mask(tail * BYTES_PER_PIXEL);
-            let masked = |block: [v128; 3]| [0, 1, 2].map(|k| v128_and(block[k], mask[k]));
-            // SAFETY: the block is the 48 bytes from `byte_index`, within
-            // both slices by the check above.
-            unsafe {
-                target_lanes.add(masked(load_block(t_pix.as_ptr().add(byte_index))));
-                current_lanes.add(masked(load_block(c_pix.as_ptr().add(byte_index))));
-            }
-            blocks += 1;
-        } else {
-            // SAFETY: the tail reads the last `tail` pixels of the line,
-            // which end at `start + pixels * 3`, within both slices by the
-            // caller's contract.
-            unsafe {
-                let (t_ptr, c_ptr) = (t_pix.as_ptr(), c_pix.as_ptr());
-                for _ in 0..tail {
-                    for channel in 0..3 {
-                        target_sums[channel] += u64::from(*t_ptr.add(byte_index + channel));
-                        current_sums[channel] += u64::from(*c_ptr.add(byte_index + channel));
-                    }
-                    byte_index += BYTES_PER_PIXEL;
-                }
-            }
-        }
-        if blocks > 0 {
-            target_lanes.flush(&mut target_sums);
-            current_lanes.flush(&mut current_sums);
-        }
-        (target_sums, current_sums)
-    }
-
-    /// The squared differences of the 16 byte pairs of `lhs` and `rhs`, in
-    /// 32-bit lanes of four squares each: at most `4 · 255² = 260_100`.
-    /// The differences lie in `-255..=255`, exact in 16-bit lanes, and
-    /// `i32x4_dot_i16x8` adds the squares of two neighbouring lanes.
-    #[inline]
-    fn squared_differences(lhs: v128, rhs: v128) -> v128 {
-        let low = i16x8_sub(u16x8_extend_low_u8x16(lhs), u16x8_extend_low_u8x16(rhs));
-        let high = i16x8_sub(u16x8_extend_high_u8x16(lhs), u16x8_extend_high_u8x16(rhs));
-        u32x4_add(i32x4_dot_i16x8(low, low), i32x4_dot_i16x8(high, high))
-    }
-
-    /// Chunks of 16 bytes whose squared differences are summed in 32-bit
-    /// lanes before widening: each chunk adds at most `4 · 255²` to a lane,
-    /// and `4096 · 4 · 65_025 < 2^32`.
-    const SQUARES_PER_BLOCK: usize = 4096;
-
-    /// Sum of squared differences of every byte; matches
-    /// [`scalar::difference_full_raw`]. Every byte of an RGB buffer is a
-    /// colour channel, so the pixel boundaries do not matter.
-    pub(super) fn difference_full_raw(a: &Buffer, b: &Buffer) -> u64 {
-        difference_bytes(a.pixels(), b.pixels())
-    }
-
-    /// Sum of squared differences of every pair of bytes; matches
-    /// [`scalar::difference_full_raw_pixels`].
-    ///
-    /// # Panics
-    ///
-    /// Panics if the slices have different lengths.
-    pub(super) fn difference_bytes(a_pix: &[u8], b_pix: &[u8]) -> u64 {
-        assert_eq!(a_pix.len(), b_pix.len(), "byte slices of different lengths");
-        let mut chunks = a_pix.len() / 16;
-        let chunk_bytes = chunks * 16;
-        let mut total = 0_u64;
-        let mut byte_index = 0_usize;
-
-        while chunks > 0 {
-            let block = chunks.min(SQUARES_PER_BLOCK);
-            chunks -= block;
-            let mut lanes = u32x4_splat(0);
-            for _ in 0..block {
-                // SAFETY: each `v128_load` reads 16 bytes from `byte_index`,
-                // and the loops read `a_pix.len() / 16` chunks in total from
-                // 0, so every read ends at or below
-                // `chunk_bytes <= a_pix.len()`, and `b_pix` has the same
-                // length (asserted above).
-                let (lhs, rhs) = unsafe {
-                    (
-                        v128_load(a_pix.as_ptr().add(byte_index).cast()),
-                        v128_load(b_pix.as_ptr().add(byte_index).cast()),
-                    )
-                };
-                lanes = u32x4_add(lanes, squared_differences(lhs, rhs));
-                byte_index += 16;
-            }
-            total += sum_u32x4(lanes);
-        }
-
-        total + scalar::difference_full_raw_pixels(&a_pix[chunk_bytes..], &b_pix[chunk_bytes..])
-    }
-
     /// `value / M` per 32-bit lane, as [`super::div_by_m`], exact for every
     /// lane below `M · (M + 1)`.
     #[inline]
@@ -1287,7 +1070,7 @@ mod simd128 {
         u32x4_shr(adjusted, 16)
     }
 
-    /// [`blend_channel_scalar`] on the eight 16-bit lanes of `current`, with
+    /// [`super::blend_channel_scalar`] on the eight 16-bit lanes of `current`, with
     /// `keep` in every 16-bit lane and each lane's term in the 32-bit lanes
     /// of `terms_low` (lanes 0–3) and `terms_high` (lanes 4–7); the blended
     /// values in 16-bit lanes.
@@ -1303,7 +1086,7 @@ mod simd128 {
         u16x8_narrow_i32x4(div_by_m_u32x4(low), div_by_m_u32x4(high))
     }
 
-    /// [`blend_channel_scalar`] on 8 values with one `term` and `keep`.
+    /// [`super::blend_channel_scalar`] on 8 values with one `term` and `keep`.
     #[cfg(test)]
     pub(super) fn blend_chunk_u8x8(current: [u8; 8], term: u32, keep: u32) -> [u8; 8] {
         let current = u16x8(
@@ -1329,7 +1112,7 @@ mod simd128 {
     /// at most `12 · 255² = 780_300`, to every lane, and the masked tail
     /// adds one block to the last flush, so a flush holds at most 4096
     /// blocks: `4096 · 780_300 < 2^32`.
-    pub(super) const AFTER_BLOCKS_PER_FLUSH: usize = 4096;
+    const AFTER_BLOCKS_PER_FLUSH: usize = 4096;
 
     /// The squared differences between the 48 target bytes `t` and the 48
     /// canvas bytes `c` blended with `keep` and `terms`, in 32-bit lanes of
@@ -1420,8 +1203,9 @@ mod simd128 {
             }
         }
 
-        // As in `line_sums`: a masked block for three or more tail pixels
-        // when the buffers extend that far, scalar otherwise.
+        // Three or more tail pixels take one block with the bytes past the
+        // line masked out, when the buffers extend that far; shorter tails,
+        // common at anti-aliased edges, are cheaper in scalar code.
         let tail = pixels % 16;
         if tail > 2 && byte_index + BLOCK_BYTES <= t_pix.len().min(c_pix.len()) {
             let mask = block_mask(tail * BYTES_PER_PIXEL);
@@ -1438,22 +1222,7 @@ mod simd128 {
                 block_after(t, c, keep_lanes, &block_terms, Some(&mask)),
             );
         } else {
-            for _ in 0..tail {
-                for (channel, &term) in terms.iter().enumerate() {
-                    // SAFETY: the tail reads the last `tail` pixels of the
-                    // line, which end at `start + pixels * 3`, within both
-                    // slices by the caller's contract.
-                    let (t, c) = unsafe {
-                        (
-                            *t_pix.as_ptr().add(byte_index + channel),
-                            *c_pix.as_ptr().add(byte_index + channel),
-                        )
-                    };
-                    let d = u32::from(t.abs_diff(blend_channel_scalar(c, term, keep)));
-                    total += u64::from(d * d);
-                }
-                byte_index += BYTES_PER_PIXEL;
-            }
+            total += scalar::line_after(t_pix, c_pix, byte_index, tail, blend);
         }
 
         total + sum_u32x4(lanes)
@@ -1581,24 +1350,7 @@ pub(crate) fn draw_lines(im: &mut Buffer, c: Color, lines: &[Scanline]) {
 pub(crate) fn difference_full_raw(a: &Buffer, b: &Buffer) -> u64 {
     assert_eq!(a.width(), b.width(), "difference_full: width mismatch");
     assert_eq!(a.height(), b.height(), "difference_full: height mismatch");
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        neon::difference_full_raw(a, b)
-    }
-
-    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    {
-        simd128::difference_full_raw(a, b)
-    }
-
-    #[cfg(not(any(
-        target_arch = "aarch64",
-        all(target_arch = "wasm32", target_feature = "simd128")
-    )))]
-    {
-        scalar::difference_full_raw(a, b)
-    }
+    Native::difference_bytes(a.pixels(), b.pixels())
 }
 
 /// The normalised RGB RMSE between two buffers, from `0.0` to `1.0`: the
@@ -1753,9 +1505,37 @@ pub(crate) fn energy_from_lines(
 mod fixtures {
     use super::M;
     use crate::buffer::Buffer;
+    use crate::prefix::PrefixSums;
     use crate::scanline::Scanline;
     use rand::RngExt;
     use rand_chacha::ChaCha8Rng;
+
+    /// Builds prefix sums for `target` against `current`.
+    pub(super) fn prefix_sums(target: &Buffer, current: &Buffer) -> PrefixSums {
+        let mut sums = PrefixSums::default();
+        sums.compute(target, current);
+        sums
+    }
+
+    /// Canvas sizes around the 8- and 16-pixel chunks of the SIMD kernels.
+    #[cfg(any(
+        target_arch = "aarch64",
+        all(target_arch = "wasm32", target_feature = "simd128")
+    ))]
+    pub(super) fn sizes() -> impl Iterator<Item = (u32, u32)> {
+        [
+            (1, 1),
+            (2, 2),
+            (7, 3),
+            (8, 2),
+            (9, 5),
+            (15, 4),
+            (16, 3),
+            (17, 6),
+        ]
+        .into_iter()
+        .chain([(23, 7), (31, 2), (33, 9), (64, 3), (65, 4)])
+    }
 
     pub(super) fn random_buffer(rng: &mut ChaCha8Rng, width: u32, height: u32) -> Buffer {
         let mut buffer = Buffer::new(width, height);
@@ -1797,6 +1577,7 @@ mod fixtures {
 
 #[cfg(test)]
 mod tests {
+    use super::fixtures::prefix_sums;
     use super::*;
     use crate::buffer::Buffer;
     use crate::color::Color;
@@ -1840,9 +1621,7 @@ mod tests {
                 let blend = LineBlend::new(Color::new(source, 0, 0, alpha), M);
                 let (term, keep) = (blend.terms[0], blend.keep);
 
-                // SAFETY: only requires NEON, a baseline aarch64 feature; the
-                // test is compiled for aarch64 only.
-                let simd = unsafe { neon::blend_chunk_u8x8(current, term, keep) };
+                let simd = neon::blend_chunk_u8x8(current, term, keep);
                 for lane in 0..8 {
                     let scalar = blend_channel_scalar(current[lane], term, keep);
                     assert_eq!(simd[lane], scalar, "src={source} alpha={alpha} lane={lane}");
@@ -2431,13 +2210,6 @@ mod tests {
         assert!((normalized - expected).abs() < 1e-12);
     }
 
-    /// Builds prefix sums for `target` against `current`.
-    fn prefix_sums(target: &Buffer, current: &Buffer) -> PrefixSums {
-        let mut sums = PrefixSums::default();
-        sums.compute(target, current);
-        sums
-    }
-
     /// The fused energy computed pixel by pixel and line by line, as the
     /// kernels did before prefix sums: each line subtracts the old error of
     /// its pixels and adds their error after blending that line alone.
@@ -2613,201 +2385,8 @@ mod tests {
     }
 }
 
-/// NEON and scalar kernels must agree bit for bit; release builds on aarch64
-/// only run the NEON ones, so CI covers them on the macOS arm64 leg.
-#[cfg(all(test, target_arch = "aarch64"))]
-mod neon_parity {
-    use super::fixtures::{random_buffer, random_lines};
-    use super::{
-        Fit, LineBlend, LineKernels, M, Neon, Scalar, blend_channel_scalar, energy_with, fit_with,
-        neon, scalar,
-    };
-    use crate::buffer::Buffer;
-    use crate::color::Color;
-    use crate::prefix::PrefixSums;
-    use rand::{RngExt, SeedableRng};
-    use rand_chacha::ChaCha8Rng;
-
-    fn prefix_sums(target: &Buffer, current: &Buffer) -> PrefixSums {
-        let mut sums = PrefixSums::default();
-        sums.compute(target, current);
-        sums
-    }
-
-    fn sizes() -> impl Iterator<Item = (u32, u32)> {
-        [
-            (1, 1),
-            (2, 2),
-            (7, 3),
-            (8, 2),
-            (9, 5),
-            (15, 4),
-            (16, 3),
-            (17, 6),
-        ]
-        .into_iter()
-        .chain([(23, 7), (31, 2), (33, 9), (64, 3), (65, 4)])
-    }
-
-    #[test]
-    fn compute_color_matches_scalar_for_every_alpha() {
-        let mut rng = ChaCha8Rng::seed_from_u64(0xc010);
-        for (width, height) in sizes() {
-            let target = random_buffer(&mut rng, width, height);
-            let current = random_buffer(&mut rng, width, height);
-            let sums = prefix_sums(&target, &current);
-            for alpha in 1..=255 {
-                let lines = random_lines(&mut rng, width as i32, height as i32);
-                for sums in [None, Some(&sums)] {
-                    let expected = fit_with::<Scalar>(&target, &current, sums, &lines, alpha);
-                    let actual = fit_with::<Neon>(&target, &current, sums, &lines, alpha);
-                    assert_eq!(actual, expected, "{width}x{height} alpha={alpha}");
-                }
-            }
-        }
-    }
-
-    /// Lines longer than `BLOCKS_PER_FLUSH` blocks of 16 pixels, so the NEON
-    /// line sums flush their 16-bit lanes at least once mid-line; bright
-    /// buffers push every lane towards its overflow bound.
-    #[test]
-    fn compute_color_matches_scalar_on_long_lines() {
-        let mut rng = ChaCha8Rng::seed_from_u64(0x1086);
-        let (width, height) = (2 * 8 * 256 + 13, 3);
-        let mut target = Buffer::new_from_color(width, height, Color::new(255, 255, 255, 255));
-        let current = random_buffer(&mut rng, width, height);
-        rng.fill(&mut target.pixels_mut()[..64]);
-        let sums = prefix_sums(&target, &current);
-        for alpha in [1, 128, 255] {
-            let lines = random_lines(&mut rng, width as i32, height as i32);
-            for sums in [None, Some(&sums)] {
-                let expected = fit_with::<Scalar>(&target, &current, sums, &lines, alpha);
-                let actual = fit_with::<Neon>(&target, &current, sums, &lines, alpha);
-                assert_eq!(actual, expected, "alpha={alpha}");
-            }
-        }
-    }
-
-    #[test]
-    fn energy_matches_scalar_for_every_alpha() {
-        let mut rng = ChaCha8Rng::seed_from_u64(0xe4e7);
-        for (width, height) in sizes() {
-            let target = random_buffer(&mut rng, width, height);
-            let current = random_buffer(&mut rng, width, height);
-            let score = scalar::difference_full_raw(&target, &current);
-            for alpha in 1..=255 {
-                let lines = random_lines(&mut rng, width as i32, height as i32);
-                let color = Color::new(rng.random(), rng.random(), rng.random(), alpha);
-                let before = fit_with::<Scalar>(&target, &current, None, &lines, 255).before;
-                let fit = Fit { color, before };
-                let limit = Some(rng.random_range(0..=score as i64));
-                for limit in [None, limit] {
-                    let expected =
-                        energy_with::<Scalar>(&target, &current, &lines, fit, score, limit);
-                    let actual = energy_with::<Neon>(&target, &current, &lines, fit, score, limit);
-                    assert_eq!(actual, expected, "{width}x{height} {color:?} {limit:?}");
-                }
-            }
-        }
-    }
-
-    /// Every line kernel on every start and length of a few rows, so the
-    /// masked tails meet the end of the buffer and fall back to scalar code.
-    #[test]
-    fn line_kernels_match_scalar_on_every_span() {
-        let mut rng = ChaCha8Rng::seed_from_u64(0x11e5);
-        for (width, height) in [(1, 1), (9, 2), (23, 3)] {
-            let target = random_buffer(&mut rng, width, height);
-            let current = random_buffer(&mut rng, width, height);
-            let (t_pix, c_pix) = (target.pixels(), current.pixels());
-            let total = (width * height) as usize;
-            for first in 0..total {
-                for pixels in 0..=total - first {
-                    let start = first * 3;
-                    let color = Color::new(rng.random(), rng.random(), rng.random(), rng.random());
-                    let coverage = rng.random_range(0..=M);
-                    let blend = LineBlend::new(color, coverage);
-                    // SAFETY: `start + pixels * 3` is at most `total * 3`,
-                    // the length of both buffers.
-                    unsafe {
-                        assert_eq!(
-                            Neon::line_sums(t_pix, c_pix, start, pixels),
-                            Scalar::line_sums(t_pix, c_pix, start, pixels),
-                            "{first} {pixels}"
-                        );
-                        assert_eq!(
-                            Neon::line_error(t_pix, c_pix, start, pixels),
-                            Scalar::line_error(t_pix, c_pix, start, pixels),
-                            "{first} {pixels}"
-                        );
-                        assert_eq!(
-                            Neon::line_after(t_pix, c_pix, start, pixels, blend),
-                            Scalar::line_after(t_pix, c_pix, start, pixels, blend),
-                            "{first} {pixels} {color:?} {coverage}"
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn difference_full_raw_matches_scalar() {
-        let mut rng = ChaCha8Rng::seed_from_u64(0xd1ff);
-        for (width, height) in sizes() {
-            let a = random_buffer(&mut rng, width, height);
-            let b = random_buffer(&mut rng, width, height);
-            let expected = scalar::difference_full_raw(&a, &b);
-            let actual = neon::difference_full_raw(&a, &b);
-            assert_eq!(actual, expected, "{width}x{height}");
-        }
-    }
-
-    /// Buffers longer than `SQUARES_PER_BLOCK` 16-byte chunks, so the NEON
-    /// sum flushes its 32-bit lanes mid-buffer; black against white puts
-    /// every lane at its overflow bound.
-    #[test]
-    fn difference_full_raw_matches_scalar_on_large_extreme_buffers() {
-        let (width, height) = (7_301, 9);
-        let mut black = Buffer::new_from_color(width, height, Color::new(0, 0, 0, 255));
-        let white = Buffer::new_from_color(width, height, Color::new(255, 255, 255, 255));
-        let actual = neon::difference_full_raw(&black, &white);
-        assert_eq!(actual, u64::from(width * height) * 3 * 255 * 255);
-
-        let mut rng = ChaCha8Rng::seed_from_u64(0xb16);
-        rng.fill(&mut black.pixels_mut()[..4096]);
-        let expected = scalar::difference_full_raw(&black, &white);
-        let actual = neon::difference_full_raw(&black, &white);
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn blend_matches_scalar_for_every_alpha_and_channel_value() {
-        let mut rng = ChaCha8Rng::seed_from_u64(0xb1e4);
-        for alpha in 1..=255 {
-            let color = Color::new(rng.random(), rng.random(), rng.random(), alpha);
-            for coverage in [0, 1, M / 2, M - 1, M, rng.random_range(0..=M)] {
-                let blend = LineBlend::new(color, coverage);
-                let (term, keep) = (blend.terms[0], blend.keep);
-                for chunk in 0_u8..32 {
-                    let current: [u8; 8] = std::array::from_fn(|lane| chunk * 8 + lane as u8);
-                    // SAFETY: only requires NEON, a baseline aarch64 feature.
-                    let simd = unsafe { neon::blend_chunk_u8x8(current, term, keep) };
-                    for lane in 0..8 {
-                        let expected = blend_channel_scalar(current[lane], term, keep);
-                        assert_eq!(
-                            simd[lane], expected,
-                            "alpha={alpha} coverage={coverage} lane={lane}"
-                        );
-                    }
-                }
-            }
-        }
-    }
-}
-
 /// A wasm32 test build without SIMD would compile neither the simd128
-/// kernels nor [`simd128_parity`], and pass without testing them.
+/// kernels nor [`simd_parity`], and pass without testing them.
 #[cfg(all(test, target_arch = "wasm32"))]
 #[test]
 #[allow(
@@ -2821,43 +2400,32 @@ fn wasm32_builds_enable_simd128() {
     );
 }
 
-/// simd128 and scalar kernels must agree bit for bit; the wasm builds only
-/// run the simd128 ones. `node scripts/build-wasm.mjs test-kernels` runs these
-/// tests on wasm32-wasip1 under Node, the same tests as [`neon_parity`] on
-/// the same fixtures.
-#[cfg(all(test, target_arch = "wasm32", target_feature = "simd128"))]
-mod simd128_parity {
-    use super::fixtures::{random_buffer, random_lines};
+/// The [`Native`] kernels and the target's SIMD module must agree with the
+/// scalar ones bit for bit, since release builds run only the native ones.
+/// CI runs these tests with NEON on the macOS arm64 leg, and
+/// `node scripts/build-wasm.mjs test-kernels` runs them with simd128 on
+/// wasm32-wasip1 under Node.
+#[cfg(all(
+    test,
+    any(
+        target_arch = "aarch64",
+        all(target_arch = "wasm32", target_feature = "simd128")
+    )
+))]
+mod simd_parity {
+    use super::fixtures::{prefix_sums, random_buffer, random_lines, sizes};
     use super::{
-        Fit, LineBlend, LineKernels, M, Scalar, Simd128, blend_channel_scalar, energy_with,
-        fit_with, scalar, simd128,
+        Fit, LineBlend, LineKernels, M, Native, Scalar, blend_channel_scalar, energy_with, fit_with,
     };
     use crate::buffer::Buffer;
     use crate::color::Color;
-    use crate::prefix::PrefixSums;
     use rand::{RngExt, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
-    fn prefix_sums(target: &Buffer, current: &Buffer) -> PrefixSums {
-        let mut sums = PrefixSums::default();
-        sums.compute(target, current);
-        sums
-    }
-
-    fn sizes() -> impl Iterator<Item = (u32, u32)> {
-        [
-            (1, 1),
-            (2, 2),
-            (7, 3),
-            (8, 2),
-            (9, 5),
-            (15, 4),
-            (16, 3),
-            (17, 6),
-        ]
-        .into_iter()
-        .chain([(23, 7), (31, 2), (33, 9), (64, 3), (65, 4)])
-    }
+    #[cfg(target_arch = "aarch64")]
+    use super::neon as simd;
+    #[cfg(target_arch = "wasm32")]
+    use super::simd128 as simd;
 
     #[test]
     fn compute_color_matches_scalar_for_every_alpha() {
@@ -2870,16 +2438,16 @@ mod simd128_parity {
                 let lines = random_lines(&mut rng, width as i32, height as i32);
                 for sums in [None, Some(&sums)] {
                     let expected = fit_with::<Scalar>(&target, &current, sums, &lines, alpha);
-                    let actual = fit_with::<Simd128>(&target, &current, sums, &lines, alpha);
+                    let actual = fit_with::<Native>(&target, &current, sums, &lines, alpha);
                     assert_eq!(actual, expected, "{width}x{height} alpha={alpha}");
                 }
             }
         }
     }
 
-    /// Lines longer than `BLOCKS_PER_FLUSH` blocks of 16 pixels, so the
-    /// simd128 line sums flush their 16-bit lanes at least once mid-line;
-    /// bright buffers push every lane towards its overflow bound.
+    /// Lines longer than 128 blocks of 16 pixels, so the NEON line sums
+    /// flush their 16-bit lanes at least once mid-line; bright buffers push
+    /// every lane towards its overflow bound.
     #[test]
     fn compute_color_matches_scalar_on_long_lines() {
         let mut rng = ChaCha8Rng::seed_from_u64(0x1086);
@@ -2892,7 +2460,7 @@ mod simd128_parity {
             let lines = random_lines(&mut rng, width as i32, height as i32);
             for sums in [None, Some(&sums)] {
                 let expected = fit_with::<Scalar>(&target, &current, sums, &lines, alpha);
-                let actual = fit_with::<Simd128>(&target, &current, sums, &lines, alpha);
+                let actual = fit_with::<Native>(&target, &current, sums, &lines, alpha);
                 assert_eq!(actual, expected, "alpha={alpha}");
             }
         }
@@ -2904,7 +2472,7 @@ mod simd128_parity {
         for (width, height) in sizes() {
             let target = random_buffer(&mut rng, width, height);
             let current = random_buffer(&mut rng, width, height);
-            let score = scalar::difference_full_raw(&target, &current);
+            let score = Scalar::difference_bytes(target.pixels(), current.pixels());
             for alpha in 1..=255 {
                 let lines = random_lines(&mut rng, width as i32, height as i32);
                 let color = Color::new(rng.random(), rng.random(), rng.random(), alpha);
@@ -2915,7 +2483,7 @@ mod simd128_parity {
                     let expected =
                         energy_with::<Scalar>(&target, &current, &lines, fit, score, limit);
                     let actual =
-                        energy_with::<Simd128>(&target, &current, &lines, fit, score, limit);
+                        energy_with::<Native>(&target, &current, &lines, fit, score, limit);
                     assert_eq!(actual, expected, "{width}x{height} {color:?} {limit:?}");
                 }
             }
@@ -2942,17 +2510,17 @@ mod simd128_parity {
                     // the length of both buffers.
                     unsafe {
                         assert_eq!(
-                            Simd128::line_sums(t_pix, c_pix, start, pixels),
+                            Native::line_sums(t_pix, c_pix, start, pixels),
                             Scalar::line_sums(t_pix, c_pix, start, pixels),
                             "{first} {pixels}"
                         );
                         assert_eq!(
-                            Simd128::line_error(t_pix, c_pix, start, pixels),
+                            Native::line_error(t_pix, c_pix, start, pixels),
                             Scalar::line_error(t_pix, c_pix, start, pixels),
                             "{first} {pixels}"
                         );
                         assert_eq!(
-                            Simd128::line_after(t_pix, c_pix, start, pixels, blend),
+                            Native::line_after(t_pix, c_pix, start, pixels, blend),
                             Scalar::line_after(t_pix, c_pix, start, pixels, blend),
                             "{first} {pixels} {color:?} {coverage}"
                         );
@@ -2962,16 +2530,17 @@ mod simd128_parity {
         }
     }
 
-    /// Lines of twice `AFTER_BLOCKS_PER_FLUSH` blocks of 16 pixels, so the
-    /// simd128 `line_after` flushes its 32-bit lanes mid-line, and would
-    /// overflow them with a constant above its bound (5504 blocks), and the
-    /// line sums flush their 16-bit lanes many times. A white target over a black
-    /// canvas, with an opaque black blend, puts every lane at its overflow
-    /// bound; [`compute_color_matches_scalar_on_long_lines`] cannot show a
-    /// wrong line sum there, since the fitted colour clamps to white.
+    /// Lines of twice 4096 blocks of 16 pixels and a tail: the simd128
+    /// `line_after` flushes its 32-bit lanes every 4096 blocks, mid-line,
+    /// and would overflow them with a constant above its bound (5504
+    /// blocks); the NEON line sums flush their 16-bit lanes every 128
+    /// blocks, many times. A white target over a black canvas, with an
+    /// opaque black blend, puts every lane at its overflow bound;
+    /// [`compute_color_matches_scalar_on_long_lines`] cannot show a wrong
+    /// line sum there, since the fitted colour clamps to white.
     #[test]
     fn line_kernels_match_scalar_past_the_flushes() {
-        let (width, height) = (2 * 16 * simd128::AFTER_BLOCKS_PER_FLUSH as u32 + 16 + 5, 2);
+        let (width, height) = (2 * 16 * 4096 + 16 + 5, 2);
         let target = Buffer::new_from_color(width, height, Color::new(255, 255, 255, 255));
         let mut current = Buffer::new_from_color(width, height, Color::new(0, 0, 0, 255));
         let (t_pix, c_pix) = (target.pixels(), current.pixels());
@@ -2981,15 +2550,15 @@ mod simd128_parity {
         unsafe {
             let white = 255 * u64::from(width);
             assert_eq!(
-                Simd128::line_sums(t_pix, c_pix, 0, pixels),
+                Native::line_sums(t_pix, c_pix, 0, pixels),
                 ([white; 3], [0; 3])
             );
             assert_eq!(
-                Simd128::line_sums(c_pix, t_pix, 0, pixels),
+                Native::line_sums(c_pix, t_pix, 0, pixels),
                 ([0; 3], [white; 3])
             );
             assert_eq!(
-                Simd128::line_after(t_pix, c_pix, 0, pixels, black),
+                Native::line_after(t_pix, c_pix, 0, pixels, black),
                 u64::from(width) * 3 * 255 * 255
             );
         }
@@ -3004,12 +2573,12 @@ mod simd128_parity {
                 // SAFETY: `start + pixels * 3` is within the two rows.
                 unsafe {
                     assert_eq!(
-                        Simd128::line_sums(t_pix, c_pix, start, pixels),
+                        Native::line_sums(t_pix, c_pix, start, pixels),
                         Scalar::line_sums(t_pix, c_pix, start, pixels),
                         "{start} {pixels}"
                     );
                     assert_eq!(
-                        Simd128::line_after(t_pix, c_pix, start, pixels, blend),
+                        Native::line_after(t_pix, c_pix, start, pixels, blend),
                         Scalar::line_after(t_pix, c_pix, start, pixels, blend),
                         "{start} {pixels} {color:?}"
                     );
@@ -3019,32 +2588,32 @@ mod simd128_parity {
     }
 
     #[test]
-    fn difference_full_raw_matches_scalar() {
+    fn difference_bytes_matches_scalar() {
         let mut rng = ChaCha8Rng::seed_from_u64(0xd1ff);
         for (width, height) in sizes() {
             let a = random_buffer(&mut rng, width, height);
             let b = random_buffer(&mut rng, width, height);
-            let expected = scalar::difference_full_raw(&a, &b);
-            let actual = simd128::difference_full_raw(&a, &b);
+            let expected = Scalar::difference_bytes(a.pixels(), b.pixels());
+            let actual = Native::difference_bytes(a.pixels(), b.pixels());
             assert_eq!(actual, expected, "{width}x{height}");
         }
     }
 
-    /// Buffers longer than `SQUARES_PER_BLOCK` 16-byte chunks, so the
-    /// simd128 sum flushes its 32-bit lanes mid-buffer; black against white
-    /// puts every lane at its overflow bound.
+    /// Buffers longer than 4096 16-byte chunks, so the NEON sum flushes its
+    /// 32-bit lanes mid-buffer; black against white puts every lane at its
+    /// overflow bound.
     #[test]
-    fn difference_full_raw_matches_scalar_on_large_extreme_buffers() {
+    fn difference_bytes_matches_scalar_on_large_extreme_buffers() {
         let (width, height) = (7_301, 9);
         let mut black = Buffer::new_from_color(width, height, Color::new(0, 0, 0, 255));
         let white = Buffer::new_from_color(width, height, Color::new(255, 255, 255, 255));
-        let actual = simd128::difference_full_raw(&black, &white);
+        let actual = Native::difference_bytes(black.pixels(), white.pixels());
         assert_eq!(actual, u64::from(width * height) * 3 * 255 * 255);
 
         let mut rng = ChaCha8Rng::seed_from_u64(0xb16);
         rng.fill(&mut black.pixels_mut()[..4096]);
-        let expected = scalar::difference_full_raw(&black, &white);
-        let actual = simd128::difference_full_raw(&black, &white);
+        let expected = Scalar::difference_bytes(black.pixels(), white.pixels());
+        let actual = Native::difference_bytes(black.pixels(), white.pixels());
         assert_eq!(actual, expected);
     }
 
@@ -3058,7 +2627,7 @@ mod simd128_parity {
                 let (term, keep) = (blend.terms[0], blend.keep);
                 for chunk in 0_u8..32 {
                     let current: [u8; 8] = std::array::from_fn(|lane| chunk * 8 + lane as u8);
-                    let simd = simd128::blend_chunk_u8x8(current, term, keep);
+                    let simd = simd::blend_chunk_u8x8(current, term, keep);
                     for lane in 0..8 {
                         let expected = blend_channel_scalar(current[lane], term, keep);
                         assert_eq!(

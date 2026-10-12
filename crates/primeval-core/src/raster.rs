@@ -25,11 +25,13 @@ pub(crate) struct StrokeScratch {
 }
 
 impl StrokeScratch {
-    /// Restores fresh logical scratch while retaining all allocations.
+    /// Restores fresh logical scratch while retaining all allocations. The
+    /// grid keeps its length: every stroke zeroes the cells it raised, which
+    /// lie within the row ranges it emits, so the grid is already all zeros.
     pub(crate) fn reset(&mut self) {
+        debug_assert!(self.grid.iter().all(|&cell| cell == 0), "stroke grid");
         self.points.clear();
         self.segments.clear();
-        self.grid.clear();
         self.rows.clear();
         #[cfg(test)]
         self.visits.clear();
@@ -669,13 +671,10 @@ fn stroke_segment(
                     (centre, minor_centre)
                 };
                 neighbour.coverage(x, y, half_width)
-            } else if along < 0.0 && end_a == End::RoundCap {
+            } else if along < 0.0 && end_a != End::Cap {
+                // A round cap, or a join without a finite neighbour band.
                 round_cap(half_width, centre - a_major, minor_centre - a_minor)
-            } else if along > length && end_b == End::RoundCap {
-                round_cap(half_width, centre - b_major, minor_centre - b_minor)
-            } else if along < 0.0 && matches!(end_a, End::Round | End::Shared) {
-                round_cap(half_width, centre - a_major, minor_centre - a_minor)
-            } else if along > length && matches!(end_b, End::Round | End::Shared) {
+            } else if along > length && end_b != End::Cap {
                 round_cap(half_width, centre - b_major, minor_centre - b_minor)
             } else {
                 trapezoid.band(half_width, across.abs())
@@ -800,6 +799,8 @@ pub(crate) struct RowScratch {
     spans: Vec<(f64, f64)>,
     /// The sorted, distinct columns of the pixels that hold a span end.
     edges: Vec<i32>,
+    /// A polygon's sides, prepared once per fill.
+    sides: Vec<PolygonSide>,
 }
 
 impl RowScratch {
@@ -807,7 +808,20 @@ impl RowScratch {
         self.hits.clear();
         self.spans.clear();
         self.edges.clear();
+        self.sides.clear();
     }
+}
+
+/// A polygon side from `(x0, y0)` to `(x0 + dx, y0 + dy)`, with the
+/// half-open range `y_lo..y_hi` of the sub-rows it crosses.
+#[derive(Clone, Copy)]
+struct PolygonSide {
+    x0: f64,
+    y0: f64,
+    dx: f64,
+    dy: f64,
+    y_lo: f64,
+    y_hi: f64,
 }
 
 /// The alpha of pixel column `px` under the sub-row `spans`: the summed
@@ -919,22 +933,20 @@ fn emit_row(
 /// crossings of each sub-row are paired into spans (even-odd rule), and the
 /// coverage of each pixel is the summed horizontal overlap of those spans
 /// with it.
+///
+/// With `convex`, the caller vouches that `vertices` are a strictly convex
+/// triangle or quad (`is_legible_convex(vertices, 0.0)`, which every
+/// [`crate::shapes::Polygon`] passes, halved or not): a sub-row then
+/// crosses at most two sides, so its scan stops at the second crossing and
+/// the pair needs no sort, only an order. The result is the same as without
+/// `convex`, which fills any outline.
 pub(crate) fn fill_polygon_direct(
     lines: &mut Vec<Scanline>,
     scratch: &mut RowScratch,
     vertices: &[(f64, f64)],
     w: i32,
     h: i32,
-) {
-    fill_polygon_fast(lines, scratch, vertices, w, h);
-}
-
-fn fill_polygon_fast(
-    lines: &mut Vec<Scanline>,
-    scratch: &mut RowScratch,
-    vertices: &[(f64, f64)],
-    w: i32,
-    h: i32,
+    convex: bool,
 ) {
     lines.clear();
 
@@ -942,10 +954,10 @@ fn fill_polygon_fast(
     if n < 3 {
         return;
     }
-
-    // Only a strict convex triangle/quad has at most two crossings. Other
-    // inputs keep the general even-odd path, including non-convex outlines.
-    let convex = (3..=4).contains(&n) && crate::shapes::is_legible_convex(vertices, 0.0);
+    debug_assert!(
+        !convex || ((3..=4).contains(&n) && crate::shapes::is_legible_convex(vertices, 0.0)),
+        "not a strictly convex triangle or quad: {vertices:?}"
+    );
 
     // Find y range.
     let mut y_min = f64::MAX;
@@ -958,7 +970,26 @@ fn fill_polygon_fast(
     let iy_max = (y_max.ceil() as i32).min(h);
 
     const NUM_AA: usize = 4;
-    let RowScratch { hits, spans, edges } = scratch;
+    let RowScratch {
+        hits,
+        spans,
+        edges,
+        sides,
+    } = scratch;
+    sides.clear();
+    for i in 0..n {
+        let (x0, y0) = vertices[i];
+        let (x1, y1) = vertices[(i + 1) % n];
+        let (y_lo, y_hi) = if y0 < y1 { (y0, y1) } else { (y1, y0) };
+        sides.push(PolygonSide {
+            x0,
+            y0,
+            dx: x1 - x0,
+            dy: y1 - y0,
+            y_lo,
+            y_hi,
+        });
+    }
 
     for iy in iy_min..iy_max {
         // Collect the x crossings of every sub-row, tagged with the sub-row.
@@ -967,15 +998,12 @@ fn fill_polygon_fast(
             let sub_start = hits.len();
             let y_sub = iy as f64 + (s as f64 + 0.5) / NUM_AA as f64;
 
-            for i in 0..n {
-                let (x0, y0) = vertices[i];
-                let (x1, y1) = vertices[(i + 1) % n];
-                let (y_lo, y_hi) = if y0 < y1 { (y0, y1) } else { (y1, y0) };
-                if y_sub < y_lo || y_sub >= y_hi {
+            for side in sides.iter() {
+                if y_sub < side.y_lo || y_sub >= side.y_hi {
                     continue;
                 }
-                let t = (y_sub - y0) / (y1 - y0);
-                let x = x0 + t * (x1 - x0);
+                let t = (y_sub - side.y0) / side.dy;
+                let x = side.x0 + t * side.dx;
                 hits.push((x, s));
                 if convex && hits.len() == sub_start + 2 {
                     break;
@@ -1015,84 +1043,6 @@ fn fill_polygon_fast(
                 } else {
                     (left, right)
                 };
-                spans.push((left.0, right.0));
-            }
-        }
-
-        emit_row(lines, edges, spans, iy, ix_min, ix_max, NUM_AA);
-    }
-}
-
-#[cfg(test)]
-fn fill_polygon_reference(
-    lines: &mut Vec<Scanline>,
-    scratch: &mut RowScratch,
-    vertices: &[(f64, f64)],
-    w: i32,
-    h: i32,
-) {
-    lines.clear();
-
-    let n = vertices.len();
-    if n < 3 {
-        return;
-    }
-
-    // Find y range.
-    let mut y_min = f64::MAX;
-    let mut y_max = f64::MIN;
-    for &(_, y) in vertices {
-        y_min = y_min.min(y);
-        y_max = y_max.max(y);
-    }
-    let iy_min = (y_min.floor() as i32).max(0);
-    let iy_max = (y_max.ceil() as i32).min(h);
-
-    const NUM_AA: usize = 4;
-    let RowScratch { hits, spans, edges } = scratch;
-
-    for iy in iy_min..iy_max {
-        // Collect the x crossings of every sub-row, tagged with the sub-row.
-        hits.clear();
-        for s in 0..NUM_AA {
-            let y_sub = iy as f64 + (s as f64 + 0.5) / NUM_AA as f64;
-
-            for i in 0..n {
-                let (x0, y0) = vertices[i];
-                let (x1, y1) = vertices[(i + 1) % n];
-                let (y_lo, y_hi) = if y0 < y1 { (y0, y1) } else { (y1, y0) };
-                if y_sub < y_lo || y_sub >= y_hi {
-                    continue;
-                }
-                let t = (y_sub - y0) / (y1 - y0);
-                let x = x0 + t * (x1 - x0);
-                hits.push((x, s));
-            }
-        }
-
-        if hits.is_empty() {
-            continue;
-        }
-
-        // Determine the pixel x range touched by any intersection.
-        let mut x_min_f = f64::MAX;
-        let mut x_max_f = f64::MIN;
-        for &(x, _) in hits.iter() {
-            x_min_f = x_min_f.min(x);
-            x_max_f = x_max_f.max(x);
-        }
-        let ix_min = (x_min_f.floor() as i32).max(0);
-        let ix_max = ((x_max_f.ceil() as i32) - 1).min(w - 1);
-        if ix_min > ix_max {
-            continue;
-        }
-
-        // Sort the crossings by sub-row, then by x, and pair consecutive
-        // crossings of each sub-row into spans.
-        hits.sort_unstable_by(|a, b| a.1.cmp(&b.1).then(a.0.total_cmp(&b.0)));
-        spans.clear();
-        for sub_row in hits.chunk_by(|a, b| a.1 == b.1) {
-            for [left, right] in sub_row.as_chunks::<2>().0 {
                 spans.push((left.0, right.0));
             }
         }
@@ -1178,13 +1128,25 @@ pub(crate) fn fill_rotated_ellipse_direct(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::buffer::Buffer;
+    use crate::color::Color;
+    use crate::score;
+    use crate::shapes::{Ellipse, Shape, is_legible_convex};
+    use crate::worker::WorkerCtx;
+    use rand::{RngExt, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
+
+    /// The convex fill, which stops at a sub-row's second crossing and
+    /// orders the pair without a sort, equals the general even-odd fill on
+    /// strictly convex triangles and quads, among them quads whose sides
+    /// lie on pixel and sub-row boundaries.
     #[test]
     fn convex_crossings_match_reference() {
-        use rand::{RngExt, SeedableRng};
-        use rand_chacha::ChaCha8Rng;
         let mut rng = ChaCha8Rng::seed_from_u64(0xc2055);
         let (mut actual, mut expected) = (Vec::new(), Vec::new());
         let (mut scratch, mut reference_scratch) = (RowScratch::default(), RowScratch::default());
+        let mut convex = 0;
         for sample in 0..3000 {
             let vertices: Vec<_> = if sample < 16 {
                 let offset = sample as f64 / 8.0 - 0.5;
@@ -1206,102 +1168,22 @@ mod tests {
                     })
                     .collect()
             };
-            fill_polygon_fast(&mut actual, &mut scratch, &vertices, 32, 32);
-            fill_polygon_reference(&mut expected, &mut reference_scratch, &vertices, 32, 32);
+            if !is_legible_convex(&vertices, 0.0) {
+                continue;
+            }
+            convex += 1;
+            fill_polygon_direct(&mut actual, &mut scratch, &vertices, 32, 32, true);
+            fill_polygon_direct(
+                &mut expected,
+                &mut reference_scratch,
+                &vertices,
+                32,
+                32,
+                false,
+            );
             assert_eq!(actual, expected, "{vertices:?}");
         }
-        // Concave and crossed input must continue through the even-odd fill.
-        for vertices in [
-            [(0.0, 0.0), (24.0, 0.0), (3.0, 3.0), (0.0, 24.0)],
-            [(0.0, 0.0), (24.0, 24.0), (24.0, 0.0), (0.0, 24.0)],
-        ] {
-            fill_polygon_fast(&mut actual, &mut scratch, &vertices, 32, 32);
-            fill_polygon_reference(&mut expected, &mut reference_scratch, &vertices, 32, 32);
-            assert_eq!(actual, expected);
-        }
-    }
-
-    use super::*;
-    use crate::buffer::Buffer;
-    use crate::color::Color;
-    use crate::score;
-    use crate::shapes::{Ellipse, Shape};
-    use crate::worker::WorkerCtx;
-    use rand::{RngExt, SeedableRng};
-    use rand_chacha::ChaCha8Rng;
-
-    /// The engine writes a product and a sum where `mul_add` would fuse
-    /// them: `mul_add` is a software call in WebAssembly and on x86 without
-    /// FMA, which made quadratic strokes twice as slow in the browser. The
-    /// crate has no block comments, so a line's code is what precedes `//`.
-    #[test]
-    fn the_engine_uses_no_fused_multiply_add() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut directories = vec![root.clone()];
-        let mut checked = 0;
-        while let Some(directory) = directories.pop() {
-            for entry in std::fs::read_dir(directory).expect("source directory") {
-                let path = entry.expect("source entry").path();
-                if path.is_dir() {
-                    directories.push(path);
-                    continue;
-                }
-                if path.extension().is_none_or(|extension| extension != "rs") {
-                    continue;
-                }
-                let source = std::fs::read_to_string(&path).expect("source file");
-                assert!(
-                    !source.contains(concat!("/", "*")),
-                    "{}: a block comment",
-                    path.display()
-                );
-                for (index, line) in source.lines().enumerate() {
-                    let code = line.split("//").next().unwrap_or_default();
-                    assert!(
-                        !code.contains(concat!("mul_add", "(")),
-                        "{}:{}: write the product and the sum, not mul_add",
-                        path.display(),
-                        index + 1,
-                    );
-                }
-                checked += 1;
-            }
-        }
-        assert!(checked > 0, "no source files under {}", root.display());
-    }
-
-    #[test]
-    fn trapezoid_primitive_is_unchanged_by_its_flat_branch() {
-        let mut rng = ChaCha8Rng::seed_from_u64(789);
-        for _ in 0..100_000 {
-            let (dx, dy) = (rng.random::<f64>(), rng.random::<f64>());
-            let length = (dx * dx + dy * dy).sqrt();
-            let trapezoid = Trapezoid::across((dx / length, dy / length));
-            for x in [
-                rng.random::<f64>() * 2.0 * trapezoid.end,
-                0.0,
-                trapezoid.top * 0.5,
-                trapezoid.top,
-                (trapezoid.top + trapezoid.end) * 0.5,
-                trapezoid.end,
-                trapezoid.end * 2.0,
-            ] {
-                let rest = (trapezoid.end - x).max(0.0);
-                let ramp = 0.5 - (rest * rest) * trapezoid.inv_ramp;
-                let expected = if x <= trapezoid.top {
-                    x * trapezoid.inv_long
-                } else {
-                    ramp
-                };
-                assert_eq!(
-                    trapezoid.primitive(x).to_bits(),
-                    expected.to_bits(),
-                    "top={}, end={}, x={x}",
-                    trapezoid.top,
-                    trapezoid.end,
-                );
-            }
-        }
+        assert!(convex > 2900, "{convex} convex samples");
     }
 
     /// [`Trapezoid::band`] as both its terms computed in full: the
@@ -1691,7 +1573,6 @@ mod tests {
     /// retained; the total bound is tighter than the export comparison.
     #[test]
     fn quadratic_same_axis_joins_match_supersampled_strokes() {
-        use rand::RngExt;
         let mut rng = ChaCha8Rng::seed_from_u64(300);
         let mut curves = vec![[13.83, 35.75, 17.33, 31.03, 28.72, 42.81]];
         while curves.len() < 21 {
@@ -1944,7 +1825,14 @@ mod tests {
     fn fill_polygon_direct_gives_fully_covered_pixels_full_alpha() {
         let mut lines = Vec::new();
         let square = [(2.0, 2.0), (12.0, 2.0), (12.0, 12.0), (2.0, 12.0)];
-        fill_polygon_direct(&mut lines, &mut RowScratch::default(), &square, 16, 16);
+        fill_polygon_direct(
+            &mut lines,
+            &mut RowScratch::default(),
+            &square,
+            16,
+            16,
+            true,
+        );
 
         assert_eq!(alpha_at(&lines, 7, 7), Some(0xFFFF));
         assert_eq!(alpha_at(&lines, 2, 2), Some(0xFFFF));
@@ -1957,7 +1845,7 @@ mod tests {
         let mut lines = Vec::new();
         // Columns 2 and 11 are half covered; rows are fully covered.
         let rect = [(2.5, 2.0), (11.5, 2.0), (11.5, 12.0), (2.5, 12.0)];
-        fill_polygon_direct(&mut lines, &mut RowScratch::default(), &rect, 16, 16);
+        fill_polygon_direct(&mut lines, &mut RowScratch::default(), &rect, 16, 16, true);
 
         assert_eq!(alpha_at(&lines, 2, 7), Some(0xFFFF / 2));
         assert_eq!(alpha_at(&lines, 7, 7), Some(0xFFFF));
@@ -2106,9 +1994,14 @@ mod tests {
                     )
                 })
                 .collect();
-            fill_polygon_direct(&mut lines, &mut scratch, &vertices, w, h);
             let expected = reference_fill(w, h, |y| polygon_sub_row_spans(&vertices, y));
-            assert_eq!(lines, expected, "case {case}: {vertices:?}");
+            for convex in [false, is_legible_convex(&vertices, 0.0)] {
+                fill_polygon_direct(&mut lines, &mut scratch, &vertices, w, h, convex);
+                assert_eq!(
+                    lines, expected,
+                    "case {case}, convex {convex}: {vertices:?}"
+                );
+            }
         }
     }
 

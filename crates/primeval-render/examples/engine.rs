@@ -304,7 +304,13 @@ impl Config {
                 pipeline.refits = Refits::Passes(refits);
                 pipeline.joint = Some(1);
             }
-            _ => pipeline.during = During::Never,
+            _ => {
+                // No final stage: the pipeline's refits and joint pass go
+                // unused, so clear them for the header to show what runs.
+                pipeline.during = During::Never;
+                pipeline.refits = Refits::Passes(0);
+                pipeline.joint = None;
+            }
         }
         if let Some(during) = self.during {
             pipeline.during = during;
@@ -555,6 +561,11 @@ enum Refine {
 }
 
 impl Refine {
+    /// Whether each checkpoint runs `approximate`'s final stage.
+    fn has_final_stage(self) -> bool {
+        matches!(self, Self::Final | Self::Joint(_))
+    }
+
     fn parse(value: &str) -> Result<Self, BoxError> {
         let invalid =
             || format!("--refine: expected end:P, every:K, final or joint:R, got {value}");
@@ -809,16 +820,14 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Config, BoxError
     if checkpoints.first() == Some(&0) {
         return Err("--steps: checkpoints must be positive".into());
     }
-    if iterations.is_some() && !matches!(refine, Refine::Final | Refine::Joint(_)) {
+    if iterations.is_some() && !refine.has_final_stage() {
         return Err("--iterations needs --refine final or joint:R".into());
     }
-    if (final_refits.is_some() || joint_scale.is_some())
-        && !matches!(refine, Refine::Final | Refine::Joint(_))
-    {
+    if (final_refits.is_some() || joint_scale.is_some()) && !refine.has_final_stage() {
         return Err("--final-refits and --joint-scale need --refine final or joint:R".into());
     }
     if let Some(option) = joint_option
-        && !matches!(refine, Refine::Final | Refine::Joint(_))
+        && !refine.has_final_stage()
         && !matches!(during, Some(During::Joint { .. }))
     {
         return Err(format!(
@@ -1118,17 +1127,7 @@ fn print_header(config: &Config) {
         println!(
             "- pipeline of {}: {}",
             shape.as_str(),
-            describe_pipeline(
-                {
-                    let mut pipeline = config.pipeline(shape);
-                    if !matches!(refine, Refine::Final | Refine::Joint(_)) {
-                        pipeline.refits = Refits::Passes(0);
-                        pipeline.joint = None;
-                    }
-                    pipeline
-                },
-                iterations
-            )
+            describe_pipeline(config.pipeline(shape), iterations)
         );
     }
     if let Some((rounds, candidates, age)) = config.effort {

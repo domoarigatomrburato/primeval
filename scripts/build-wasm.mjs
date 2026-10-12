@@ -190,7 +190,7 @@ export function cargoKernelTestCommand() {
       // message as it happens.
       "--nocapture",
     ],
-    env: { RUSTFLAGS: SIMD_RUSTFLAGS.join(" ") },
+    env: VARIANTS.single.env,
   };
 }
 

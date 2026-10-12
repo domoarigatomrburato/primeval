@@ -44,3 +44,10 @@ pub(crate) fn make_test_round(
 pub(crate) fn fixed_alpha(alpha: u8) -> Alpha {
     Alpha::Fixed(std::num::NonZeroU8::new(alpha).expect("non-zero alpha"))
 }
+
+/// The 64-bit FNV-1a digest of `bytes`, for the pinned digests of tests.
+pub(crate) fn fnv1a(bytes: impl IntoIterator<Item = u8>) -> u64 {
+    bytes.into_iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}

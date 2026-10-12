@@ -370,12 +370,14 @@ impl Shape {
             Self::Polygon(shape) => {
                 let vertices: [(f64, f64); 4] =
                     std::array::from_fn(|i| (half(shape.x[i]), half(shape.y[i])));
+                // Halving is exact, so the halved polygon is convex too.
                 crate::raster::fill_polygon_direct(
                     &mut worker.lines,
                     &mut worker.rows,
                     &vertices[..shape.order],
                     worker.width,
                     worker.height,
+                    true,
                 );
                 &worker.lines
             }
@@ -1479,18 +1481,10 @@ impl Polygon {
         is_legible_convex(&vertices[..self.order], TAN_MIN_ANGLE)
     }
 
-    #[cfg(test)]
-    fn is_valid_reference(&self) -> bool {
-        let vertices: [(f64, f64); 4] = std::array::from_fn(|i| (self.x[i], self.y[i]));
-        is_legible_convex(&vertices[..self.order], TAN_MIN_ANGLE)
-    }
-
-    /// Orientation of a valid polygon, using the full check's expression.
+    /// The orientation of the polygon, as [`is_legible_convex`] takes it.
     fn orientation(&self) -> f64 {
-        let n = self.order;
-        let cross = (self.x[1] - self.x[0]) * (self.y[n - 1] - self.y[0])
-            - (self.y[1] - self.y[0]) * (self.x[n - 1] - self.x[0]);
-        if cross < 0.0 { -1.0 } else { 1.0 }
+        let vertices: [(f64, f64); 4] = std::array::from_fn(|i| (self.x[i], self.y[i]));
+        orientation(&vertices[..self.order])
     }
 
     /// From a known-valid quad, moving vertex i changes only i and its two
@@ -1526,6 +1520,7 @@ impl Polygon {
             &vertices[..self.order],
             worker.width,
             worker.height,
+            true,
         );
         &worker.lines
     }
@@ -1592,9 +1587,7 @@ fn within_aspect(a: i32, b: i32) -> bool {
 pub(crate) fn is_legible_convex(vertices: &[(f64, f64)], tan_min_angle: f64) -> bool {
     debug_assert!((3..=4).contains(&vertices.len()));
     let n = vertices.len();
-    let ((px, py), (nx, ny), (qx, qy)) = (vertices[0], vertices[1], vertices[n - 1]);
-    let cross = (nx - px) * (qy - py) - (ny - py) * (qx - px);
-    let orientation = if cross < 0.0 { -1.0 } else { 1.0 };
+    let orientation = orientation(vertices);
     (0..n).all(|i| {
         legible_corner(
             vertices[(i + n - 1) % n],
@@ -1604,6 +1597,15 @@ pub(crate) fn is_legible_convex(vertices: &[(f64, f64)], tan_min_angle: f64) -> 
             tan_min_angle,
         )
     })
+}
+
+/// The orientation `s = ±1` of the polygon through `vertices`: the sign of
+/// the turn at the first vertex, `+1` when it is zero.
+fn orientation(vertices: &[(f64, f64)]) -> f64 {
+    let n = vertices.len();
+    let ((px, py), (nx, ny), (qx, qy)) = (vertices[0], vertices[1], vertices[n - 1]);
+    let cross = (nx - px) * (qy - py) - (ny - py) * (qx - px);
+    if cross < 0.0 { -1.0 } else { 1.0 }
 }
 
 /// Whether the corner at `p`, between `previous` and `next`, turns
@@ -1892,10 +1894,14 @@ impl EdgeWalker {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::test_util::{fnv1a, make_test_round};
+    use crate::util::sin_cos_degrees;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
+
     #[test]
     fn moved_polygon_corners_match_full_validity() {
-        use rand::{RngExt, SeedableRng};
-        use rand_chacha::ChaCha8Rng;
         let mut rng = ChaCha8Rng::seed_from_u64(0xc02e25);
         let mut valid = quad([(0.0, 0.0), (30.0, 0.0), (30.0, 30.0), (0.0, 30.0)]);
         for _ in 0..20000 {
@@ -1903,7 +1909,7 @@ mod tests {
             let mut moved = valid;
             moved.x[i] += rng.random_range(-40.0..40.0);
             moved.y[i] += rng.random_range(-40.0..40.0);
-            let expected = moved.is_valid_reference();
+            let expected = moved.is_valid();
             assert_eq!(
                 moved.valid_after_move(i, valid.orientation()),
                 expected,
@@ -1921,21 +1927,14 @@ mod tests {
             moved.y[3] = candidate.y[3];
             assert_eq!(
                 moved.valid_after_move(3, start.orientation()),
-                moved.is_valid_reference()
+                moved.is_valid()
             );
-            assert_eq!(moved.is_valid_reference(), degrees > 15.0);
+            assert_eq!(moved.is_valid(), degrees > 15.0);
             let mut triangle = moved;
             triangle.order = 3;
-            assert_eq!(
-                triangle.valid_after_move(1, 1.0),
-                triangle.is_valid_reference()
-            );
+            assert_eq!(triangle.valid_after_move(1, 1.0), triangle.is_valid());
         }
     }
-
-    use super::*;
-    use crate::test_util::make_test_round;
-    use crate::util::sin_cos_degrees;
 
     #[test]
     fn the_aspect_cap_is_eight_to_one_either_way() {
@@ -1944,7 +1943,7 @@ mod tests {
         assert!(!within_aspect(1, 9) && !within_aspect(9, 1) && !within_aspect(4, 33));
     }
 
-    fn round(w: u32, h: u32) -> (WorkerCtx<rand_chacha::ChaCha8Rng>, SearchRound<'static>) {
+    fn round(w: u32, h: u32) -> (WorkerCtx<ChaCha8Rng>, SearchRound<'static>) {
         make_test_round(w, h, 7)
     }
 
@@ -2481,13 +2480,6 @@ mod tests {
         }
     }
 
-    /// The 64-bit FNV-1a digest of `text`.
-    fn fnv1a(text: &str) -> u64 {
-        text.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
-            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
-        })
-    }
-
     /// With the width fixed at 2 px, random quadratics and their moves draw
     /// the same random streams and make the same shapes as before the
     /// width became searchable: the digest was recorded before that change,
@@ -2514,7 +2506,7 @@ mod tests {
             }
         }
         trace.push_str(&format!("{}", worker.rng.random::<u64>()));
-        assert_eq!(fnv1a(&trace), 12_365_064_046_449_991_623);
+        assert_eq!(fnv1a(trace.bytes()), 12_365_064_046_449_991_623);
     }
 
     #[test]
@@ -2802,15 +2794,8 @@ mod tests {
     #[test]
     fn gaussian_samples_are_pinned() {
         let mut rng = crate::rng::create_rng(0x901a);
-        let digest = (0..1000).fold(0xcbf2_9ce4_8422_2325_u64, |hash, _| {
-            gaussian_sample(&mut rng, 1.0)
-                .to_bits()
-                .to_le_bytes()
-                .iter()
-                .fold(hash, |hash, byte| {
-                    (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
-                })
-        });
+        let digest =
+            fnv1a((0..1000).flat_map(|_| gaussian_sample(&mut rng, 1.0).to_bits().to_le_bytes()));
         assert_eq!(digest, 3_848_654_534_955_378_079);
     }
 

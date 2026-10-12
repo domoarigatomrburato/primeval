@@ -537,6 +537,39 @@ impl<F: Real> Edge<F> {
         self.nx * x + self.ny * y + self.c
     }
 
+    /// The ramp test: whether the signed distance `d` is exactly at an
+    /// endpoint `±half_sum` of an axis-aligned edge's ramp (`narrow` is 0),
+    /// where `F` has a kink. The derivative paths use the mean of its two
+    /// one-sided slopes there ([`Self::cdf_grad`]).
+    #[inline]
+    fn at_ramp_end(&self, d: F) -> bool {
+        self.inv_narrow == F::of(0.0) && d.abs() == self.half_sum
+    }
+
+    /// The exact-axis test's offset: for an edge along an axis, the signed
+    /// offset of `(x, y)` from it, positive inside, from its start alone,
+    /// so it is exact where the normalised [`Self::distance`] can lose an
+    /// ulp; `None` for an oblique edge.
+    #[inline]
+    fn axial_offset(&self, x: F, y: F) -> Option<F> {
+        let zero = F::of(0.0);
+        if self.ex == zero && self.ey != zero {
+            Some(if self.nx < zero {
+                self.px - x
+            } else {
+                x - self.px
+            })
+        } else if self.ey == zero && self.ex != zero {
+            Some(if self.ny < zero {
+                self.py - y
+            } else {
+                y - self.py
+            })
+        } else {
+            None
+        }
+    }
+
     /// `F(d)`: piecewise quadratic, `C¹` except at the two endpoints
     /// of an axis-aligned linear ramp.
     #[inline]
@@ -561,7 +594,7 @@ impl<F: Real> Edge<F> {
     fn cdf_grad(&self, d: F) -> EdgeValue<F> {
         let (h, k) = (self.half_sum, self.half_diff);
         let zero = F::of(0.0);
-        if self.inv_narrow == zero && (d == -h || d == h) {
+        if self.at_ramp_end(d) {
             // At an axis-aligned ramp's kink use the mean of its two
             // one-sided derivatives, keeping the forward value exact.
             EdgeValue {
@@ -864,6 +897,11 @@ impl<'a, F: Real> Prepared<'a, F> {
         self.y0.max(y0)..self.y1.min(y1).max(self.y0.max(y0))
     }
 
+    /// The number of pixels in the bounding box.
+    fn box_pixels(&self) -> usize {
+        (self.x1 - self.x0) * (self.y1 - self.y0)
+    }
+
     /// The coverage of the pixel `(x, y)` inside the bounding box, with
     /// `fy` the row as a float, by the layer's [`Cover`].
     #[cfg(test)]
@@ -1161,7 +1199,7 @@ impl<'a, F: Real> Prepared<'a, F> {
         let (mut cutting, mut last) = (0, 0);
         for (e, &d) in d.iter().enumerate() {
             let reach = self.edges[e].half_sum;
-            let kink = gradient && self.edges[e].inv_narrow == F::of(0.0) && d.abs() == reach;
+            let kink = gradient && self.edges[e].at_ramp_end(d);
             if d <= -reach && !kink {
                 return None;
             }
@@ -1223,6 +1261,30 @@ impl<'a, F: Real> Prepared<'a, F> {
         polygon
     }
 
+    /// Adds to `grad` the first variation of the coverage by a clipped
+    /// boundary of edge `e` of `N` that spans `low..high` along it and moves
+    /// by `length` ([`Self::edge_coverage_grad`]): along the outward normal,
+    /// `to_q = length · (high + low) / (2 |PQ|)` per unit of its end `Q` and
+    /// `length − to_q` per unit of its start `P`.
+    #[inline]
+    fn move_boundary<const N: usize>(
+        &self,
+        grad: &mut [F; COORDS],
+        e: usize,
+        length: F,
+        (low, high): (F, F),
+    ) {
+        let edge = &self.edges[e];
+        let to_q = F::of(0.5) * length * (high + low) * edge.inv_l;
+        let to_p = length - to_q;
+        let (ox, oy) = (-edge.nx * self.inv_area, -edge.ny * self.inv_area);
+        let (p, q) = (e, (e + 1) % N);
+        grad[2 * p] += ox * to_p;
+        grad[2 * p + 1] += oy * to_p;
+        grad[2 * q] += ox * to_q;
+        grad[2 * q + 1] += oy * to_q;
+    }
+
     /// The coverage of the pixel centred at `(x, y)` by the first `N`
     /// edges, three or four, and its gradient with respect to the
     /// vertex coordinates, or `None` where the coverage is zero.
@@ -1247,22 +1309,7 @@ impl<'a, F: Real> Prepared<'a, F> {
             // ulp even on an exact axis-aligned boundary (e.g. length 98).
             // Recognise only exact geometric kinks, from the endpoint,
             // and use the ramp's endpoint on the derivative path.
-            let axial = if edge.ex == zero && edge.ey != zero {
-                Some(if edge.nx < zero {
-                    edge.px - x
-                } else {
-                    x - edge.px
-                })
-            } else if edge.ey == zero && edge.ex != zero {
-                Some(if edge.ny < zero {
-                    edge.py - y
-                } else {
-                    y - edge.py
-                })
-            } else {
-                None
-            };
-            if let Some(axial) = axial
+            if let Some(axial) = edge.axial_offset(x, y)
                 && axial.abs() == self.half
             {
                 geometric_kink = true;
@@ -1299,9 +1346,10 @@ impl<'a, F: Real> Prepared<'a, F> {
             }
             _ => {
                 let polygon = self.clip(&d);
-                let kink = d.iter().enumerate().any(|(e, &d)| {
-                    self.edges[e].inv_narrow == zero && d.abs() == self.edges[e].half_sum
-                });
+                let kink = d
+                    .iter()
+                    .enumerate()
+                    .any(|(e, &d)| self.edges[e].at_ramp_end(d));
                 // Including an endpoint in the derivative's clip can
                 // change the last bit of a nearly tangent corner's area.
                 // Keep the original forward path's value bit for bit.
@@ -1327,7 +1375,7 @@ impl<'a, F: Real> Prepared<'a, F> {
                     }
                     let j = if i + 1 == polygon.len { 0 } else { i + 1 };
                     let edge = &self.edges[e];
-                    if edge.inv_narrow == zero && d[e].abs() == edge.half_sum {
+                    if edge.at_ramp_end(d[e]) {
                         continue;
                     }
                     let (tx, ty) = (edge.ex * edge.inv_l, edge.ey * edge.inv_l);
@@ -1336,14 +1384,7 @@ impl<'a, F: Real> Prepared<'a, F> {
                     let s1 = centre + polygon.u[j] * tx + polygon.v[j] * ty;
                     let (low, high) = if s0 <= s1 { (s0, s1) } else { (s1, s0) };
                     let length = high - low;
-                    let to_q = F::of(0.5) * length * (high + low) * edge.inv_l;
-                    let to_p = length - to_q;
-                    let (ox, oy) = (-edge.nx * self.inv_area, -edge.ny * self.inv_area);
-                    let (p, q) = (e, (e + 1) % N);
-                    grad[2 * p] += ox * to_p;
-                    grad[2 * p + 1] += oy * to_p;
-                    grad[2 * q] += ox * to_q;
-                    grad[2 * q + 1] += oy * to_q;
+                    self.move_boundary::<N>(&mut grad, e, length, (low, high));
                 }
                 // At a kink the clipped boundary may coincide with a
                 // filter-square side (or collapse to it). It still moves
@@ -1351,7 +1392,7 @@ impl<'a, F: Real> Prepared<'a, F> {
                 // portion retained by the other edges, including corners.
                 for (e, &distance) in d.iter().enumerate() {
                     let edge = &self.edges[e];
-                    if edge.inv_narrow != zero || distance.abs() != edge.half_sum {
+                    if !edge.at_ramp_end(distance) {
                         continue;
                     }
                     let (tx, ty) = (edge.ex * edge.inv_l, edge.ey * edge.inv_l);
@@ -1372,14 +1413,7 @@ impl<'a, F: Real> Prepared<'a, F> {
                         continue;
                     }
                     let length = F::of(0.5) * (high - low);
-                    let to_q = F::of(0.5) * length * (high + low) * edge.inv_l;
-                    let to_p = length - to_q;
-                    let (ox, oy) = (-edge.nx * self.inv_area, -edge.ny * self.inv_area);
-                    let (p, q) = (e, (e + 1) % N);
-                    grad[2 * p] += ox * to_p;
-                    grad[2 * p + 1] += oy * to_p;
-                    grad[2 * q] += ox * to_q;
-                    grad[2 * q + 1] += oy * to_q;
+                    self.move_boundary::<N>(&mut grad, e, length, (low, high));
                 }
                 Some((coverage, grad))
             }
@@ -1724,7 +1758,7 @@ impl<F: Real> Workspace<F> {
         }
         self.cached.clear();
         self.cached.extend(layers.iter().map(|layer| {
-            let bytes = (layer.x1 - layer.x0) * (layer.y1 - layer.y0) * size_of::<F>();
+            let bytes = layer.box_pixels() * size_of::<F>();
             let cached = layer.kind != Kind::Masked && bytes <= remaining;
             if cached {
                 remaining -= bytes;
@@ -3587,7 +3621,7 @@ pub(super) mod tests {
         prepare(scene, layers)
             .iter()
             .filter(|p| p.kind != Kind::Masked)
-            .map(|p| (p.x1 - p.x0) * (p.y1 - p.y0))
+            .map(Prepared::box_pixels)
             .sum()
     }
 
@@ -3624,7 +3658,7 @@ pub(super) mod tests {
         // admit the small layer after it; a mask consumes no budget.
         let mut layers = vec![rect(3.0), fixed[0], rect(30.0), rect(3.0), rect(3.0)];
         let small = Prepared::new(&layers[0], &scene);
-        let small_pixels = (small.x1 - small.x0) * (small.y1 - small.y0);
+        let small_pixels = small.box_pixels();
         let budget = 2 * small_pixels * size_of::<f64>();
         let expected = vec![true, false, false, true, false];
         let cached_pixels = 2 * small_pixels;
@@ -3681,16 +3715,7 @@ pub(super) mod tests {
                 )
             );
             let expected = gradients(&scene, &layers, &mut Workspace::default());
-            assert_eq!(
-                actual
-                    .iter()
-                    .map(|a| a.map(f64::to_bits))
-                    .collect::<Vec<_>>(),
-                expected
-                    .iter()
-                    .map(|a| a.map(f64::to_bits))
-                    .collect::<Vec<_>>()
-            );
+            assert_gradient_bits(&actual, &expected, format_args!("change {change}"));
         }
         // A loss on a shorter canvas must not discard the old cache's bands.
         scene.height -= 17;
@@ -3700,16 +3725,7 @@ pub(super) mod tests {
         let actual = gradients(&scene, &layers, &mut work);
         assert_eq!(evaluations(&work), (0, moving_pixels(&scene, &layers)));
         let expected = gradients(&scene, &layers, &mut Workspace::default());
-        assert_eq!(
-            actual
-                .iter()
-                .map(|a| a.map(f64::to_bits))
-                .collect::<Vec<_>>(),
-            expected
-                .iter()
-                .map(|a| a.map(f64::to_bits))
-                .collect::<Vec<_>>()
-        );
+        assert_gradient_bits(&actual, &expected, "a loss on a shorter canvas");
         // The key uses f64 bits even for geometry prepared in f32, and
         // includes unused parameters and the distinction between ±0.
         let single = to_single(&scene);
@@ -3727,6 +3743,21 @@ pub(super) mod tests {
         fixed.params[COORDS - 1] = -0.0;
         gradients(&single, &layers, &mut narrow);
         assert_eq!(evaluations(&narrow).0, moving_pixels(&single, &layers));
+    }
+
+    #[track_caller]
+    fn assert_gradient_bits(
+        actual: &[[f64; PARAMS]],
+        expected: &[[f64; PARAMS]],
+        context: impl std::fmt::Display,
+    ) {
+        let bits = |gradients: &[[f64; PARAMS]]| {
+            gradients
+                .iter()
+                .map(|g| g.map(f64::to_bits))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(bits(actual), bits(expected), "{context}");
     }
 
     fn assert_layer_bits(a: &[Layer], b: &[Layer]) {
@@ -3759,16 +3790,7 @@ pub(super) mod tests {
             assert_layer_bits(&layers, &reference);
             let actual = gradients(scene, &layers, &mut work);
             let expected = gradients(scene, &reference, &mut Workspace::default());
-            assert_eq!(
-                actual
-                    .iter()
-                    .map(|a| a.map(f64::to_bits))
-                    .collect::<Vec<_>>(),
-                expected
-                    .iter()
-                    .map(|a| a.map(f64::to_bits))
-                    .collect::<Vec<_>>()
-            );
+            assert_gradient_bits(&actual, &expected, format_args!("iteration {iteration}"));
             assert_eq!(
                 loss(scene, &layers, &mut work).to_bits(),
                 loss(scene, &reference, &mut Workspace::default()).to_bits()
@@ -3807,7 +3829,7 @@ pub(super) mod tests {
         assert!(grad.iter().any(|&v| v != 0.0));
         // Enough for the first moving layer, but not the whole stack.
         let first = Prepared::new(&layers[0], &scene);
-        let pixels = (first.x1 - first.x0) * (first.y1 - first.y0);
+        let pixels = first.box_pixels();
         for budget in [0, pixels * size_of::<f64>(), usize::MAX] {
             reused_passes(&scene, &layers, budget);
         }
@@ -3844,18 +3866,7 @@ pub(super) mod tests {
         for threads in [2, 4, 8] {
             let other = run(threads);
             assert_eq!(one.0.to_bits(), other.0.to_bits(), "{threads} threads");
-            assert_eq!(
-                one.1
-                    .iter()
-                    .map(|g| g.map(f64::to_bits))
-                    .collect::<Vec<_>>(),
-                other
-                    .1
-                    .iter()
-                    .map(|g| g.map(f64::to_bits))
-                    .collect::<Vec<_>>(),
-                "{threads} threads"
-            );
+            assert_gradient_bits(&one.1, &other.1, format_args!("{threads} threads"));
             assert_layer_bits(&one.2, &other.2);
         }
     }

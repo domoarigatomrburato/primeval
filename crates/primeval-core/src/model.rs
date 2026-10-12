@@ -1,16 +1,15 @@
 use crate::alpha::Alpha;
-use crate::coarse::Coarse;
 #[cfg(any(test, feature = "lab"))]
 use crate::drawing::LineCap;
 use crate::drawing::{Drawing, DrawnShape};
 use crate::error_grid::ErrorGrid;
-use crate::prefix::RowChanges;
 use crate::refine::RefineEffort;
 use crate::score;
 use crate::shapes::{Shape, ShapeKind};
 use crate::state::State;
 use crate::worker::{RoundEffort, SearchRound, WorkerCtx};
 use crate::{Buffer, Color};
+use canvas::Canvas;
 use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
 
@@ -44,50 +43,39 @@ struct Effort {
 }
 
 impl Effort {
-    /// Every kind runs 16 rounds, with candidate and age multiples of 1.
-    /// The actual per-kind candidates, climb ages and seeds belong to
-    /// [`RoundEffort::of`]; only the lab's `Model::set_search_effort`
-    /// changes these multiples.
-    ///
-    /// The measured defaults trade invisible quality differences for speed:
-    /// together with the cheaper rotated-rectangle final joint stage, they
-    /// save 10–12% at both 10 threads on the default corpus and 1 thread on
-    /// the two paintings. See [`RoundEffort::of`] for each kind's budgets,
-    /// time ratios and quality changes.
+    /// Every kind runs 16 rounds, with candidate and age multiples of 1:
+    /// each kind's own budgets, and their measurements, are
+    /// [`RoundEffort::of`]'s. Only the lab's `Model::set_search_effort`
+    /// changes these.
     ///
     /// Earlier measurements returned polygons, rotated ellipses and `any`
-    /// from 32 to 16 rounds because the extra quality cost too much time;
-    /// quadratics retain their longer climb and two seeds
+    /// from 32 to 16 rounds because the extra quality cost too much time
     /// (`docs/algorithm-leap-review-2026-10-07.md`).
-    const fn of(_kind: ShapeKind) -> Self {
-        Self {
-            rounds: 16,
-            candidates: 1,
-            age: 1,
-        }
-    }
+    const DEFAULT: Self = Self {
+        rounds: 16,
+        candidates: 1,
+        age: 1,
+    };
 }
 
 /// Lab only: the settings of each search round of [`Model::step`] that the
 /// lab hook `Model::set_search` overrides; `None` keeps the kind's
-/// default. Public only in the lab build. Not part of the supported API.
+/// default, [`RoundEffort::of`]'s. Public only in the lab build. Not part
+/// of the supported API.
 #[cfg_attr(not(feature = "lab"), allow(unreachable_pub))]
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Search {
     /// How many of the round's best random candidates are climbed, each in
-    /// turn, the lowest climb winning: by default 1, and 2 for quadratics.
-    /// Capped at 128 for kinds that rank coarsely (`any`, ellipses, circles,
-    /// rotated ellipses and polygons), since only that many are rescored
-    /// at full resolution.
+    /// turn, the lowest climb winning. Capped at 128 for the kinds that
+    /// [rank coarsely](ShapeKind::ranks_coarsely), since only that many are
+    /// rescored at full resolution.
     pub seeds: Option<usize>,
-    /// The random candidates of the round: by default 500 for circles,
-    /// rotated ellipses and quadratics, and 1000 for the other kinds.
+    /// The random candidates of the round.
     pub candidates: Option<usize>,
     /// The climb age, the consecutive rejected moves that stop a climb.
-    /// Replaces the kind's default outright: 75 for triangles, polygons
-    /// and circles, 200 for quadratics, and 100 for the other kinds.
-    /// Only `Model::set_search_effort`'s age multiple still multiplies it.
+    /// Replaces the kind's default outright; only
+    /// `Model::set_search_effort`'s age multiple still multiplies it.
     pub age: Option<usize>,
 }
 
@@ -128,15 +116,14 @@ impl Default for ModelOptions {
 pub struct Model {
     background: Color,
     target: Buffer,
-    current: Buffer,
-    /// Raw squared difference between `current` and `target`.
+    /// The painted canvas, with the coarse copy that follows it.
+    canvas: Canvas,
+    /// Raw squared difference between the canvas and `target`.
     score: u64,
     history: Vec<CommittedShape>,
+    /// The error grid of the canvas, brought up to date with it by
+    /// [`Model::prepare_grid`] before each step reads it.
     error_grid: ErrorGrid,
-    dirty: RowChanges,
-    /// The half-resolution copy the random phase scores against, for
-    /// targets of at least [`crate::coarse::MIN_SIDE`] on both sides.
-    coarse: Option<Coarse>,
     seed: u64,
     /// Refit passes run so far, the pass index of the next
     /// [`Model::refine`]'s random streams.
@@ -149,9 +136,9 @@ pub struct Model {
     scratch: WorkerCtx<ChaCha8Rng>,
     /// One retained scratch worker per indexed greedy round.
     workers: Vec<WorkerCtx<ChaCha8Rng>>,
-    /// The search effort of [`Model::step`] for every kind, set only by
-    /// the lab hook; otherwise each kind's [`Effort::of`].
-    effort: Option<Effort>,
+    /// The search effort of [`Model::step`] for every kind:
+    /// [`Effort::DEFAULT`] unless the lab hook set another.
+    effort: Effort,
     /// The settings of every search round of [`Model::step`]: each kind's
     /// defaults unless the lab hook set others.
     search: Search,
@@ -182,9 +169,8 @@ impl Model {
             target_width >= 2 && target_height >= 2,
             "the engine needs a target of at least 2 x 2 pixels"
         );
-        let current = Buffer::new_from_color(target_width, target_height, background);
-        let score = score::difference_full_raw(&target, &current);
-        let coarse = Coarse::new(&target, &current);
+        let canvas = Canvas::new(&target, background);
+        let score = score::difference_full_raw(&target, canvas.buffer());
         let seed = options.seed.unwrap_or_else(crate::util::entropy_seed);
         let scratch = WorkerCtx::new(
             target_width as i32,
@@ -195,7 +181,7 @@ impl Model {
         Self {
             background,
             target,
-            current,
+            canvas,
             score,
             history: Vec::new(),
             error_grid: ErrorGrid::new(
@@ -204,13 +190,11 @@ impl Model {
                 options.grid_cols,
                 options.grid_rows,
             ),
-            dirty: RowChanges::All,
-            coarse,
             seed,
             passes: 0,
             scratch,
             workers: Vec::new(),
-            effort: None,
+            effort: Effort::DEFAULT,
             search: Search::default(),
             refine_effort: RefineEffort::DEFAULT,
             #[cfg(test)]
@@ -225,7 +209,7 @@ impl Model {
     fn search_round_effort(&self, kind: ShapeKind) -> (u64, RoundEffort) {
         let default = RoundEffort::of(kind);
         let search = self.search;
-        let effort = self.effort.unwrap_or(Effort::of(kind));
+        let effort = self.effort;
         (
             effort.rounds,
             RoundEffort {
@@ -251,16 +235,12 @@ impl Model {
     pub fn step(&mut self, kind: ShapeKind, alpha: Alpha) -> u64 {
         let (rounds, effort) = self.search_round_effort(kind);
         self.prepare_grid();
-        let coarse_round = if kind.ranks_coarsely() {
-            self.coarse
-                .as_mut()
-                .map(|coarse| coarse.round(&self.current))
-        } else {
-            None
-        };
+        // Only the kinds that rank coarsely read the coarse copy, so only
+        // they pay for syncing it.
+        let (current, coarse_round) = self.canvas.search_view(kind.ranks_coarsely());
         let round = SearchRound {
             target: &self.target,
-            current: &self.current,
+            current,
             error_grid: &self.error_grid,
             score: self.score,
             coarse: coarse_round.as_ref(),
@@ -301,57 +281,6 @@ impl Model {
         evaluations
     }
 
-    #[cfg(test)]
-    fn step_reference(&mut self, kind: ShapeKind, alpha: Alpha) -> u64 {
-        let (rounds, effort) = self.search_round_effort(kind);
-        self.prepare_grid();
-        let coarse_round = if kind.ranks_coarsely() {
-            self.coarse
-                .as_mut()
-                .map(|coarse| coarse.round(&self.current))
-        } else {
-            None
-        };
-        let round = SearchRound {
-            target: &self.target,
-            current: &self.current,
-            error_grid: &self.error_grid,
-            score: self.score,
-            coarse: coarse_round.as_ref(),
-        };
-        let seed = self.seed;
-        // Each step commits exactly one shape, so this is the step index.
-        let step = self.history.len() as u64;
-        let scratch = &self.scratch;
-        #[cfg(test)]
-        let pruning = self.pruning;
-        let results: Vec<(State, u64)> = (0..rounds)
-            .into_par_iter()
-            .map_init(
-                || scratch.like(crate::rng::round_rng(seed, step, 0)),
-                |worker, index| {
-                    worker.rng = crate::rng::round_rng(seed, step, index);
-                    #[cfg(test)]
-                    {
-                        worker.pruning = pruning;
-                    }
-                    worker.counted(|worker| worker.search_round(&round, kind, alpha, effort))
-                },
-            )
-            .collect();
-
-        let evaluations = results.iter().map(|(_, evaluations)| evaluations).sum();
-        // `collect` keeps round order and `min_by_key` returns the first of
-        // equal minima, so ties go to the lowest round index.
-        let (best, _) = results
-            .into_iter()
-            .min_by_key(|(state, _)| state.cached_energy.unwrap_or(u64::MAX))
-            .expect("a step always runs at least one round");
-
-        self.add(best.shape, best.alpha);
-        evaluations
-    }
-
     /// Lab only: makes every later [`Model::step`] run `rounds` search
     /// rounds instead of 16, each sampling `candidates` times as many
     /// random candidates and climbing until `age` times as many moves in a
@@ -365,11 +294,11 @@ impl Model {
             rounds > 0 && candidates > 0 && age > 0,
             "effort must be positive"
         );
-        self.effort = Some(Effort {
+        self.effort = Effort {
             rounds,
             candidates,
             age,
-        });
+        };
     }
 
     /// Lab only: makes every later [`Model::step`] search with `search`:
@@ -435,10 +364,12 @@ impl Model {
     /// has another size, background or number of shapes, moves a shape
     /// the joint optimisation keeps fixed, or has a shape that does not
     /// convert into a valid one of its kind. Converted positions must be
-    /// within 16 px of the canvas, and sides, radii and stroke widths at
-    /// most four times the canvas's longer side plus that margin, which no
-    /// move produces; all values must be finite. Continuous polygons and rotated ellipses also take joint
-    /// positions exported 0.5 px above those pixel-centre bounds.
+    /// within 16 px of the canvas. With `side` the canvas's longer side,
+    /// sides, radii and stroke widths must be at most `4 × (side + 16)`,
+    /// which no move produces, and a rotated rectangle's sides at most
+    /// `side + 16`; all values must be finite. Continuous polygons and
+    /// rotated ellipses also take joint positions exported 0.5 px above
+    /// those pixel-centre bounds.
     ///
     /// Every colour, opacity included, comes from `drawing`, and every
     /// shape is converted back into the engine's own:
@@ -582,44 +513,24 @@ impl Model {
     /// `score` its score ([`Self::repaint`]).
     fn commit(&mut self, history: Vec<CommittedShape>, current: Buffer, score: u64) {
         self.history = history;
-        self.current = current;
+        self.canvas.replace(current);
         self.score = score;
-        self.invalidate(RowChanges::All);
     }
 
+    /// Brings the error grid up to date with the canvas.
     fn prepare_grid(&mut self) {
-        self.error_grid
-            .update(&self.target, &self.current, std::mem::take(&mut self.dirty));
-    }
-
-    fn invalidate(&mut self, changes: RowChanges) {
-        self.dirty.include(changes);
-        if let Some(coarse) = &mut self.coarse {
-            coarse.invalidate(changes);
-        }
+        self.canvas.update_grid(&self.target, &mut self.error_grid);
     }
 
     /// Paints `shape` at `alpha`, which must be `1..=255`.
     fn add(&mut self, shape: Shape, alpha: u8) {
         debug_assert!(alpha > 0, "alpha must be non-zero");
         let lines = shape.rasterize(&mut self.scratch);
-        let fit = score::fit(&self.target, &self.current, None, lines, i32::from(alpha));
-        let score = score::energy(&self.target, &self.current, lines, fit, self.score);
-        score::draw_lines(&mut self.current, fit.color, lines);
-        let mut changes = RowChanges::Clean;
-        for line in lines {
-            if crate::scanline::clamp_line(
-                line,
-                self.current.width() as i32,
-                self.current.height() as i32,
-            )
-            .is_some()
-            {
-                changes.include(RowChanges::rows(line.y as u32, line.y as u32 + 1));
-            }
-        }
+        let current = self.canvas.buffer();
+        let fit = score::fit(&self.target, current, None, lines, i32::from(alpha));
+        let score = score::energy(&self.target, current, lines, fit, self.score);
+        self.canvas.draw(fit.color, lines);
         self.score = score;
-        self.invalidate(changes);
         self.history.push(CommittedShape {
             shape,
             color: fit.color,
@@ -631,7 +542,7 @@ impl Model {
     /// `1.0` is black against white.
     #[must_use]
     pub fn score_f64(&self) -> f64 {
-        score::raw_score_to_normalized(self.score, self.current.width(), self.current.height())
+        score::raw_score_to_normalized(self.score, self.target.width(), self.target.height())
     }
 
     /// The most recently committed shape, as the last shape of
@@ -678,10 +589,113 @@ impl Model {
     }
 }
 
+/// The canvas behind its only writers, in a module of its own so that
+/// nothing else can write its pixels without recording the rows.
+mod canvas {
+    use crate::coarse::Coarse;
+    use crate::error_grid::ErrorGrid;
+    use crate::prefix::RowChanges;
+    use crate::scanline::{Scanline, clamp_line};
+    use crate::score;
+    use crate::worker::SearchRound;
+    use crate::{Buffer, Color};
+
+    /// The model's canvas, written only through [`Canvas::draw`] and
+    /// [`Canvas::replace`], which record the rows they change: the error
+    /// grid and the coarse copy catch up on those rows lazily, when they
+    /// are next read.
+    #[derive(Clone)]
+    pub(super) struct Canvas {
+        buffer: Buffer,
+        /// The rows changed since the error grid was last updated.
+        dirty: RowChanges,
+        /// The half-resolution copy the random phase scores against, for
+        /// targets of at least [`crate::coarse::MIN_SIDE`] on both sides;
+        /// it keeps its own changed rows, synced only when read.
+        coarse: Option<Coarse>,
+    }
+
+    impl Canvas {
+        /// A canvas of `target`'s size filled with `background`.
+        pub(super) fn new(target: &Buffer, background: Color) -> Self {
+            let buffer = Buffer::new_from_color(target.width(), target.height(), background);
+            let coarse = Coarse::new(target, &buffer);
+            Self {
+                buffer,
+                dirty: RowChanges::All,
+                coarse,
+            }
+        }
+
+        /// The canvas's pixels.
+        pub(super) fn buffer(&self) -> &Buffer {
+            &self.buffer
+        }
+
+        /// Draws `lines` in `color` and records the rows they cover on the
+        /// canvas.
+        pub(super) fn draw(&mut self, color: Color, lines: &[Scanline]) {
+            score::draw_lines(&mut self.buffer, color, lines);
+            let (width, height) = (self.buffer.width() as i32, self.buffer.height() as i32);
+            let mut changes = RowChanges::Clean;
+            for line in lines {
+                if clamp_line(line, width, height).is_some() {
+                    changes.include(RowChanges::rows(line.y as u32, line.y as u32 + 1));
+                }
+            }
+            self.record(changes);
+        }
+
+        /// Makes `buffer`, of the same size, the canvas: every row changed.
+        pub(super) fn replace(&mut self, buffer: Buffer) {
+            self.buffer = buffer;
+            self.record(RowChanges::All);
+        }
+
+        fn record(&mut self, changes: RowChanges) {
+            self.dirty.include(changes);
+            if let Some(coarse) = &mut self.coarse {
+                coarse.invalidate(changes);
+            }
+        }
+
+        /// Brings `grid`, the error grid of `target` against this canvas,
+        /// up to date with the rows changed since its last update.
+        pub(super) fn update_grid(&mut self, target: &Buffer, grid: &mut ErrorGrid) {
+            grid.update(target, &self.buffer, std::mem::take(&mut self.dirty));
+        }
+
+        /// The canvas and, if `coarse` is set and the canvas has a coarse
+        /// copy, that copy's round, synced first.
+        pub(super) fn search_view(&mut self, coarse: bool) -> (&Buffer, Option<SearchRound<'_>>) {
+            let round = match &mut self.coarse {
+                Some(copy) if coarse => Some(copy.round(&self.buffer)),
+                _ => None,
+            };
+            (&self.buffer, round)
+        }
+
+        /// Whether the canvas has a coarse copy.
+        #[cfg(test)]
+        pub(super) fn has_coarse(&self) -> bool {
+            self.coarse.is_some()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::score;
+    use crate::shapes::{Rectangle, Shape};
+    use crate::test_util::fixed_alpha;
+
+    /// Workers retained across steps search exactly as fresh ones, when
+    /// the round count, the search settings and the quadratic stroke change
+    /// from step to step, on 1 and 8 threads.
     #[test]
     fn reused_round_workers_match_fresh_at_each_step() {
+        use rand::RngExt;
         let run = |threads, fresh| {
             rayon::ThreadPoolBuilder::new()
                 .num_threads(threads)
@@ -689,7 +703,6 @@ mod tests {
                 .unwrap()
                 .install(|| {
                     let mut target = Buffer::new(41, 33);
-                    use rand::RngExt;
                     crate::rng::create_rng(56).fill(target.pixels_mut());
                     let mut model = Model::new(
                         target,
@@ -712,16 +725,12 @@ mod tests {
                     .into_iter()
                     .enumerate()
                     {
-                        #[cfg(feature = "lab")]
-                        model.set_search_effort([2, 5, 1, 3][index % 4], 1, 1);
-                        #[cfg(not(feature = "lab"))]
-                        {
-                            model.effort = Some(Effort {
-                                rounds: [2, 5, 1, 3][index % 4],
-                                candidates: 1,
-                                age: 1,
-                            });
-                        }
+                        let rounds = [2, 5, 1, 3][index % 4];
+                        model.effort = Effort {
+                            rounds,
+                            candidates: 1,
+                            age: 1,
+                        };
                         model.search = Search {
                             candidates: Some(15 + index),
                             age: Some(7 + index),
@@ -739,12 +748,11 @@ mod tests {
                             LineCap::Round
                         };
                         if fresh {
-                            model.step_reference(kind, Alpha::Auto);
-                        } else {
-                            model.step(kind, Alpha::Auto);
-                            assert_eq!(model.workers.len(), [2, 5, 1, 3][index % 4] as usize);
-                            assert!(model.workers.iter().all(|w| w.pruning == model.pruning));
+                            model.workers.clear();
                         }
+                        model.step(kind, Alpha::Auto);
+                        assert_eq!(model.workers.len(), rounds as usize);
+                        assert!(model.workers.iter().all(|w| w.pruning == model.pruning));
                     }
                     model.drawing()
                 })
@@ -770,11 +778,11 @@ mod tests {
                 ..ModelOptions::default()
             },
         );
-        model.effort = Some(Effort {
+        model.effort = Effort {
             rounds: 2,
             candidates: 1,
             age: 1,
-        });
+        };
         model.search = Search {
             candidates: Some(12),
             age: Some(5),
@@ -783,11 +791,13 @@ mod tests {
         let check = |model: &mut Model| {
             model.prepare_grid();
             let mut expected = model.error_grid.clone();
-            expected.compute_reference(&model.target, &model.current);
+            expected.compute(&model.target, model.canvas.buffer());
             assert_eq!(model.error_grid, expected);
-            let mut coarse = Coarse::new(&model.target, &model.current).unwrap();
-            let expected = coarse.round(&model.current);
-            let actual = model.coarse.as_mut().unwrap().round(&model.current);
+            let mut coarse =
+                crate::coarse::Coarse::new(&model.target, model.canvas.buffer()).unwrap();
+            let expected = coarse.round(model.canvas.buffer());
+            let (_, actual) = model.canvas.search_view(true);
+            let actual = actual.unwrap();
             assert_eq!(actual.current.pixels(), expected.current.pixels());
             assert_eq!(actual.score, expected.score);
             assert_eq!(actual.error_grid, expected.error_grid);
@@ -837,11 +847,6 @@ mod tests {
         }
     }
 
-    use super::*;
-    use crate::score;
-    use crate::shapes::{Rectangle, Shape};
-    use crate::test_util::fixed_alpha;
-
     /// Every kind keeps its measured candidates, climb age and seeds.
     /// A step runs 16 rounds, with no candidate or age multiplier unless
     /// the lab overrides it.
@@ -857,6 +862,12 @@ mod tests {
             age,
             seeds,
         };
+        let effort = Effort {
+            rounds: 16,
+            candidates: 1,
+            age: 1,
+        };
+        assert_eq!(Effort::DEFAULT, effort);
         for kind in ShapeKind::all_kinds()
             .iter()
             .copied()
@@ -870,12 +881,6 @@ mod tests {
                 _ => round(1000, 100, 1),
             };
             assert_eq!(RoundEffort::of(kind), expected, "{kind:?}");
-            let effort = Effort {
-                rounds: 16,
-                candidates: 1,
-                age: 1,
-            };
-            assert_eq!(Effort::of(kind), effort, "{kind:?}");
             assert_eq!(model.search_round_effort(kind), (16, expected), "{kind:?}");
         }
     }
@@ -952,7 +957,7 @@ mod tests {
 
         assert_eq!(
             model.score,
-            score::difference_full_raw(&model.target, &model.current)
+            score::difference_full_raw(&model.target, model.canvas.buffer())
         );
     }
 
@@ -976,7 +981,7 @@ mod tests {
                     model.add(shape, rng.random_range(1..=255));
                     assert_eq!(
                         model.score,
-                        score::difference_full_raw(&model.target, &model.current),
+                        score::difference_full_raw(&model.target, model.canvas.buffer()),
                         "{kind:?} on {width}x{height}"
                     );
                 }
@@ -1000,7 +1005,7 @@ mod tests {
         } = RoundEffort::of(ShapeKind::Triangle);
         // Each round samples every candidate and then hill-climbs for at
         // least `age` evaluations.
-        let minimum = Effort::of(ShapeKind::Triangle).rounds * (candidates + age) as u64;
+        let minimum = Effort::DEFAULT.rounds * (candidates + age) as u64;
 
         for step in 0..2 {
             let evaluations = model.step(ShapeKind::Triangle, fixed_alpha(128));
@@ -1220,7 +1225,7 @@ mod tests {
             candidates: Some(50),
             age: Some(10),
         };
-        let rounds = Effort::of(ShapeKind::Triangle).rounds;
+        let rounds = Effort::DEFAULT.rounds;
         let default_candidates = RoundEffort::of(ShapeKind::Triangle).candidates;
 
         for step in 0..2 {
@@ -1271,18 +1276,15 @@ mod tests {
         let mut model = Model::new(target, Color::new(10, 200, 30, 255), options);
         for kind in [ShapeKind::Rectangle, ShapeKind::RotatedEllipse] {
             let before = model
-                .coarse
-                .as_mut()
+                .canvas
+                .search_view(true)
+                .1
                 .expect("large enough")
-                .round(&model.current)
                 .score;
             model.step(kind, Alpha::Auto);
-            let round = model
-                .coarse
-                .as_mut()
-                .expect("large enough")
-                .round(&model.current);
-            let expected = crate::coarse::downsample(&model.current);
+            let (current, round) = model.canvas.search_view(true);
+            let round = round.expect("large enough");
+            let expected = crate::coarse::downsample(current);
             assert_eq!(round.current.pixels(), expected.pixels(), "{kind:?}");
             assert_eq!(
                 round.score,
@@ -1441,19 +1443,18 @@ mod tests {
     /// score, and the coarse canvas its downsample.
     fn assert_consistent(model: &Model, context: &str) {
         assert_eq!(
-            model.current.pixels(),
+            model.canvas.buffer().pixels(),
             replay(model).pixels(),
             "{context}: canvas"
         );
         assert_eq!(
             model.score,
-            score::difference_full_raw(&model.target, &model.current),
+            score::difference_full_raw(&model.target, model.canvas.buffer()),
             "{context}: score"
         );
-        let mut coarse = model.coarse.clone();
-        if let Some(coarse) = &mut coarse {
-            let round = coarse.round(&model.current);
-            let expected = crate::coarse::downsample(&model.current);
+        let mut canvas = model.canvas.clone();
+        if let (current, Some(round)) = canvas.search_view(true) {
+            let expected = crate::coarse::downsample(current);
             assert_eq!(
                 round.current.pixels(),
                 expected.pixels(),
@@ -1513,13 +1514,13 @@ mod tests {
     #[test]
     fn refine_without_shapes_is_a_no_op() {
         let mut model = stepped_model(1, SMALL, ShapeKind::Any, 0);
-        let (current, score) = (model.current.clone(), model.score);
+        let (current, score) = (model.canvas.buffer().clone(), model.score);
 
         assert_eq!(model.refine(Alpha::Auto), 0);
 
         assert!(model.history.is_empty());
         assert_eq!(model.passes, 0);
-        assert_eq!(model.current.pixels(), current.pixels());
+        assert_eq!(model.canvas.buffer().pixels(), current.pixels());
         assert_eq!(model.score, score);
     }
 
@@ -1530,7 +1531,7 @@ mod tests {
         for (index, size) in sizes.into_iter().enumerate() {
             for kind in every_kind() {
                 let mut model = stepped_model(index as u64, size, kind, 2);
-                assert_eq!(model.coarse.is_some(), size.0 >= side, "{size:?}");
+                assert_eq!(model.canvas.has_coarse(), size.0 >= side, "{size:?}");
                 let before = model.score;
                 model.refine(Alpha::Auto);
                 let context = format!("{kind:?} on {size:?}");
@@ -1549,11 +1550,15 @@ mod tests {
         assert!(accepted.score < model.score, "the pass would not improve");
 
         model.reject_passes = true;
-        let (history, current, score) = (model.history.clone(), model.current.clone(), model.score);
+        let (history, current, score) = (
+            model.history.clone(),
+            model.canvas.buffer().clone(),
+            model.score,
+        );
         assert!(model.refine(Alpha::Auto) > 0);
 
         assert_eq!(model.history, history);
-        assert_eq!(model.current.pixels(), current.pixels());
+        assert_eq!(model.canvas.buffer().pixels(), current.pixels());
         assert_eq!(model.score, score);
         assert_eq!(model.passes, 1, "a reverted pass still counts");
         assert_consistent(&model, "reverted");
@@ -1880,7 +1885,11 @@ mod tests {
             let mut expected = vec![LineCap::Round; 2];
             expected.extend([cap; 6]);
             assert_eq!(quadratic_caps(&model.drawing()), expected, "{cap:?}");
-            assert_ne!(model.current.pixels(), round.current.pixels(), "{cap:?}");
+            assert_ne!(
+                model.canvas.buffer().pixels(),
+                round.canvas.buffer().pixels(),
+                "{cap:?}"
+            );
             assert_consistent(&model, &format!("{cap:?} caps"));
             model.refine(Alpha::Auto);
             assert_eq!(quadratic_caps(&model.drawing()), expected, "{cap:?}");
@@ -2410,8 +2419,7 @@ mod tests {
         assert_eq!(model.adopt(&joint, true), Some(true));
         assert_eq!(model.passes, 1);
         assigned.history = model.history.clone();
-        assigned.current = model.current.clone();
-        assigned.invalidate(RowChanges::All);
+        assigned.canvas.replace(model.canvas.buffer().clone());
         assigned.score = model.score;
 
         model.refine(Alpha::Auto);

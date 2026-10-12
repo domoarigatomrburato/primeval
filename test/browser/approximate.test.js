@@ -799,49 +799,34 @@ for (const isolated of [true, false]) {
     // and NEON ones bit for bit, so native and wasm output are expected to
     // agree. These tripwires catch a regression (see the WebAssembly plan, W0
     // results).
-    test(`SVG output equals the native addon's for fixed seeds (${variant} build)`, async () => {
-      const renders = TRIPWIRE_RENDERS;
-      const browserSvgs = await shared.page.evaluate(
-        async ({ name, renders }) => {
-          const input = await window.fixture(name);
-          const svgs = [];
-          for (const render of renders) {
-            svgs.push((await window.primeval.approximate({ input, output: "svg", render })).data);
-          }
-          return svgs;
-        },
-        { name: FIXTURE, renders },
-      );
+    for (const [output, renders] of [
+      ["svg", TRIPWIRE_RENDERS],
+      ["png", PNG_TRIPWIRE_RENDERS],
+    ]) {
+      test(`${output.toUpperCase()} output equals the native addon's for fixed seeds (${variant} build)`, async () => {
+        // PNG bytes cross the page boundary as plain arrays.
+        const browserOutputs = await shared.page.evaluate(
+          async ({ name, output, renders }) => {
+            const input = await window.fixture(name);
+            const outputs = [];
+            for (const render of renders) {
+              const { data } = await window.primeval.approximate({ input, output, render });
+              outputs.push(output === "png" ? Array.from(data) : data);
+            }
+            return outputs;
+          },
+          { name: FIXTURE, output, renders },
+        );
 
-      for (const [index, render] of renders.entries()) {
-        const expected = await nativeOutput(fixture, "svg", render);
-        assert.equal(browserSvgs[index], expected.data, JSON.stringify(render));
-      }
-    });
-
-    test(`PNG output equals the native addon's for fixed seeds (${variant} build)`, async () => {
-      const renders = PNG_TRIPWIRE_RENDERS;
-
-      const browserPngs = await shared.page.evaluate(
-        async ({ name, renders }) => {
-          const input = await window.fixture(name);
-          const pngs = [];
-          for (const render of renders) {
-            pngs.push(
-              Array.from(
-                (await window.primeval.approximate({ input, output: "png", render })).data,
-              ),
-            );
-          }
-          return pngs;
-        },
-        { name: FIXTURE, renders },
-      );
-
-      for (const [index, render] of renders.entries()) {
-        const expected = await nativeOutput(fixture, "png", render);
-        assert.deepEqual(browserPngs[index], Array.from(expected.data), JSON.stringify(render));
-      }
-    });
+        for (const [index, render] of renders.entries()) {
+          const { data } = await nativeOutput(fixture, output, render);
+          assert.deepEqual(
+            browserOutputs[index],
+            output === "png" ? Array.from(data) : data,
+            JSON.stringify(render),
+          );
+        }
+      });
+    }
   });
 }

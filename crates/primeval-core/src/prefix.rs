@@ -142,44 +142,6 @@ impl PrefixSums {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn compute_reference(&mut self, target: &Buffer, current: &Buffer) {
-        assert!(
-            target.width() == current.width() && target.height() == current.height(),
-            "prefix sums need buffers of the same size"
-        );
-        let (width, height) = (target.width(), target.height());
-        self.width = width;
-        self.height = height;
-        self.entries.clear();
-        self.entries.reserve((width as usize + 1) * height as usize);
-
-        let row_bytes = width as usize * BYTES_PER_PIXEL;
-        let rows = target
-            .pixels()
-            .chunks_exact(row_bytes)
-            .zip(current.pixels().chunks_exact(row_bytes));
-        for (t_row, c_row) in rows {
-            let mut entry = Entry::default();
-            self.entries.push(entry);
-            let (t_px3, _) = t_row.as_chunks::<3>();
-            let (c_px3, _) = c_row.as_chunks::<3>();
-            for (t_px, c_px) in t_px3.iter().zip(c_px3) {
-                let mut pixel_error = 0_u32;
-                for channel in 0..3 {
-                    let (t, c) = (t_px[channel], c_px[channel]);
-                    entry.channels[channel] = entry.channels[channel].wrapping_add(u32::from(t));
-                    entry.channels[3 + channel] =
-                        entry.channels[3 + channel].wrapping_add(u32::from(c));
-                    let d = u32::from(t.abs_diff(c));
-                    pixel_error += d * d;
-                }
-                entry.error += u64::from(pixel_error);
-                self.entries.push(entry);
-            }
-        }
-    }
-
     /// Recomputes only canvas channels and error on these rows. Target
     /// entries are retained, including their wrapping u32 arithmetic.
     pub(crate) fn update_rows(
@@ -257,6 +219,10 @@ impl PrefixSums {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use rand::{RngExt, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
+
     #[test]
     fn dirty_prefix_rows_match_full_reference() {
         let mut rng = ChaCha8Rng::seed_from_u64(0xd127);
@@ -270,7 +236,7 @@ mod tests {
             rng.fill(&mut current.pixels_mut()[start as usize * 83 * 3..end as usize * 83 * 3]);
             actual.update_rows(&target, &current, start..end);
             let mut expected = PrefixSums::default();
-            expected.compute_reference(&target, &current);
+            expected.compute(&target, &current);
             assert_eq!(actual, expected);
         }
         // Exercise wrapping without allocating a 16-million-pixel row.
@@ -280,10 +246,6 @@ mod tests {
         assert_eq!(row[1].channels[3], 244);
         assert_eq!(row[2].channels[3], 499);
     }
-
-    use super::*;
-    use rand::{RngExt, SeedableRng};
-    use rand_chacha::ChaCha8Rng;
 
     fn random_buffer(rng: &mut ChaCha8Rng, width: u32, height: u32) -> Buffer {
         let mut buffer = Buffer::new(width, height);

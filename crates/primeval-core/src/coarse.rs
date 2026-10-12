@@ -60,12 +60,6 @@ impl Coarse {
         self.dirty.include(changes);
     }
 
-    #[cfg(test)]
-    fn sync_reference(&mut self, current: &Buffer) {
-        downsample_reference(current, &mut self.current);
-        self.score = score::difference_full_raw(&self.target, &self.current);
-    }
-
     /// Syncs pixels and derived state together. Dirty source rows affect
     /// their containing 2x2 blocks; odd final rows keep the same clipping.
     fn sync(&mut self, current: &Buffer) {
@@ -144,71 +138,43 @@ fn downsample_rows(src: &Buffer, dst: &mut Buffer, rows: std::ops::Range<u32>) {
     let (width, height) = (src.width() as usize, src.height() as usize);
     let src_pixels = src.pixels();
     let dst_width = dst.width() as usize;
-    for (index, dst_pixel) in dst
+    let dst_rows = dst
         .pixels_mut()
         .as_chunks_mut::<BYTES_PER_PIXEL>()
         .0
-        .iter_mut()
+        .chunks_exact_mut(dst_width)
         .enumerate()
-        .skip(rows.start as usize * dst_width)
-        .take((rows.end - rows.start) as usize * dst_width)
-    {
-        let (x, y) = (2 * (index % dst_width), 2 * (index / dst_width));
-        let (xs, ys) = (x..(x + 2).min(width), y..(y + 2).min(height));
-        let count = (xs.len() * ys.len()) as u32;
-        let mut sums = [0_u32; BYTES_PER_PIXEL];
-        for sy in ys {
-            let row = &src_pixels[(sy * width + xs.start) * BYTES_PER_PIXEL
-                ..(sy * width + xs.end) * BYTES_PER_PIXEL];
-            for pixel in row.as_chunks::<BYTES_PER_PIXEL>().0 {
-                for (sum, &value) in sums.iter_mut().zip(pixel) {
-                    *sum += u32::from(value);
+        .skip(rows.start as usize)
+        .take((rows.end - rows.start) as usize);
+    for (dst_y, dst_row) in dst_rows {
+        let y = 2 * dst_y;
+        for (dst_x, dst_pixel) in dst_row.iter_mut().enumerate() {
+            let x = 2 * dst_x;
+            let (xs, ys) = (x..(x + 2).min(width), y..(y + 2).min(height));
+            let count = (xs.len() * ys.len()) as u32;
+            let mut sums = [0_u32; BYTES_PER_PIXEL];
+            for sy in ys {
+                let row = &src_pixels[(sy * width + xs.start) * BYTES_PER_PIXEL
+                    ..(sy * width + xs.end) * BYTES_PER_PIXEL];
+                for pixel in row.as_chunks::<BYTES_PER_PIXEL>().0 {
+                    for (sum, &value) in sums.iter_mut().zip(pixel) {
+                        *sum += u32::from(value);
+                    }
                 }
             }
-        }
-        for (value, sum) in dst_pixel.iter_mut().zip(sums) {
-            *value = ((sum + count / 2) / count) as u8;
-        }
-    }
-}
-
-#[cfg(test)]
-fn downsample_reference(src: &Buffer, dst: &mut Buffer) {
-    assert!(
-        dst.width() == half(src.width()) && dst.height() == half(src.height()),
-        "the coarse buffer must be half the size of the source"
-    );
-    let (width, height) = (src.width() as usize, src.height() as usize);
-    let src_pixels = src.pixels();
-    let dst_width = dst.width() as usize;
-    for (index, dst_pixel) in dst
-        .pixels_mut()
-        .as_chunks_mut::<BYTES_PER_PIXEL>()
-        .0
-        .iter_mut()
-        .enumerate()
-    {
-        let (x, y) = (2 * (index % dst_width), 2 * (index / dst_width));
-        let (xs, ys) = (x..(x + 2).min(width), y..(y + 2).min(height));
-        let count = (xs.len() * ys.len()) as u32;
-        let mut sums = [0_u32; BYTES_PER_PIXEL];
-        for sy in ys {
-            let row = &src_pixels[(sy * width + xs.start) * BYTES_PER_PIXEL
-                ..(sy * width + xs.end) * BYTES_PER_PIXEL];
-            for pixel in row.as_chunks::<BYTES_PER_PIXEL>().0 {
-                for (sum, &value) in sums.iter_mut().zip(pixel) {
-                    *sum += u32::from(value);
-                }
+            for (value, sum) in dst_pixel.iter_mut().zip(sums) {
+                *value = ((sum + count / 2) / count) as u8;
             }
-        }
-        for (value, sum) in dst_pixel.iter_mut().zip(sums) {
-            *value = ((sum + count / 2) / count) as u8;
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use rand::{RngExt, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
+
     #[test]
     fn dirty_coarse_matches_full_reference() {
         let mut rng = ChaCha8Rng::seed_from_u64(0xc0a25);
@@ -230,19 +196,14 @@ mod tests {
             }
             let _ = actual.round(&current);
             let mut expected = Coarse::new(&target, &current).unwrap();
-            expected.sync_reference(&current);
             expected
                 .error_grid
-                .compute_reference(&expected.target, &expected.current);
+                .compute(&expected.target, &expected.current);
             assert_eq!(actual.current.pixels(), expected.current.pixels());
             assert_eq!(actual.score, expected.score);
             assert_eq!(actual.error_grid, expected.error_grid);
         }
     }
-
-    use super::*;
-    use rand::{RngExt, SeedableRng};
-    use rand_chacha::ChaCha8Rng;
 
     fn noise(width: u32, height: u32, rng: &mut ChaCha8Rng) -> Buffer {
         let mut pixels = vec![0_u8; (width * height) as usize * BYTES_PER_PIXEL];

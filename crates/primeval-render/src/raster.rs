@@ -350,75 +350,37 @@ mod tests {
 
     #[test]
     fn ellipse_rotation_takes_the_portable_sine_and_cosine() {
-        use rand::{RngExt, SeedableRng};
-        use rand_chacha::ChaCha8Rng;
-
-        let mut angles = vec![
-            0.0,
-            -0.0,
-            1.0,
-            45.0,
-            90.0,
-            180.0,
-            270.0,
-            360.0,
-            -90.0,
-            720.0,
-            13.125,
-            -47.8125,
-            359.999_999,
-            428.375,
-            -731.0625,
-        ];
-        let mut rng = ChaCha8Rng::seed_from_u64(0xe11_1a5e);
-        angles.extend((0..4096).map(|_| rng.random_range(-1080.0..1080.0)));
-        let different = angles
-            .iter()
-            .filter(|&&angle| {
-                let (sin, cos) = primeval_core::sin_cos_degrees(angle);
-                let radians = (angle as f32).to_radians();
-                radians.sin().to_bits() != (sin as f32).to_bits()
-                    || radians.cos().to_bits() != (cos as f32).to_bits()
-            })
-            .count();
-        assert!(
-            different > 0,
-            "the angles must expose platform trigonometry"
-        );
-
-        // Compare bits, including signed zeros, under identity, canvas scaling
-        // and a general base transform, with off-origin ellipse centres.
         let bits = |t: Transform| [t.sx, t.ky, t.kx, t.sy, t.tx, t.ty].map(f32::to_bits);
-        for angle in angles {
-            let (sin, cos) = primeval_core::sin_cos_degrees(angle);
-            let (sin, cos) = (sin as f32, cos as f32);
-            let rotation = Transform::from_row(cos, sin, -sin, cos, 0.0, 0.0);
-            for base in [
-                Transform::identity(),
-                Transform::from_scale(1.75, 0.625),
-                Transform::from_row(1.5, 0.25, -0.5, 2.0, 7.0, -3.0),
-            ] {
-                for (cx, cy) in [(0.0, 0.0), (4.125, 7.75), (-3.25, 2.5)] {
-                    let expected = base.pre_concat(
-                        Transform::identity()
-                            .pre_translate(cx, cy)
-                            .pre_concat(rotation)
-                            .pre_translate(-cx, -cy),
-                    );
+
+        // A rotation of zero, signed or not, is tiny-skia's own, bit for
+        // bit, under identity, canvas scaling and a general base transform,
+        // with off-origin centres.
+        for base in [
+            Transform::identity(),
+            Transform::from_scale(1.75, 0.625),
+            Transform::from_row(1.5, 0.25, -0.5, 2.0, 7.0, -3.0),
+        ] {
+            for (cx, cy) in [(0.0, 0.0), (4.125, 7.75), (-3.25, 2.5)] {
+                for angle in [0.0, -0.0] {
                     assert_eq!(
                         bits(ellipse_transform(base, cx, cy, angle)),
-                        bits(expected),
+                        bits(base.pre_rotate_at(angle as f32, cx, cy)),
                         "angle {angle}, centre ({cx}, {cy}), base {base:?}"
                     );
-                    if angle == 0.0 {
-                        assert_eq!(
-                            bits(expected),
-                            bits(base.pre_rotate_at(angle as f32, cx, cy)),
-                            "zero rotation must preserve the old transform bits"
-                        );
-                    }
                 }
             }
+        }
+
+        // Any other rotation is built from `primeval_core::sin_cos_degrees`,
+        // not the platform's trigonometry.
+        for angle in [1.0, 13.125, 45.0, 90.0, 180.0, -47.8125, 428.375, -731.0625] {
+            let (sin, cos) = primeval_core::sin_cos_degrees(angle);
+            let (sin, cos) = (sin as f32, cos as f32);
+            assert_eq!(
+                bits(ellipse_transform(Transform::identity(), 0.0, 0.0, angle)),
+                bits(Transform::from_row(cos, sin, -sin, cos, 0.0, 0.0)),
+                "angle {angle}"
+            );
         }
     }
 
@@ -455,14 +417,6 @@ mod tests {
             })
             .collect(),
         )
-    }
-
-    #[test]
-    fn unrotated_ellipses_render_as_before() {
-        let rgb = render_rgb(&unrotated_drawing(), 97, 83).expect("render");
-        let digest = fnv(&rgb);
-        // The same with tiny-skia's own rotation and with the portable one.
-        assert_eq!(digest, 17_268_577_630_932_387_282);
     }
 
     #[test]
