@@ -12,6 +12,7 @@
 
 use crate::buffer::{BYTES_PER_PIXEL, Buffer};
 use crate::error_grid::ErrorGrid;
+use crate::prefix::RowChanges;
 use crate::score;
 use crate::worker::SearchRound;
 
@@ -20,8 +21,8 @@ use crate::worker::SearchRound;
 /// search is cheap anyway.
 pub(crate) const MIN_SIDE: u32 = 32;
 
-/// The 2× downsampled target and canvas, kept in sync with the model's
-/// canvas after every committed shape.
+/// The 2× downsampled target and canvas, synchronised lazily on every
+/// read through `round`, with dirty rows retained across skipped steps.
 #[derive(Clone)]
 pub(crate) struct Coarse {
     target: Buffer,
@@ -30,6 +31,7 @@ pub(crate) struct Coarse {
     /// full-resolution grid.
     error_grid: ErrorGrid,
     score: u64,
+    dirty: RowChanges,
 }
 
 impl Coarse {
@@ -49,24 +51,58 @@ impl Coarse {
             current,
             error_grid,
             score,
+            dirty: RowChanges::All,
         })
     }
 
-    /// Downsamples `current` again after a shape was drawn on it.
-    pub(crate) fn sync(&mut self, current: &Buffer) {
-        downsample_into(current, &mut self.current);
+    /// Records changes without downsampling for kinds that never read it.
+    pub(crate) fn invalidate(&mut self, changes: RowChanges) {
+        self.dirty.include(changes);
+    }
+
+    #[cfg(test)]
+    fn sync_reference(&mut self, current: &Buffer) {
+        downsample_reference(current, &mut self.current);
         self.score = score::difference_full_raw(&self.target, &self.current);
     }
 
-    /// Rebuilds the prefix sums the round's evaluations read; call once per
-    /// step, before [`Coarse::round`].
-    pub(crate) fn prepare(&mut self) {
-        self.error_grid.compute(&self.target, &self.current);
+    /// Syncs pixels and derived state together. Dirty source rows affect
+    /// their containing 2x2 blocks; odd final rows keep the same clipping.
+    fn sync(&mut self, current: &Buffer) {
+        let changes = std::mem::take(&mut self.dirty);
+        match changes {
+            RowChanges::Clean => {}
+            RowChanges::All => {
+                downsample_into(current, &mut self.current);
+                self.score = score::difference_full_raw(&self.target, &self.current);
+                self.error_grid
+                    .update(&self.target, &self.current, RowChanges::All);
+            }
+            RowChanges::Rows { start, end } => {
+                let rows = start / 2..end.div_ceil(2);
+                let width = self.current.width() as i32;
+                let row_error = |grid: &ErrorGrid| {
+                    rows.clone().fold(0_u64, |sum, y| {
+                        sum.wrapping_add(grid.sums().error(y as i32, 0, width - 1))
+                    })
+                };
+                let old = row_error(&self.error_grid);
+                downsample_rows(current, &mut self.current, rows.clone());
+                self.error_grid.update(
+                    &self.target,
+                    &self.current,
+                    RowChanges::rows(rows.start, rows.end),
+                );
+                let new = row_error(&self.error_grid);
+                self.score = self.score.wrapping_sub(old).wrapping_add(new);
+            }
+        }
     }
 
     /// The search round over the coarse buffers.
     #[must_use]
-    pub(crate) fn round(&self) -> SearchRound<'_> {
+    pub(crate) fn round(&mut self, current: &Buffer) -> SearchRound<'_> {
+        self.sync(current);
         SearchRound {
             target: &self.target,
             current: &self.current,
@@ -97,6 +133,47 @@ pub(crate) fn downsample(src: &Buffer) -> Buffer {
 
 /// [`downsample`] into `dst`, which must already have the downsampled size.
 fn downsample_into(src: &Buffer, dst: &mut Buffer) {
+    downsample_rows(src, dst, 0..dst.height());
+}
+
+fn downsample_rows(src: &Buffer, dst: &mut Buffer, rows: std::ops::Range<u32>) {
+    assert!(
+        dst.width() == half(src.width()) && dst.height() == half(src.height()),
+        "the coarse buffer must be half the size of the source"
+    );
+    let (width, height) = (src.width() as usize, src.height() as usize);
+    let src_pixels = src.pixels();
+    let dst_width = dst.width() as usize;
+    for (index, dst_pixel) in dst
+        .pixels_mut()
+        .as_chunks_mut::<BYTES_PER_PIXEL>()
+        .0
+        .iter_mut()
+        .enumerate()
+        .skip(rows.start as usize * dst_width)
+        .take((rows.end - rows.start) as usize * dst_width)
+    {
+        let (x, y) = (2 * (index % dst_width), 2 * (index / dst_width));
+        let (xs, ys) = (x..(x + 2).min(width), y..(y + 2).min(height));
+        let count = (xs.len() * ys.len()) as u32;
+        let mut sums = [0_u32; BYTES_PER_PIXEL];
+        for sy in ys {
+            let row = &src_pixels[(sy * width + xs.start) * BYTES_PER_PIXEL
+                ..(sy * width + xs.end) * BYTES_PER_PIXEL];
+            for pixel in row.as_chunks::<BYTES_PER_PIXEL>().0 {
+                for (sum, &value) in sums.iter_mut().zip(pixel) {
+                    *sum += u32::from(value);
+                }
+            }
+        }
+        for (value, sum) in dst_pixel.iter_mut().zip(sums) {
+            *value = ((sum + count / 2) / count) as u8;
+        }
+    }
+}
+
+#[cfg(test)]
+fn downsample_reference(src: &Buffer, dst: &mut Buffer) {
     assert!(
         dst.width() == half(src.width()) && dst.height() == half(src.height()),
         "the coarse buffer must be half the size of the source"
@@ -132,6 +209,37 @@ fn downsample_into(src: &Buffer, dst: &mut Buffer) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dirty_coarse_matches_full_reference() {
+        let mut rng = ChaCha8Rng::seed_from_u64(0xc0a25);
+        let target = noise(43, 35, &mut rng);
+        let mut current = noise(43, 35, &mut rng);
+        let mut actual = Coarse::new(&target, &current).unwrap();
+        for sample in 0..200 {
+            let start = rng.random_range(0..35);
+            let end = rng.random_range(start..=35);
+            rng.fill(&mut current.pixels_mut()[start as usize * 43 * 3..end as usize * 43 * 3]);
+            actual.invalidate(if sample % 17 == 0 {
+                RowChanges::All
+            } else {
+                RowChanges::rows(start, end)
+            });
+            // Leave several changes pending to cover lazy sync across steps.
+            if sample % 3 != 0 {
+                continue;
+            }
+            let _ = actual.round(&current);
+            let mut expected = Coarse::new(&target, &current).unwrap();
+            expected.sync_reference(&current);
+            expected
+                .error_grid
+                .compute_reference(&expected.target, &expected.current);
+            assert_eq!(actual.current.pixels(), expected.current.pixels());
+            assert_eq!(actual.score, expected.score);
+            assert_eq!(actual.error_grid, expected.error_grid);
+        }
+    }
+
     use super::*;
     use rand::{RngExt, SeedableRng};
     use rand_chacha::ChaCha8Rng;
@@ -281,9 +389,9 @@ mod tests {
         let mut coarse = Coarse::new(&target, &noise(40, 33, &mut rng)).expect("large enough");
         let current = noise(40, 33, &mut rng);
 
-        coarse.sync(&current);
+        coarse.invalidate(RowChanges::All);
 
-        let round = coarse.round();
+        let round = coarse.round(&current);
         assert_eq!(round.current.pixels(), downsample(&current).pixels());
         assert_eq!(round.target.pixels(), downsample(&target).pixels());
         assert_eq!(

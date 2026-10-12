@@ -97,10 +97,9 @@ impl RoundEffort {
     }
 }
 
-/// Per-thread scratch state for candidate evaluation.
-///
-/// Each worker thread gets its own `WorkerCtx` so that shape rasterization
-/// and scoring can proceed without any synchronization.
+/// Scratch state for one independent indexed search round or refit climb.
+/// Retained across steps, with logical state reset before each round; no
+/// scratch is shared by concurrent tasks.
 #[derive(Clone)]
 pub(crate) struct WorkerCtx<R> {
     /// Image width in pixels.
@@ -155,6 +154,83 @@ pub(crate) struct SearchRound<'a> {
     pub(crate) coarse: Option<&'a SearchRound<'a>>,
 }
 
+/// Sorted handles into stable slots: insertions move only usize values.
+/// The extra insertion slot is reserved once; ties use the original binary
+/// search over the same list length, preserving its precise tie order.
+struct TopStates {
+    slots: Vec<Option<State>>,
+    order: Vec<usize>,
+    spare: Option<usize>,
+    limit: usize,
+}
+
+impl TopStates {
+    fn new(limit: usize) -> Self {
+        Self {
+            slots: Vec::with_capacity(limit + 1),
+            order: Vec::with_capacity(limit + 1),
+            spare: None,
+            limit,
+        }
+    }
+
+    fn energy(&self, at: usize) -> u64 {
+        self.slots[self.order[at]]
+            .as_ref()
+            .expect("occupied slot")
+            .cached_energy
+            .unwrap_or(u64::MAX)
+    }
+
+    fn insert(&mut self, state: State) {
+        let energy = state.cached_energy.unwrap_or(u64::MAX);
+        let at = self
+            .order
+            .binary_search_by_key(&energy, |&slot| {
+                self.slots[slot]
+                    .as_ref()
+                    .expect("occupied slot")
+                    .cached_energy
+                    .unwrap_or(u64::MAX)
+            })
+            .unwrap_or_else(|index| index);
+        if at >= self.limit {
+            return;
+        }
+        let slot = match self.spare.take() {
+            Some(slot) => {
+                self.slots[slot] = Some(state);
+                slot
+            }
+            None => {
+                let slot = self.slots.len();
+                self.slots.push(Some(state));
+                slot
+            }
+        };
+        self.order.insert(at, slot);
+        if self.order.len() > self.limit {
+            let slot = self.order.pop().expect("extra slot");
+            self.slots[slot] = None;
+            self.spare = Some(slot);
+        }
+    }
+
+    #[cfg(test)]
+    fn ordered(&self) -> impl Iterator<Item = &State> {
+        self.order
+            .iter()
+            .map(|&slot| self.slots[slot].as_ref().expect("occupied slot"))
+    }
+
+    fn into_states(mut self) -> Vec<State> {
+        self.order
+            .into_iter()
+            .map(|slot| self.slots[slot].take().expect("occupied slot"))
+            .collect()
+    }
+}
+
 impl<R: Rng> WorkerCtx<R> {
     #[must_use]
     pub(crate) fn new(width: i32, height: i32, rng: R) -> Self {
@@ -185,6 +261,26 @@ impl<R: Rng> WorkerCtx<R> {
         worker.quadratic_width = self.quadratic_width;
         worker.quadratic_cap = self.quadratic_cap;
         worker
+    }
+
+    /// Exactly a fresh `like` worker's logical state, retaining storage.
+    /// Configuration comes from the model each round, since lab hooks may
+    /// change between steps. Test counters and hooks never leak across rounds.
+    pub(crate) fn reset_like(&mut self, template: &Self, rng: R) {
+        self.width = template.width;
+        self.height = template.height;
+        self.quadratic_width = template.quadratic_width;
+        self.quadratic_cap = template.quadratic_cap;
+        self.rng = rng;
+        self.evaluations = 0;
+        self.lines.clear();
+        self.stroke.reset();
+        self.rows.reset();
+        #[cfg(test)]
+        {
+            self.pruning = true;
+            self.rejected = 0;
+        }
     }
 
     /// Runs `run` on this worker and returns its result with the number of
@@ -391,6 +487,7 @@ impl<R: Rng> WorkerCtx<R> {
         best
     }
 
+    #[cfg(test)]
     fn insert_top_state(states: &mut Vec<State>, state: State, limit: usize) {
         if limit == 0 {
             return;
@@ -413,7 +510,7 @@ impl<R: Rng> WorkerCtx<R> {
     }
 
     /// The `limit` lowest-energy states of `n` random ones, lowest first,
-    /// in [`Self::insert_top_state`] order. With a coarse round the states
+    /// in [`TopStates::insert`] order. With a coarse round the states
     /// are ranked by their coarse energy and returned without a cached
     /// energy.
     fn best_random_states(
@@ -464,21 +561,21 @@ impl<R: Rng> WorkerCtx<R> {
             "best_random_states requires at least one retained state"
         );
 
-        let mut states: Vec<State> = Vec::with_capacity(limit);
+        let mut states = TopStates::new(limit);
         for _ in 0..n {
             let mut state = self.random_state(round, kind, alpha);
             // A full list takes a state whose energy is at most its worst
             // (`insert_top_state` places a tie before the equal entry), so
             // anything at or above `worst + 1` can stop early.
-            let bound = (states.len() == limit)
-                .then(|| states[limit - 1].cached_energy.unwrap_or(u64::MAX))
+            let bound = (states.order.len() == limit)
+                .then(|| states.energy(limit - 1))
                 .and_then(|worst| worst.checked_add(1));
             if score_state(self, &mut state, bound).is_none() && bound.is_some() {
                 continue;
             }
-            Self::insert_top_state(&mut states, state, limit);
+            states.insert(state);
         }
-        states
+        states.into_states()
     }
 
     /// Runs one search round as `effort` says: samples its random
@@ -493,7 +590,7 @@ impl<R: Rng> WorkerCtx<R> {
     /// lowest of which are the seeds; the climbs always run at full
     /// resolution. The other kinds ignore the coarse round and climb the
     /// lowest candidates: with one seed, the earliest of the lowest; with
-    /// more, in [`Self::insert_top_state`] order, as quadratics always have.
+    /// more, in [`TopStates::insert`] order, as quadratics always have.
     pub(crate) fn search_round(
         &mut self,
         round: &SearchRound<'_>,
@@ -543,6 +640,30 @@ impl<R: Rng> WorkerCtx<R> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn indexed_top_states_match_reference_with_ties() {
+        use rand::RngExt;
+        let mut rng = crate::rng::create_rng(0x70f);
+        for limit in [1, 2, 3, 17, 128] {
+            let mut actual = TopStates::new(limit);
+            let mut expected = Vec::with_capacity(limit + 1);
+            for i in 0..10000 {
+                let mut state = state_with_energy(rng.random_range(0..19));
+                state.shape =
+                    crate::shapes::Shape::Circle(crate::shapes::Circle { x: i, y: 0, r: 1 });
+                WorkerCtx::<ChaCha8Rng>::insert_top_state(&mut expected, state.clone(), limit);
+                actual.insert(state);
+                assert_eq!(
+                    actual.ordered().collect::<Vec<_>>(),
+                    expected.iter().collect::<Vec<_>>()
+                );
+                assert_eq!(actual.order.capacity(), limit + 1);
+                assert_eq!(actual.slots.capacity(), limit + 1);
+            }
+            assert_eq!(actual.into_states(), expected);
+        }
+    }
+
     use super::*;
     use crate::Color;
     use crate::coarse::Coarse;
@@ -954,10 +1075,7 @@ mod tests {
             let mut grid = ErrorGrid::new(width, height, 4, 4);
             grid.compute(target, current);
             let mut coarse = coarse.then(|| Coarse::new(target, current).expect("large enough"));
-            if let Some(coarse) = &mut coarse {
-                coarse.prepare();
-            }
-            let coarse_round = coarse.as_ref().map(Coarse::round);
+            let coarse_round = coarse.as_mut().map(|coarse| coarse.round(current));
             let round = SearchRound {
                 target,
                 current,
@@ -1014,8 +1132,7 @@ mod tests {
         let mut grid = ErrorGrid::new(width, height, 4, 4);
         grid.compute(&target, &current);
         let mut coarse = Coarse::new(&target, &current).expect("large enough");
-        coarse.prepare();
-        let coarse_round = coarse.round();
+        let coarse_round = coarse.round(&current);
         let full = SearchRound {
             target: &target,
             current: &current,
@@ -1060,8 +1177,7 @@ mod tests {
         let mut grid = ErrorGrid::new(width, height, 4, 4);
         grid.compute(&target, &current);
         let mut coarse = Coarse::new(&target, &current).expect("large enough");
-        coarse.prepare();
-        let coarse_round = coarse.round();
+        let coarse_round = coarse.round(&current);
         let full = SearchRound {
             target: &target,
             current: &current,
@@ -1114,8 +1230,7 @@ mod tests {
         let mut grid = ErrorGrid::new(width, height, 4, 4);
         grid.compute(&target, &current);
         let mut coarse = Coarse::new(&target, &current).expect("large enough");
-        coarse.prepare();
-        let coarse_round = coarse.round();
+        let coarse_round = coarse.round(&current);
         let full = SearchRound {
             target: &target,
             current: &current,

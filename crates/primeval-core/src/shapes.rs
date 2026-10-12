@@ -1479,6 +1479,40 @@ impl Polygon {
         is_legible_convex(&vertices[..self.order], TAN_MIN_ANGLE)
     }
 
+    #[cfg(test)]
+    fn is_valid_reference(&self) -> bool {
+        let vertices: [(f64, f64); 4] = std::array::from_fn(|i| (self.x[i], self.y[i]));
+        is_legible_convex(&vertices[..self.order], TAN_MIN_ANGLE)
+    }
+
+    /// Orientation of a valid polygon, using the full check's expression.
+    fn orientation(&self) -> f64 {
+        let n = self.order;
+        let cross = (self.x[1] - self.x[0]) * (self.y[n - 1] - self.y[0])
+            - (self.y[1] - self.y[0]) * (self.x[n - 1] - self.x[0]);
+        if cross < 0.0 { -1.0 } else { 1.0 }
+    }
+
+    /// From a known-valid quad, moving vertex i changes only i and its two
+    /// neighbours. The opposite corner anchors the old orientation, so
+    /// these same predicates imply exactly the full validity check. A
+    /// triangle has no unaffected corner and retains the full check.
+    fn valid_after_move(&self, i: usize, orientation: f64) -> bool {
+        if self.order != 4 {
+            return self.is_valid();
+        }
+        let point = |j: usize| (self.x[j], self.y[j]);
+        [(i + 3) % 4, i, (i + 1) % 4].into_iter().all(|j| {
+            legible_corner(
+                point((j + 3) % 4),
+                point(j),
+                point((j + 1) % 4),
+                orientation,
+                TAN_MIN_ANGLE,
+            )
+        })
+    }
+
     fn rasterize<'a, R>(&self, worker: &'a mut WorkerCtx<R>) -> &'a [Scanline] {
         let vertices: [(f64, f64); 4] = [
             (self.x[0], self.y[0]),
@@ -1506,13 +1540,14 @@ impl Polygon {
         let margin = f64::from(MARGIN);
         debug_assert!(self.is_valid(), "{self:?}");
         let start = *self;
+        let orientation = start.orientation();
         loop {
             let i = worker.rng.random_range(0..self.order);
             self.x[i] = (self.x[i] + step.offset_f64(&mut worker.rng, POSITION_SIGMA))
                 .clamp(-margin, f64::from(worker.width - 1) + margin);
             self.y[i] = (self.y[i] + step.offset_f64(&mut worker.rng, POSITION_SIGMA))
                 .clamp(-margin, f64::from(worker.height - 1) + margin);
-            if self.is_valid() {
+            if self.valid_after_move(i, orientation) {
                 return;
             }
             *self = start;
@@ -1857,6 +1892,47 @@ impl EdgeWalker {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn moved_polygon_corners_match_full_validity() {
+        use rand::{RngExt, SeedableRng};
+        use rand_chacha::ChaCha8Rng;
+        let mut rng = ChaCha8Rng::seed_from_u64(0xc02e25);
+        let mut valid = quad([(0.0, 0.0), (30.0, 0.0), (30.0, 30.0), (0.0, 30.0)]);
+        for _ in 0..20000 {
+            let i = rng.random_range(0..4);
+            let mut moved = valid;
+            moved.x[i] += rng.random_range(-40.0..40.0);
+            moved.y[i] += rng.random_range(-40.0..40.0);
+            let expected = moved.is_valid_reference();
+            assert_eq!(
+                moved.valid_after_move(i, valid.orientation()),
+                expected,
+                "{valid:?} -> {moved:?}"
+            );
+            if expected {
+                valid = moved;
+            }
+        }
+        for degrees in [14.999, 15.0, 15.001, 15.1] {
+            let start = quad_with_angle(15.1);
+            let candidate = quad_with_angle(degrees);
+            let mut moved = start;
+            moved.x[3] = candidate.x[3];
+            moved.y[3] = candidate.y[3];
+            assert_eq!(
+                moved.valid_after_move(3, start.orientation()),
+                moved.is_valid_reference()
+            );
+            assert_eq!(moved.is_valid_reference(), degrees > 15.0);
+            let mut triangle = moved;
+            triangle.order = 3;
+            assert_eq!(
+                triangle.valid_after_move(1, 1.0),
+                triangle.is_valid_reference()
+            );
+        }
+    }
+
     use super::*;
     use crate::test_util::make_test_round;
     use crate::util::sin_cos_degrees;

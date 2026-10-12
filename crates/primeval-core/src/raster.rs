@@ -24,6 +24,18 @@ pub(crate) struct StrokeScratch {
     visits: Vec<(i32, i32)>,
 }
 
+impl StrokeScratch {
+    /// Restores fresh logical scratch while retaining all allocations.
+    pub(crate) fn reset(&mut self) {
+        self.points.clear();
+        self.segments.clear();
+        self.grid.clear();
+        self.rows.clear();
+        #[cfg(test)]
+        self.visits.clear();
+    }
+}
+
 /// Rasterises a stroked quadratic Bézier directly into `worker.lines` as
 /// anti-aliased scanlines.
 ///
@@ -790,6 +802,14 @@ pub(crate) struct RowScratch {
     edges: Vec<i32>,
 }
 
+impl RowScratch {
+    pub(crate) fn reset(&mut self) {
+        self.hits.clear();
+        self.spans.clear();
+        self.edges.clear();
+    }
+}
+
 /// The alpha of pixel column `px` under the sub-row `spans`: the summed
 /// horizontal overlap of each span with the pixel.
 #[inline]
@@ -900,6 +920,111 @@ fn emit_row(
 /// coverage of each pixel is the summed horizontal overlap of those spans
 /// with it.
 pub(crate) fn fill_polygon_direct(
+    lines: &mut Vec<Scanline>,
+    scratch: &mut RowScratch,
+    vertices: &[(f64, f64)],
+    w: i32,
+    h: i32,
+) {
+    fill_polygon_fast(lines, scratch, vertices, w, h);
+}
+
+fn fill_polygon_fast(
+    lines: &mut Vec<Scanline>,
+    scratch: &mut RowScratch,
+    vertices: &[(f64, f64)],
+    w: i32,
+    h: i32,
+) {
+    lines.clear();
+
+    let n = vertices.len();
+    if n < 3 {
+        return;
+    }
+
+    // Only a strict convex triangle/quad has at most two crossings. Other
+    // inputs keep the general even-odd path, including non-convex outlines.
+    let convex = (3..=4).contains(&n) && crate::shapes::is_legible_convex(vertices, 0.0);
+
+    // Find y range.
+    let mut y_min = f64::MAX;
+    let mut y_max = f64::MIN;
+    for &(_, y) in vertices {
+        y_min = y_min.min(y);
+        y_max = y_max.max(y);
+    }
+    let iy_min = (y_min.floor() as i32).max(0);
+    let iy_max = (y_max.ceil() as i32).min(h);
+
+    const NUM_AA: usize = 4;
+    let RowScratch { hits, spans, edges } = scratch;
+
+    for iy in iy_min..iy_max {
+        // Collect the x crossings of every sub-row, tagged with the sub-row.
+        hits.clear();
+        for s in 0..NUM_AA {
+            let sub_start = hits.len();
+            let y_sub = iy as f64 + (s as f64 + 0.5) / NUM_AA as f64;
+
+            for i in 0..n {
+                let (x0, y0) = vertices[i];
+                let (x1, y1) = vertices[(i + 1) % n];
+                let (y_lo, y_hi) = if y0 < y1 { (y0, y1) } else { (y1, y0) };
+                if y_sub < y_lo || y_sub >= y_hi {
+                    continue;
+                }
+                let t = (y_sub - y0) / (y1 - y0);
+                let x = x0 + t * (x1 - x0);
+                hits.push((x, s));
+                if convex && hits.len() == sub_start + 2 {
+                    break;
+                }
+            }
+        }
+
+        if hits.is_empty() {
+            continue;
+        }
+
+        // Determine the pixel x range touched by any intersection.
+        let mut x_min_f = f64::MAX;
+        let mut x_max_f = f64::MIN;
+        for &(x, _) in hits.iter() {
+            x_min_f = x_min_f.min(x);
+            x_max_f = x_max_f.max(x);
+        }
+        let ix_min = (x_min_f.floor() as i32).max(0);
+        let ix_max = ((x_max_f.ceil() as i32) - 1).min(w - 1);
+        if ix_min > ix_max {
+            continue;
+        }
+
+        // Sort the crossings by sub-row, then by x, and pair consecutive
+        // crossings of each sub-row into spans.
+        if !convex {
+            hits.sort_unstable_by(|a, b| a.1.cmp(&b.1).then(a.0.total_cmp(&b.0)));
+        }
+        spans.clear();
+        for sub_row in hits.chunk_by(|a, b| a.1 == b.1) {
+            for [left, right] in sub_row.as_chunks::<2>().0 {
+                // Convex hits are already grouped by sub-row, with just
+                // two per group. Preserve total_cmp, including signed zero.
+                let (left, right) = if convex && left.0.total_cmp(&right.0).is_gt() {
+                    (right, left)
+                } else {
+                    (left, right)
+                };
+                spans.push((left.0, right.0));
+            }
+        }
+
+        emit_row(lines, edges, spans, iy, ix_min, ix_max, NUM_AA);
+    }
+}
+
+#[cfg(test)]
+fn fill_polygon_reference(
     lines: &mut Vec<Scanline>,
     scratch: &mut RowScratch,
     vertices: &[(f64, f64)],
@@ -1053,6 +1178,49 @@ pub(crate) fn fill_rotated_ellipse_direct(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn convex_crossings_match_reference() {
+        use rand::{RngExt, SeedableRng};
+        use rand_chacha::ChaCha8Rng;
+        let mut rng = ChaCha8Rng::seed_from_u64(0xc2055);
+        let (mut actual, mut expected) = (Vec::new(), Vec::new());
+        let (mut scratch, mut reference_scratch) = (RowScratch::default(), RowScratch::default());
+        for sample in 0..3000 {
+            let vertices: Vec<_> = if sample < 16 {
+                let offset = sample as f64 / 8.0 - 0.5;
+                vec![
+                    (-3.0 + offset, -2.0 + offset),
+                    (35.0, -2.0 + offset),
+                    (35.0, 34.0),
+                    (-3.0 + offset, 34.0),
+                ]
+            } else {
+                let points = [(0.0, 0.0), (24.0, 0.0), (24.0, 24.0), (0.0, 24.0)];
+                points
+                    .into_iter()
+                    .map(|(x, y)| {
+                        (
+                            x + rng.random_range(-9.0..9.0),
+                            y + rng.random_range(-9.0..9.0),
+                        )
+                    })
+                    .collect()
+            };
+            fill_polygon_fast(&mut actual, &mut scratch, &vertices, 32, 32);
+            fill_polygon_reference(&mut expected, &mut reference_scratch, &vertices, 32, 32);
+            assert_eq!(actual, expected, "{vertices:?}");
+        }
+        // Concave and crossed input must continue through the even-odd fill.
+        for vertices in [
+            [(0.0, 0.0), (24.0, 0.0), (3.0, 3.0), (0.0, 24.0)],
+            [(0.0, 0.0), (24.0, 24.0), (24.0, 0.0), (0.0, 24.0)],
+        ] {
+            fill_polygon_fast(&mut actual, &mut scratch, &vertices, 32, 32);
+            fill_polygon_reference(&mut expected, &mut reference_scratch, &vertices, 32, 32);
+            assert_eq!(actual, expected);
+        }
+    }
+
     use super::*;
     use crate::buffer::Buffer;
     use crate::color::Color;

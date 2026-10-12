@@ -5,7 +5,7 @@
 //! function so that random samples concentrate in high-error regions.
 
 use crate::buffer::Buffer;
-use crate::prefix::PrefixSums;
+use crate::prefix::{PrefixSums, RowChanges};
 use rand::{Rng, RngExt};
 
 /// The number of cells in a `cols x rows` grid, computed in `u64` so large
@@ -38,6 +38,7 @@ fn cell_span(index: u32, size: u32, count: u32, extent: u32) -> (u32, u32) {
 /// [`sample`](ErrorGrid::sample) and [`sample_float`](ErrorGrid::sample_float)
 /// to produce coordinates biased toward high-error cells.
 #[derive(Clone)]
+#[cfg_attr(test, derive(Debug, PartialEq))]
 pub(crate) struct ErrorGrid {
     cols: u32,
     rows: u32,
@@ -131,6 +132,84 @@ impl ErrorGrid {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn compute_reference(&mut self, target: &Buffer, current: &Buffer) {
+        self.sums.compute_reference(target, current);
+        self.errors.fill(0.0);
+
+        let img_w = self.img_w;
+        let img_h = self.img_h;
+
+        for row_idx in 0..self.rows {
+            let (y_start, y_end) = cell_span(row_idx, self.cell_h, self.rows, img_h);
+            if y_start >= img_h {
+                break;
+            }
+            let err_row_base = (row_idx * self.cols) as usize;
+
+            for y in y_start..y_end {
+                for col_idx in 0..self.cols {
+                    let (x_start, x_end) = cell_span(col_idx, self.cell_w, self.cols, img_w);
+                    if x_start >= img_w {
+                        break;
+                    }
+                    // The cell's part of this row, summed exactly in
+                    // integers and converted once.
+                    let row_error = self.sums.error(y as i32, x_start as i32, x_end as i32 - 1);
+                    self.errors[err_row_base + col_idx as usize] += row_error as f64;
+                }
+            }
+        }
+
+        self.total = 0.0;
+        for (i, &e) in self.errors.iter().enumerate() {
+            self.total += e;
+            self.cdf[i] = self.total;
+        }
+    }
+
+    /// Updates a fixed target's grid. Affected cells are resummed from
+    /// their first row in the original order, never adjusted by floating
+    /// deltas. The CDF likewise retains its original accumulation order.
+    pub(crate) fn update(&mut self, target: &Buffer, current: &Buffer, changes: RowChanges) {
+        if !self.sums.matches(target.width(), target.height()) {
+            self.compute(target, current);
+            return;
+        }
+        let rows = match changes {
+            RowChanges::Clean => return,
+            RowChanges::All => 0..self.img_h,
+            RowChanges::Rows { start, end } => start..end,
+        };
+        self.sums.update_rows(target, current, rows.clone());
+        for row_idx in 0..self.rows {
+            let (y_start, y_end) = cell_span(row_idx, self.cell_h, self.rows, self.img_h);
+            if y_start >= self.img_h {
+                break;
+            }
+            if y_end <= rows.start || y_start >= rows.end {
+                continue;
+            }
+            let base = (row_idx * self.cols) as usize;
+            self.errors[base..base + self.cols as usize].fill(0.0);
+            for y in y_start..y_end {
+                for col_idx in 0..self.cols {
+                    let (x_start, x_end) = cell_span(col_idx, self.cell_w, self.cols, self.img_w);
+                    if x_start >= self.img_w {
+                        break;
+                    }
+                    let row_error = self.sums.error(y as i32, x_start as i32, x_end as i32 - 1);
+                    self.errors[base + col_idx as usize] += row_error as f64;
+                }
+            }
+        }
+        self.total = 0.0;
+        for (i, &error) in self.errors.iter().enumerate() {
+            self.total += error;
+            self.cdf[i] = self.total;
+        }
+    }
+
     /// The prefix sums of the last [`compute`](ErrorGrid::compute).
     #[inline]
     pub(crate) fn sums(&self) -> &PrefixSums {
@@ -213,6 +292,32 @@ impl ErrorGrid {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dirty_grid_matches_full_reference() {
+        let mut rng = ChaCha8Rng::seed_from_u64(0xd15c);
+        for (w, h, cols, rows) in [(83, 37, 7, 6), (5, 3, 9, 8), (37, 35, 1, 1)] {
+            let mut target = Buffer::new(w, h);
+            rng.fill(target.pixels_mut());
+            let mut current = Buffer::new(w, h);
+            rng.fill(current.pixels_mut());
+            let mut actual = ErrorGrid::new(w, h, cols, rows);
+            actual.update(&target, &current, RowChanges::All);
+            for _ in 0..100 {
+                let start = rng.random_range(0..h);
+                let end = rng.random_range(start..=h);
+                rng.fill(
+                    &mut current.pixels_mut()[(start * w * 3) as usize..(end * w * 3) as usize],
+                );
+                actual.update(&target, &current, RowChanges::rows(start, end));
+                let mut expected = ErrorGrid::new(w, h, cols, rows);
+                expected.compute_reference(&target, &current);
+                assert_eq!(actual, expected);
+                actual.update(&target, &current, RowChanges::All);
+                assert_eq!(actual, expected);
+            }
+        }
+    }
+
     use super::*;
     use crate::Color;
     use rand::{RngExt, SeedableRng};

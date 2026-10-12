@@ -1,4 +1,4 @@
-//! Per-row prefix sums of the target and the canvas, built once per step.
+//! Per-row prefix sums, with fixed target entries and updates on dirty rows.
 //!
 //! The target and the canvas stay fixed while a step searches, so every
 //! candidate would otherwise re-sum the same pixels. [`PrefixSums`] holds,
@@ -19,6 +19,7 @@ pub(crate) const MAX_CHANNEL_SPAN: usize = (u32::MAX / 255) as usize;
 /// Row `y` holds `width + 1` entries; entry `x` sums the pixels `0..x` of
 /// that row, so a span `x1..=x2` is entry `x2 + 1` minus entry `x1`.
 #[derive(Clone, Default)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 pub(crate) struct PrefixSums {
     width: u32,
     height: u32,
@@ -29,6 +30,7 @@ pub(crate) struct PrefixSums {
 /// a cache line: a span reads the channels and the error of its two ends
 /// from the same entries.
 #[derive(Clone, Copy, Default)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 #[repr(align(32))]
 struct Entry {
     /// The RGB channels of the target, then of the canvas, wrapping in `u32`.
@@ -48,6 +50,56 @@ pub(crate) struct SpanSums {
     /// The squared channel differences between the target and the canvas,
     /// summed over RGB and the span's pixels.
     pub(crate) error: u64,
+}
+
+/// Changes since a derived structure was last updated, with an exclusive
+/// row end. Union retains all changes across arbitrarily many skipped steps.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum RowChanges {
+    #[default]
+    Clean,
+    Rows {
+        start: u32,
+        end: u32,
+    },
+    All,
+}
+
+impl RowChanges {
+    pub(crate) fn rows(start: u32, end: u32) -> Self {
+        if start < end {
+            Self::Rows { start, end }
+        } else {
+            Self::Clean
+        }
+    }
+
+    pub(crate) fn include(&mut self, other: Self) {
+        *self = match (*self, other) {
+            (Self::All, _) | (_, Self::All) => Self::All,
+            (Self::Clean, rows) | (rows, Self::Clean) => rows,
+            (Self::Rows { start: a, end: b }, Self::Rows { start: c, end: d }) => Self::Rows {
+                start: a.min(c),
+                end: b.max(d),
+            },
+        };
+    }
+}
+
+fn update_current_row(entries: &mut [Entry], target: &[[u8; 3]], current: &[[u8; 3]]) {
+    let mut entry = entries[0];
+    for ((t, c), dst) in target.iter().zip(current).zip(&mut entries[1..]) {
+        let mut pixel_error = 0_u32;
+        for channel in 0..3 {
+            entry.channels[3 + channel] =
+                entry.channels[3 + channel].wrapping_add(u32::from(c[channel]));
+            let d = u32::from(t[channel].abs_diff(c[channel]));
+            pixel_error += d * d;
+            dst.channels[3 + channel] = entry.channels[3 + channel];
+        }
+        entry.error += u64::from(pixel_error);
+        dst.error = entry.error;
+    }
 }
 
 impl PrefixSums {
@@ -87,6 +139,74 @@ impl PrefixSums {
                 entry.error += u64::from(pixel_error);
                 self.entries.push(entry);
             }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn compute_reference(&mut self, target: &Buffer, current: &Buffer) {
+        assert!(
+            target.width() == current.width() && target.height() == current.height(),
+            "prefix sums need buffers of the same size"
+        );
+        let (width, height) = (target.width(), target.height());
+        self.width = width;
+        self.height = height;
+        self.entries.clear();
+        self.entries.reserve((width as usize + 1) * height as usize);
+
+        let row_bytes = width as usize * BYTES_PER_PIXEL;
+        let rows = target
+            .pixels()
+            .chunks_exact(row_bytes)
+            .zip(current.pixels().chunks_exact(row_bytes));
+        for (t_row, c_row) in rows {
+            let mut entry = Entry::default();
+            self.entries.push(entry);
+            let (t_px3, _) = t_row.as_chunks::<3>();
+            let (c_px3, _) = c_row.as_chunks::<3>();
+            for (t_px, c_px) in t_px3.iter().zip(c_px3) {
+                let mut pixel_error = 0_u32;
+                for channel in 0..3 {
+                    let (t, c) = (t_px[channel], c_px[channel]);
+                    entry.channels[channel] = entry.channels[channel].wrapping_add(u32::from(t));
+                    entry.channels[3 + channel] =
+                        entry.channels[3 + channel].wrapping_add(u32::from(c));
+                    let d = u32::from(t.abs_diff(c));
+                    pixel_error += d * d;
+                }
+                entry.error += u64::from(pixel_error);
+                self.entries.push(entry);
+            }
+        }
+    }
+
+    /// Recomputes only canvas channels and error on these rows. Target
+    /// entries are retained, including their wrapping u32 arithmetic.
+    pub(crate) fn update_rows(
+        &mut self,
+        target: &Buffer,
+        current: &Buffer,
+        rows: std::ops::Range<u32>,
+    ) {
+        assert!(
+            self.matches(target.width(), target.height())
+                && self.matches(current.width(), current.height())
+        );
+        let width = self.width as usize;
+        let bytes = width * BYTES_PER_PIXEL;
+        for y in rows {
+            let y = y as usize;
+            let t = target.pixels()[y * bytes..(y + 1) * bytes]
+                .as_chunks::<3>()
+                .0;
+            let c = current.pixels()[y * bytes..(y + 1) * bytes]
+                .as_chunks::<3>()
+                .0;
+            let entries = &mut self.entries[y * (width + 1)..(y + 1) * (width + 1)];
+            // Production rows begin from zero. The helper also supports a
+            // nonzero seed so tests can exercise wrapping cheaply.
+            entries[0] = Entry::default();
+            update_current_row(entries, t, c);
         }
     }
 
@@ -137,6 +257,30 @@ impl PrefixSums {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dirty_prefix_rows_match_full_reference() {
+        let mut rng = ChaCha8Rng::seed_from_u64(0xd127);
+        let target = random_buffer(&mut rng, 83, 37);
+        let mut current = random_buffer(&mut rng, 83, 37);
+        let mut actual = PrefixSums::default();
+        actual.compute(&target, &current);
+        for _ in 0..300 {
+            let start = rng.random_range(0..37);
+            let end = rng.random_range(start..=37);
+            rng.fill(&mut current.pixels_mut()[start as usize * 83 * 3..end as usize * 83 * 3]);
+            actual.update_rows(&target, &current, start..end);
+            let mut expected = PrefixSums::default();
+            expected.compute_reference(&target, &current);
+            assert_eq!(actual, expected);
+        }
+        // Exercise wrapping without allocating a 16-million-pixel row.
+        let mut row = [Entry::default(); 3];
+        row[0].channels[3..].fill(u32::MAX - 10);
+        update_current_row(&mut row, &[[255, 255, 255]; 2], &[[255, 255, 255]; 2]);
+        assert_eq!(row[1].channels[3], 244);
+        assert_eq!(row[2].channels[3], 499);
+    }
+
     use super::*;
     use rand::{RngExt, SeedableRng};
     use rand_chacha::ChaCha8Rng;
