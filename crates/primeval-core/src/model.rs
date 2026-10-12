@@ -13,6 +13,18 @@ use crate::{Buffer, Color};
 use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
 
+/// The 64-bit FNV-1a digest of `drawing`'s `Debug` form, which spells
+/// every shape's coordinates, colour and alpha, and a quadratic
+/// curve's width and cap.
+#[cfg(test)]
+pub(crate) fn digest(drawing: &Drawing) -> u64 {
+    format!("{drawing:?}")
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        })
+}
+
 /// A shape the model has painted, with the colour it was painted in.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct CommittedShape {
@@ -998,17 +1010,6 @@ mod tests {
             seeded_drawing_of(7, 2, 1, ShapeKind::Any, false, COARSE),
             "with a coarse random phase"
         );
-    }
-
-    /// The 64-bit FNV-1a digest of `drawing`'s `Debug` form, which spells
-    /// every shape's coordinates, colour and alpha, and a quadratic
-    /// curve's width and cap.
-    fn digest(drawing: &Drawing) -> u64 {
-        format!("{drawing:?}")
-            .bytes()
-            .fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
-                (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
-            })
     }
 
     /// Pins the greedy search, so that a change to the refit's moves cannot

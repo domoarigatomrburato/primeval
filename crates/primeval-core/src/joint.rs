@@ -147,8 +147,8 @@ fn twice_shoelace(v: &[f64], n: usize) -> f64 {
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Settings {
-    /// Adam iterations. Each costs a colour fit (about two renders of the
-    /// drawing) and a gradient (a render, its replay and the reverse pass).
+    /// Adam iterations. Each costs a colour fit and a gradient (a render,
+    /// its replay and the reverse pass), which share the layers' coverage.
     /// `Some(0)` only projects, snaps and refits the colours.
     ///
     /// `None`, the default, follows the number of layers: 80 up to 50,
@@ -674,7 +674,8 @@ fn project(layer: &mut Layer) -> Option<[f64; COORDS]> {
 /// Runs `iterations` Adam steps on the parameters and opacities of
 /// `layers` (opacities only with `auto_alpha`, and no parameters for fixed
 /// layers), each on the [`diff::gradients`] taken after one [`diff::fit`]
-/// of every colour; then one more fit refits the colours of the final
+/// of every colour on the same geometry, so the gradient reuses the
+/// fit's pixel coverage; then one more fit refits the colours of the final
 /// geometry. `cancelled` is polled before every step; `None` once it
 /// returns true. Positions stay within [`MARGIN`] of the canvas, and a
 /// rotated rectangle's `u` and `h`, and a curved layer's radii and
@@ -961,6 +962,51 @@ mod tests {
             model.step(kind, alpha);
         }
         model
+    }
+
+    /// Pins every moving kind and the fixed masks in `Any`: eight greedy
+    /// layers and four Adam iterations, otherwise default settings. Recorded
+    /// before coverage caching, with identical pins on aarch64 and x86_64.
+    #[test]
+    fn joint_output_is_pinned() {
+        let target = target(32, 28);
+        let settings = Settings {
+            iterations: Some(4),
+            ..Settings::default()
+        };
+        let cases = [
+            (ShapeKind::Triangle, Alpha::Auto, 0x3aad98fb9c29c949),
+            (ShapeKind::Polygon, Alpha::Auto, 0xd47b3df543fbc241),
+            (ShapeKind::Rectangle, Alpha::Auto, 0xace7ef4d487f4e01),
+            (ShapeKind::RotatedRectangle, Alpha::Auto, 0xf4eedfaad9e22c2e),
+            (ShapeKind::Ellipse, Alpha::Auto, 0xf5b465a25a28cbc3),
+            (ShapeKind::Circle, Alpha::Auto, 0x81c11981f947571e),
+            (ShapeKind::RotatedEllipse, Alpha::Auto, 0x88ecfd4140f91f45),
+            (ShapeKind::Any, Alpha::Auto, 0x16289607d90d817a),
+            (
+                ShapeKind::Triangle,
+                Alpha::Fixed(std::num::NonZeroU8::new(128).unwrap()),
+                0x3deb04ae38bc7576,
+            ),
+        ];
+        let actual: Vec<_> = cases
+            .iter()
+            .map(|&(kind, alpha, _)| {
+                let model = greedy_kind(&target, 8, kind, alpha);
+                if kind == ShapeKind::Any {
+                    let (_, background, history) = model.joint_parts();
+                    assert!(
+                        !parts::<f32>(&target, background, history, settings.curved)
+                            .fixed
+                            .is_empty(),
+                        "Any must exercise fixed masks"
+                    );
+                }
+                let drawing = optimise(&model, alpha, settings, || false).expect("not cancelled");
+                (kind, alpha, crate::model::digest(&drawing))
+            })
+            .collect();
+        assert_eq!(actual, cases);
     }
 
     fn greedy(target: &Buffer, steps: usize, alpha: Alpha) -> Model {

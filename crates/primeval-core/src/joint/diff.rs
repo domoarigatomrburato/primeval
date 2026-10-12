@@ -1572,6 +1572,16 @@ macro_rules! by_cover {
 /// slightly faster on 8 threads and slower on 1.
 const BAND_ROWS: usize = 16;
 
+/// Maximum bytes of coverage values cached across the whole canvas.
+/// Layers are admitted in stack order by their clipped bounding-box area;
+/// a layer that does not fit is evaluated as before. Band buffers retain
+/// their allocations for reuse, like the checkpoint buffers.
+///
+/// On the engine runner's README originals at the default `resize_input`
+/// the cache peaks at about 2.3 MB (1000 triangles on 212 × 256), so every
+/// layer fits.
+const COVERAGE_BUDGET: usize = 32 << 20;
+
 /// In a fit pass, the entry of a layer's partial sums that holds its
 /// weight `Σ g · (1 − T)`; entries `0..3` hold `Σ g · R_c`.
 const FIT_WEIGHT: usize = 3;
@@ -1587,12 +1597,20 @@ enum Pass {
 
 /// One band's rows of the canvas, its checkpoints, the canvas below each
 /// layer of one segment, the residual and the transmittances, and its
-/// partial sums per layer.
+/// partial sums per layer and the selected layers' pixel coverage.
 #[derive(Default)]
 struct Band<F> {
+    #[cfg(test)]
+    evaluations: Evaluations,
     /// The band's rows, `y0..y1`.
     y0: usize,
     y1: usize,
+    /// Selected layers' bounding-box pixels in this band, row-major, in
+    /// layer order. Values are exactly those returned by `Cover::cover`.
+    coverage: Vec<F>,
+    /// A range in `coverage` for each selected layer; `None` for evaluated
+    /// layers, including every fixed mask.
+    coverage_ranges: Vec<Option<Range<usize>>>,
     canvas: Vec<F>,
     /// The band's canvas before every `interval`-th layer, one after the
     /// other.
@@ -1612,65 +1630,194 @@ struct Band<F> {
     squares: f64,
 }
 
-/// Reusable buffers of [`fit`], [`gradients`] and [`loss`]: one [`Band`]
-/// per band.
+/// Actual coverage calls in one band's pixel loops; absent from production.
+#[cfg(test)]
 #[derive(Default)]
-pub(super) struct Workspace<F> {
-    bands: Vec<Band<F>>,
+struct Evaluations {
+    cover: std::cell::Cell<usize>,
+    gradient: std::cell::Cell<usize>,
 }
 
-impl<F: Real> Workspace<F> {
-    /// The bands of a canvas `height` rows high.
-    fn bands(&mut self, height: usize) -> &mut [Band<F>] {
-        self.bands
-            .resize_with(height.div_ceil(BAND_ROWS), Band::default);
-        for (index, band) in self.bands.iter_mut().enumerate() {
-            band.y0 = index * BAND_ROWS;
-            band.y1 = (band.y0 + BAND_ROWS).min(height);
+#[cfg(test)]
+impl Evaluations {
+    fn cover<F>(&self, layer: &Prepared<'_, F>) {
+        if layer.kind != Kind::Masked {
+            self.cover.set(self.cover.get() + 1);
         }
-        &mut self.bands
+    }
+    fn gradient<F>(&self, layer: &Prepared<'_, F>) {
+        if layer.kind != Kind::Masked {
+            self.gradient.set(self.gradient.get() + 1);
+        }
+    }
+    fn reset(&self) {
+        self.cover.set(0);
+        self.gradient.set(0);
     }
 }
 
-/// Composites `layer` onto `canvas`, the rows from `top` on, within `rows`,
-/// and folds it into `uncovered` if given.
-fn paint<F: Real>(
-    canvas: &mut [F],
+/// The exact geometry of the whole stack. Colours, opacities and masks
+/// are absent: fixed layers are always evaluated, never cached.
+#[derive(Default)]
+struct CoverageKey {
     width: usize,
-    top: usize,
-    rows: Range<usize>,
-    layer: &Prepared<'_, F>,
-    uncovered: Option<&mut [F]>,
-) {
-    by_cover!(
-        layer,
-        C => paint_with::<C, F>(canvas, width, top, rows, layer, uncovered)
-    );
+    height: usize,
+    filter: u64,
+    layers: Vec<(Outline, [u64; COORDS])>,
 }
 
-/// [`paint`] with the layer's [`Cover`] `C`.
-fn paint_with<C: Cover, F: Real>(
-    canvas: &mut [F],
+impl CoverageKey {
+    fn matches<F>(&self, scene: &Scene<F>, layers: &[Layer]) -> bool {
+        self.width == scene.width
+            && self.height == scene.height
+            && self.filter == scene.filter.to_bits()
+            && self.layers.len() == layers.len()
+            && self
+                .layers
+                .iter()
+                .zip(layers)
+                .all(|((outline, params), layer)| {
+                    *outline == layer.outline && *params == layer.params.map(f64::to_bits)
+                })
+    }
+
+    fn store<F>(&mut self, scene: &Scene<F>, layers: &[Layer]) {
+        self.width = scene.width;
+        self.height = scene.height;
+        self.filter = scene.filter.to_bits();
+        self.layers.clear();
+        self.layers.extend(
+            layers
+                .iter()
+                .map(|layer| (layer.outline, layer.params.map(f64::to_bits))),
+        );
+    }
+}
+
+/// Reusable buffers of [`fit`], [`gradients`] and [`loss`]: one [`Band`]
+/// per band, with an all-or-nothing geometry key and a whole-canvas plan
+/// for coverage reuse between fits and gradients. Loss neither reads nor
+/// writes coverage or its key.
+#[derive(Default)]
+pub(super) struct Workspace<F> {
+    bands: Vec<Band<F>>,
+    coverage_key: Option<CoverageKey>,
+    cached: Vec<bool>,
+    #[cfg(test)]
+    coverage_budget: Option<usize>,
+}
+
+impl<F: Real> Workspace<F> {
+    #[cfg(test)]
+    fn set_coverage_budget(&mut self, budget: usize) {
+        self.coverage_budget = Some(budget);
+        self.coverage_key = None;
+    }
+
+    /// Select whole layers before the fork, independent of bands and
+    /// thread count. Oversized layers do not prevent later ones fitting.
+    fn plan_coverage(&mut self, layers: &[Prepared<'_, F>]) {
+        let mut remaining = COVERAGE_BUDGET;
+        #[cfg(test)]
+        if let Some(budget) = self.coverage_budget {
+            remaining = budget;
+        }
+        self.cached.clear();
+        self.cached.extend(layers.iter().map(|layer| {
+            let bytes = (layer.x1 - layer.x0) * (layer.y1 - layer.y0) * size_of::<F>();
+            let cached = layer.kind != Kind::Masked && bytes <= remaining;
+            if cached {
+                remaining -= bytes;
+            }
+            cached
+        }));
+    }
+
+    /// The active bands of a canvas `height` rows high. Keep inactive
+    /// bands too, so a loss on another canvas cannot discard valid coverage.
+    fn bands(&mut self, height: usize) -> &mut [Band<F>] {
+        let count = height.div_ceil(BAND_ROWS);
+        if self.bands.len() < count {
+            self.bands.resize_with(count, Band::default);
+        }
+        for (index, band) in self.bands[..count].iter_mut().enumerate() {
+            band.y0 = index * BAND_ROWS;
+            band.y1 = (band.y0 + BAND_ROWS).min(height);
+        }
+        &mut self.bands[..count]
+    }
+}
+
+/// Coverage for one paint: evaluate, evaluate and record, or read exactly
+/// the pixels of this layer's bounding box within the band's rows.
+enum Coverage<'a, F> {
+    Evaluate,
+    Record(&'a mut Vec<F>),
+    Cached(&'a [F]),
+}
+
+/// One layer's pixels in a band. Dispatch is once per layer; all pixel
+/// loops are monomorphised, including the readers of cached coverage.
+struct Paint<'a, F> {
     width: usize,
     top: usize,
     rows: Range<usize>,
-    layer: &Prepared<'_, F>,
-    mut uncovered: Option<&mut [F]>,
-) {
-    for y in rows {
-        let line = &mut canvas[3 * width * (y - top)..][..3 * width];
-        let fy = F::of(y as f64);
-        for x in layer.x0..layer.x1 {
-            let cov = C::cover(layer, x, y, fy);
-            if cov > F::of(0.0) {
-                let w = layer.opacity * cov;
-                for c in 0..3 {
-                    let value = &mut line[3 * x + c];
-                    *value += w * (layer.color[c] - *value);
-                }
-                if let Some(uncovered) = uncovered.as_deref_mut() {
-                    let p = width * (y - top) + x;
-                    uncovered[p] = uncovered[p] * (F::of(1.0) - w);
+    layer: &'a Prepared<'a, F>,
+    #[cfg(test)]
+    evaluations: &'a Evaluations,
+}
+
+impl<F: Real> Paint<'_, F> {
+    /// Composites the layer and folds it into `uncovered` if given.
+    fn paint(&self, canvas: &mut [F], uncovered: Option<&mut [F]>, coverage: Coverage<'_, F>) {
+        match coverage {
+            Coverage::Evaluate => by_cover!(self.layer, C =>
+                self.paint_with(canvas, uncovered, |x, y, fy| self.cover::<C>(x, y, fy))),
+            Coverage::Record(values) => by_cover!(self.layer, C =>
+            self.paint_with(canvas, uncovered, |x, y, fy| {
+                let cov = self.cover::<C>(x, y, fy);
+                values.push(cov);
+                cov
+            })),
+            Coverage::Cached(values) => {
+                let mut pixels = values.iter();
+                self.paint_with(canvas, uncovered, |_, _, _| {
+                    *pixels.next().expect("cached bounding-box pixel")
+                });
+            }
+        }
+    }
+
+    #[inline]
+    fn cover<C: Cover>(&self, x: usize, y: usize, fy: F) -> F {
+        #[cfg(test)]
+        self.evaluations.cover(self.layer);
+        C::cover(self.layer, x, y, fy)
+    }
+
+    /// The same arithmetic for evaluated, recording and cached coverage.
+    fn paint_with(
+        &self,
+        canvas: &mut [F],
+        mut uncovered: Option<&mut [F]>,
+        mut cover: impl FnMut(usize, usize, F) -> F,
+    ) {
+        let layer = self.layer;
+        for y in self.rows.clone() {
+            let line = &mut canvas[3 * self.width * (y - self.top)..][..3 * self.width];
+            let fy = F::of(y as f64);
+            for x in layer.x0..layer.x1 {
+                let cov = cover(x, y, fy);
+                if cov > F::of(0.0) {
+                    let w = layer.opacity * cov;
+                    for c in 0..3 {
+                        let value = &mut line[3 * x + c];
+                        *value += w * (layer.color[c] - *value);
+                    }
+                    if let Some(uncovered) = uncovered.as_deref_mut() {
+                        let p = self.width * (y - self.top) + x;
+                        uncovered[p] = uncovered[p] * (F::of(1.0) - w);
+                    }
                 }
             }
         }
@@ -1681,16 +1828,26 @@ impl<F: Real> Band<F> {
     /// Composites `layers` from the background into the band's canvas,
     /// keeping the canvas before every `interval`-th layer (none with
     /// `interval` 0) and, with `uncovered`, the transmittance of the whole
-    /// stack; then sets the residual to `X − T`.
+    /// stack; then sets the residual to `X − T`. With a cache plan, records
+    /// selected coverage on a cold pass and reads it on a warm pass. With
+    /// no plan (loss), neither reads nor writes the coverage buffers.
     fn forward(
         &mut self,
         scene: &Scene<F>,
         layers: &[Prepared<'_, F>],
         interval: usize,
         uncovered: bool,
+        cache: Option<(&[bool], bool)>,
     ) {
+        #[cfg(test)]
+        self.evaluations.reset();
         let width = scene.width;
         let (y0, y1) = (self.y0, self.y1);
+        if let Some((cached, false)) = cache {
+            self.coverage.clear();
+            self.coverage_ranges.clear();
+            self.coverage_ranges.resize(cached.len(), None);
+        }
         self.canvas.clear();
         self.canvas
             .extend((0..width * (y1 - y0)).flat_map(|_| scene.background));
@@ -1705,7 +1862,34 @@ impl<F: Real> Band<F> {
             }
             let rows = layer.rows(y0, y1);
             let uncovered = uncovered.then_some(self.uncovered.as_mut_slice());
-            paint(&mut self.canvas, width, y0, rows, layer, uncovered);
+            let paint = Paint {
+                width,
+                top: y0,
+                rows,
+                layer,
+                #[cfg(test)]
+                evaluations: &self.evaluations,
+            };
+            match cache {
+                Some((cached, false)) if cached[index] => {
+                    let start = self.coverage.len();
+                    paint.paint(
+                        &mut self.canvas,
+                        uncovered,
+                        Coverage::Record(&mut self.coverage),
+                    );
+                    self.coverage_ranges[index] = Some(start..self.coverage.len());
+                }
+                Some((_, true)) if self.coverage_ranges[index].is_some() => {
+                    let range = self.coverage_ranges[index].as_ref().unwrap().clone();
+                    paint.paint(
+                        &mut self.canvas,
+                        uncovered,
+                        Coverage::Cached(&self.coverage[range]),
+                    );
+                }
+                _ => paint.paint(&mut self.canvas, uncovered, Coverage::Evaluate),
+            }
         }
         let target = &scene.target[3 * width * y0..3 * width * y1];
         self.residual.clear();
@@ -1716,24 +1900,40 @@ impl<F: Real> Band<F> {
     /// One band's part of [`fit`] or [`gradients`]: the forward pass, then
     /// the top-down reverse pass, which sets `sums` to the band's partial
     /// sums per layer.
-    fn pass(&mut self, scene: &Scene<F>, layers: &[Prepared<'_, F>], interval: usize, pass: Pass) {
+    fn pass(
+        &mut self,
+        scene: &Scene<F>,
+        layers: &[Prepared<'_, F>],
+        interval: usize,
+        pass: Pass,
+        cached: &[bool],
+        warm: bool,
+    ) {
         let width = scene.width;
         let n = layers.len();
         let (y0, y1) = (self.y0, self.y1);
         let fit = pass == Pass::Fit;
         // The fit needs only the transmittances, which need no canvas below
         // each layer.
-        self.forward(scene, layers, if fit { 0 } else { interval }, fit);
+        self.forward(
+            scene,
+            layers,
+            if fit { 0 } else { interval },
+            fit,
+            Some((cached, warm)),
+        );
         self.sums.clear();
         self.sums.resize(n, [0.0; PARAMS]);
         self.transmittance.clear();
         self.transmittance.resize(width * (y1 - y0), F::of(1.0));
         if fit {
-            for (layer, sums) in layers.iter().zip(&mut self.sums).rev() {
+            for (index, (layer, sums)) in layers.iter().zip(&mut self.sums).enumerate().rev() {
                 let rows = layer.rows(y0, y1);
                 if !rows.is_empty() {
                     let reverse = Reverse {
                         layer,
+                        #[cfg(test)]
+                        evaluations: &self.evaluations,
                         width,
                         top: y0,
                         rows,
@@ -1743,6 +1943,9 @@ impl<F: Real> Band<F> {
                         &self.uncovered,
                         &mut self.transmittance,
                         sums,
+                        self.coverage_ranges[index]
+                            .as_ref()
+                            .map(|r| &self.coverage[r.clone()]),
                     );
                 }
             }
@@ -1757,14 +1960,29 @@ impl<F: Real> Band<F> {
             // inside its bounding box.
             self.canvas
                 .copy_from_slice(&self.checkpoints[segment * size..][..size]);
-            for (layer, below) in layers[start..end].iter().zip(&mut self.below) {
+            for (local, (layer, below)) in
+                layers[start..end].iter().zip(&mut self.below).enumerate()
+            {
                 below.clear();
                 let rows = layer.rows(y0, y1);
                 for y in rows.clone() {
                     let row = 3 * width * (y - y0);
                     below.extend_from_slice(&self.canvas[row + 3 * layer.x0..row + 3 * layer.x1]);
                 }
-                paint(&mut self.canvas, width, y0, rows, layer, None);
+                let coverage = self.coverage_ranges[start + local]
+                    .as_ref()
+                    .map_or(Coverage::Evaluate, |r| {
+                        Coverage::Cached(&self.coverage[r.clone()])
+                    });
+                Paint {
+                    width,
+                    top: y0,
+                    rows,
+                    layer,
+                    #[cfg(test)]
+                    evaluations: &self.evaluations,
+                }
+                .paint(&mut self.canvas, None, coverage);
             }
             for index in (start..end).rev() {
                 let layer = &layers[index];
@@ -1772,6 +1990,8 @@ impl<F: Real> Band<F> {
                 if !rows.is_empty() {
                     let reverse = Reverse {
                         layer,
+                        #[cfg(test)]
+                        evaluations: &self.evaluations,
                         width,
                         top: y0,
                         rows,
@@ -1793,6 +2013,8 @@ impl<F: Real> Band<F> {
 /// above, `w` the layer's opacity times its coverage, and `g = A · w` the
 /// weight of the layer's colour in the final composite.
 struct Reverse<'a, F> {
+    #[cfg(test)]
+    evaluations: &'a Evaluations,
     layer: &'a Prepared<'a, F>,
     width: usize,
     top: usize,
@@ -1809,26 +2031,37 @@ impl<F: Real> Reverse<'_, F> {
         uncovered: &[F],
         transmittance: &mut [F],
         sums: &mut [f64; PARAMS],
+        coverage: Option<&[F]>,
     ) {
-        by_cover!(
-            self.layer,
-            C => self.fit_with::<C>(residual, uncovered, transmittance, sums)
-        );
+        if let Some(values) = coverage {
+            let mut pixels = values.iter();
+            self.fit_with(residual, uncovered, transmittance, sums, |_, _, _| {
+                *pixels.next().expect("cached bounding-box pixel")
+            });
+        } else {
+            by_cover!(self.layer, C => self.fit_with(residual, uncovered, transmittance, sums,
+            |x, y, fy| {
+                #[cfg(test)]
+                self.evaluations.cover(self.layer);
+                C::cover(self.layer, x, y, fy)
+            }));
+        }
     }
 
-    /// [`Self::fit`] with the layer's [`Cover`] `C`.
-    fn fit_with<C: Cover>(
+    /// The same arithmetic for evaluated and cached coverage.
+    fn fit_with(
         &self,
         residual: &[F],
         uncovered: &[F],
         transmittance: &mut [F],
         sums: &mut [f64; PARAMS],
+        mut cover: impl FnMut(usize, usize, F) -> F,
     ) {
         let layer = self.layer;
         for y in self.rows.clone() {
             let fy = F::of(y as f64);
             for x in layer.x0..layer.x1 {
-                let cov = C::cover(layer, x, y, fy);
+                let cov = cover(x, y, fy);
                 if cov <= F::of(0.0) {
                     continue;
                 }
@@ -1878,6 +2111,8 @@ impl<F: Real> Reverse<'_, F> {
         for (local, y) in self.rows.clone().enumerate() {
             let fy = F::of(y as f64);
             for x in layer.x0..layer.x1 {
+                #[cfg(test)]
+                self.evaluations.gradient(layer);
                 let Some((cov, cov_grad)) = C::cover_grad(layer, x, y, fy) else {
                     continue;
                 };
@@ -1918,7 +2153,7 @@ pub(super) fn loss<F: Real>(scene: &Scene<F>, layers: &[Layer], work: &mut Works
     let layers = prepare(scene, layers);
     let bands = work.bands(scene.height);
     bands.par_iter_mut().for_each(|band| {
-        band.forward(scene, &layers, 0, false);
+        band.forward(scene, &layers, 0, false, None);
         band.squares = band.residual.iter().map(|r| r.get() * r.get()).sum();
     });
     bands.iter().map(|band| band.squares).sum()
@@ -1927,6 +2162,13 @@ pub(super) fn loss<F: Real>(scene: &Scene<F>, layers: &[Layer], work: &mut Works
 /// Runs `pass` over `layers` as one task per band of [`BAND_ROWS`] rows,
 /// with a single fork and join, and returns the bands' partial sums per
 /// layer reduced in band order.
+///
+/// Before the fork, the whole-canvas budget selects non-fixed layers in
+/// stack order. On new geometry each band records their exact coverage in
+/// its forward pass; replay and reverse fit read it, as do subsequent
+/// passes with the same geometry key. Unselected layers and masks are
+/// evaluated as before. Reverse gradients always evaluate `cover_grad`,
+/// even at pixels whose cached coverage is zero.
 ///
 /// Each band composites every layer that reaches it, then runs the
 /// top-down reverse pass over its own rows. The reverse pass needs, at
@@ -1945,12 +2187,21 @@ fn run<F: Real>(
     work: &mut Workspace<F>,
 ) -> Vec<[f64; PARAMS]> {
     let n = layers.len();
-    let layers = prepare(scene, layers);
+    let warm = work
+        .coverage_key
+        .as_ref()
+        .is_some_and(|key| key.matches(scene, layers));
+    let prepared = prepare(scene, layers);
+    if !warm {
+        work.plan_coverage(&prepared);
+        work.bands.truncate(scene.height.div_ceil(BAND_ROWS));
+    }
     let interval = checkpoint_interval(n, 3 * scene.width * scene.height * size_of::<F>());
-    let bands = work.bands(scene.height);
+    work.bands(scene.height);
+    let bands = &mut work.bands[..scene.height.div_ceil(BAND_ROWS)];
     bands
         .par_iter_mut()
-        .for_each(|band| band.pass(scene, &layers, interval, pass));
+        .for_each(|band| band.pass(scene, &prepared, interval, pass, &work.cached, warm));
     let mut totals = vec![[0.0; PARAMS]; n];
     for band in bands.iter() {
         for (total, sums) in totals.iter_mut().zip(&band.sums) {
@@ -1958,6 +2209,11 @@ fn run<F: Real>(
                 *total += value;
             }
         }
+    }
+    if !warm {
+        work.coverage_key
+            .get_or_insert_with(CoverageKey::default)
+            .store(scene, layers);
     }
     totals
 }
@@ -3302,6 +3558,265 @@ pub(super) mod tests {
         }
     }
 
+    fn coverage_scene() -> (Scene<f64>, Vec<Layer>) {
+        let mut rng = ChaCha8Rng::seed_from_u64(71);
+        let (scene, mut layers) = mixed_scene(&mut rng, 48, 40, (3, 3, 2));
+        layers.extend(random_rotated(&mut rng, 2, 40.0));
+        layers.extend(random_boxes(&mut rng, 2, 40.0));
+        layers.extend(random_conics(&mut rng, 2, 40.0, 1.0..24.0));
+        // A zero-coverage pixel on an axis-aligned kink still has a gradient.
+        layers.push(Layer {
+            outline: Outline::Rect,
+            params: [10.5, 8.5, 20.5, 18.5, 0.0, 0.0, 0.0, 0.0],
+            alpha: 128.0,
+            color: [80.0, 160.0, 220.0],
+        });
+        (scene, layers)
+    }
+
+    fn evaluations<F>(work: &Workspace<F>) -> (usize, usize) {
+        work.bands.iter().fold((0, 0), |(c, g), b| {
+            (
+                c + b.evaluations.cover.get(),
+                g + b.evaluations.gradient.get(),
+            )
+        })
+    }
+
+    fn moving_pixels<F: Real>(scene: &Scene<F>, layers: &[Layer]) -> usize {
+        prepare(scene, layers)
+            .iter()
+            .filter(|p| p.kind != Kind::Masked)
+            .map(|p| (p.x1 - p.x0) * (p.y1 - p.y0))
+            .sum()
+    }
+
+    #[test]
+    fn coverage_is_evaluated_once_then_reused() {
+        let (scene, mut layers) = coverage_scene();
+        let mut work = Workspace::default();
+        let pixels = moving_pixels(&scene, &layers);
+        fit(&scene, &mut layers, &mut work);
+        assert_eq!(evaluations(&work), (pixels, 0), "cold fit");
+        gradients(&scene, &layers, &mut work);
+        assert_eq!(evaluations(&work), (0, pixels), "warm gradient");
+        layers[0].params[0] = layers[0].params[0].next_up();
+        let pixels = moving_pixels(&scene, &layers);
+        gradients(&scene, &layers, &mut work);
+        assert_eq!(
+            evaluations(&work),
+            (pixels, pixels),
+            "one ulp invalidates the stack"
+        );
+    }
+
+    #[test]
+    fn coverage_budget_selects_whole_layers_in_stack_order() {
+        let mut rng = ChaCha8Rng::seed_from_u64(71);
+        let (scene, fixed) = mixed_scene(&mut rng, 48, 40, (0, 0, 1));
+        let rect = |size: f64| Layer {
+            outline: Outline::Rect,
+            params: [1.0, 1.0, size, size, 0.0, 0.0, 0.0, 0.0],
+            alpha: 128.0,
+            color: [80.0, 160.0, 220.0],
+        };
+        // With a two-small-layer budget, skip a large layer and still
+        // admit the small layer after it; a mask consumes no budget.
+        let mut layers = vec![rect(3.0), fixed[0], rect(30.0), rect(3.0), rect(3.0)];
+        let small = Prepared::new(&layers[0], &scene);
+        let small_pixels = (small.x1 - small.x0) * (small.y1 - small.y0);
+        let budget = 2 * small_pixels * size_of::<f64>();
+        let expected = vec![true, false, false, true, false];
+        let cached_pixels = 2 * small_pixels;
+        let pixels = moving_pixels(&scene, &layers);
+        let mut work = Workspace::default();
+        work.set_coverage_budget(budget);
+        fit(&scene, &mut layers, &mut work);
+        assert_eq!(work.cached, expected);
+        assert_eq!(
+            evaluations(&work),
+            (cached_pixels + 2 * (pixels - cached_pixels), 0)
+        );
+        assert_eq!(
+            work.bands
+                .iter()
+                .map(|b| b.coverage.len() * size_of::<f64>())
+                .sum::<usize>(),
+            budget
+        );
+        for band in &work.bands {
+            for (range, &cached) in band.coverage_ranges.iter().zip(&expected) {
+                assert_eq!(range.is_some(), cached);
+            }
+        }
+        gradients(&scene, &layers, &mut work);
+        assert_eq!(evaluations(&work), (2 * (pixels - cached_pixels), pixels));
+    }
+
+    #[test]
+    fn coverage_key_tracks_exact_geometry_and_ignores_masks() {
+        let (mut scene, mut layers) = coverage_scene();
+        let mut work = Workspace::default();
+        fit(&scene, &mut layers, &mut work);
+        for change in 0..8 {
+            match change {
+                0 => scene.filter = scene.filter.next_up(),
+                1 => scene.width += 1,
+                2 => scene.height -= 17,
+                3 => scene.height += 17,
+                4 => layers.last_mut().unwrap().outline = Outline::Ellipse,
+                5 => layers.swap(0, 2),
+                6 => layers.push(layers[0]),
+                _ => {
+                    layers.pop();
+                }
+            }
+            scene.target.resize(3 * scene.width * scene.height, 0.0);
+            let actual = gradients(&scene, &layers, &mut work);
+            assert_eq!(
+                evaluations(&work),
+                (
+                    moving_pixels(&scene, &layers),
+                    moving_pixels(&scene, &layers)
+                )
+            );
+            let expected = gradients(&scene, &layers, &mut Workspace::default());
+            assert_eq!(
+                actual
+                    .iter()
+                    .map(|a| a.map(f64::to_bits))
+                    .collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(|a| a.map(f64::to_bits))
+                    .collect::<Vec<_>>()
+            );
+        }
+        // A loss on a shorter canvas must not discard the old cache's bands.
+        scene.height -= 17;
+        loss(&scene, &layers, &mut work);
+        scene.height += 17;
+        scene.masks[0].coverage.fill(0.375);
+        let actual = gradients(&scene, &layers, &mut work);
+        assert_eq!(evaluations(&work), (0, moving_pixels(&scene, &layers)));
+        let expected = gradients(&scene, &layers, &mut Workspace::default());
+        assert_eq!(
+            actual
+                .iter()
+                .map(|a| a.map(f64::to_bits))
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|a| a.map(f64::to_bits))
+                .collect::<Vec<_>>()
+        );
+        // The key uses f64 bits even for geometry prepared in f32, and
+        // includes unused parameters and the distinction between ±0.
+        let single = to_single(&scene);
+        let mut narrow = Workspace::default();
+        gradients(&single, &layers, &mut narrow);
+        let previous = layers[0].params[0];
+        layers[0].params[0] = previous.next_up();
+        assert_eq!(layers[0].params[0] as f32, previous as f32);
+        gradients(&single, &layers, &mut narrow);
+        assert_eq!(evaluations(&narrow).0, moving_pixels(&single, &layers));
+        let fixed = layers
+            .iter_mut()
+            .find(|l| matches!(l.outline, Outline::Fixed(_)))
+            .unwrap();
+        fixed.params[COORDS - 1] = -0.0;
+        gradients(&single, &layers, &mut narrow);
+        assert_eq!(evaluations(&narrow).0, moving_pixels(&single, &layers));
+    }
+
+    fn assert_layer_bits(a: &[Layer], b: &[Layer]) {
+        assert_eq!(a.len(), b.len());
+        for (a, b) in a.iter().zip(b) {
+            assert_eq!(a.outline, b.outline);
+            assert_eq!(a.params.map(f64::to_bits), b.params.map(f64::to_bits));
+            assert_eq!(a.alpha.to_bits(), b.alpha.to_bits());
+            assert_eq!(a.color.map(f64::to_bits), b.color.map(f64::to_bits));
+        }
+    }
+
+    fn reused_passes<F: Real>(scene: &Scene<F>, initial: &[Layer], budget: usize) {
+        let mut work = Workspace::default();
+        work.set_coverage_budget(budget);
+        let mut layers = initial.to_vec();
+        let mut reference = initial.to_vec();
+        for iteration in 0..6 {
+            fit(scene, &mut layers, &mut work);
+            if iteration == 0 && budget > 0 && budget < usize::MAX {
+                assert!(work.cached.iter().any(|&v| v));
+                assert!(
+                    layers
+                        .iter()
+                        .zip(&work.cached)
+                        .any(|(l, &v)| !matches!(l.outline, Outline::Fixed(_)) && !v)
+                );
+            }
+            fit(scene, &mut reference, &mut Workspace::default());
+            assert_layer_bits(&layers, &reference);
+            let actual = gradients(scene, &layers, &mut work);
+            let expected = gradients(scene, &reference, &mut Workspace::default());
+            assert_eq!(
+                actual
+                    .iter()
+                    .map(|a| a.map(f64::to_bits))
+                    .collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(|a| a.map(f64::to_bits))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                loss(scene, &layers, &mut work).to_bits(),
+                loss(scene, &reference, &mut Workspace::default()).to_bits()
+            );
+            // Loss must leave the warm cache usable.
+            fit(scene, &mut layers, &mut work);
+            fit(scene, &mut reference, &mut Workspace::default());
+            assert_layer_bits(&layers, &reference);
+            for (index, layer) in layers.iter_mut().enumerate() {
+                if matches!(layer.outline, Outline::Fixed(_)) {
+                    continue;
+                }
+                if iteration % 3 == 0 {
+                    if index == 0 {
+                        layer.params[0] = layer.params[0].next_up();
+                    } else if index % 3 == 0 {
+                        layer.params[0] += 0.001;
+                    }
+                } else if iteration % 3 == 1 {
+                    layer.alpha += 0.01;
+                } else {
+                    layer.color[0] += 0.01;
+                }
+            }
+            reference.clone_from(&layers);
+        }
+    }
+
+    #[test]
+    fn reused_coverage_is_bit_identical_to_fresh_passes() {
+        let (scene, layers) = coverage_scene();
+        let kink = Prepared::new(layers.last().unwrap(), &scene);
+        assert_eq!(Boxed::cover(&kink, 10, 10, 10.0), 0.0);
+        let (cov, grad) = Boxed::cover_grad(&kink, 10, 10, 10.0).expect("kink gradient");
+        assert_eq!(cov, 0.0);
+        assert!(grad.iter().any(|&v| v != 0.0));
+        // Enough for the first moving layer, but not the whole stack.
+        let first = Prepared::new(&layers[0], &scene);
+        let pixels = (first.x1 - first.x0) * (first.y1 - first.y0);
+        for budget in [0, pixels * size_of::<f64>(), usize::MAX] {
+            reused_passes(&scene, &layers, budget);
+        }
+        let single = to_single(&scene);
+        for budget in [0, pixels * size_of::<f32>(), usize::MAX] {
+            reused_passes(&single, &layers, budget);
+        }
+    }
+
     /// The loss, the gradients and the fit do not depend on the number of
     /// threads, with curved layers that cross every band among the others.
     #[test]
@@ -3317,6 +3832,7 @@ pub(super) mod tests {
                 .expect("pool");
             pool.install(|| {
                 let mut work = Workspace::default();
+                fit(&scene, &mut tris, &mut work);
                 let gradients = gradients(&scene, &tris, &mut work);
                 fit(&scene, &mut tris, &mut work);
                 let loss = loss(&scene, &tris, &mut work);
@@ -3328,8 +3844,19 @@ pub(super) mod tests {
         for threads in [2, 4, 8] {
             let other = run(threads);
             assert_eq!(one.0.to_bits(), other.0.to_bits(), "{threads} threads");
-            assert_eq!(one.1, other.1, "{threads} threads");
-            assert_eq!(one.2, other.2, "{threads} threads");
+            assert_eq!(
+                one.1
+                    .iter()
+                    .map(|g| g.map(f64::to_bits))
+                    .collect::<Vec<_>>(),
+                other
+                    .1
+                    .iter()
+                    .map(|g| g.map(f64::to_bits))
+                    .collect::<Vec<_>>(),
+                "{threads} threads"
+            );
+            assert_layer_bits(&one.2, &other.2);
         }
     }
 }
