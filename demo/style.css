@@ -127,7 +127,7 @@ a:hover {
 .chip,
 .caption-meta,
 .switch-label,
-.footer {
+.colophon {
   font-family: var(--mono);
   font-size: 11px;
   font-weight: 500;
@@ -137,9 +137,20 @@ a:hover {
 
 .section-label {
   display: block;
-  margin: 0 0 10px;
+  margin: 0 0 7px;
   padding: 0;
   color: var(--ink);
+}
+
+/* A floated legend is laid out as the group's first line, like the other
+   groups' labels, instead of sitting on the fieldset's top rule. */
+legend.section-label {
+  float: left;
+  width: 100%;
+}
+
+legend.section-label + * {
+  clear: both;
 }
 
 /* --- Masthead --- */
@@ -147,11 +158,11 @@ a:hover {
 .masthead {
   display: flex;
   align-items: baseline;
-  gap: 8px 24px;
+  gap: 4px 24px;
   flex-wrap: wrap;
   max-width: 1360px;
-  margin: 0 auto 24px;
-  padding: 26px var(--gutter) 14px;
+  margin: 0 auto 16px;
+  padding: 12px var(--gutter) 9px;
   border-bottom: 1px solid var(--ink);
 }
 
@@ -163,8 +174,8 @@ a:hover {
 }
 
 .brand-mark {
-  width: 26px;
-  height: 26px;
+  width: 24px;
+  height: 24px;
   align-self: center;
 }
 
@@ -181,7 +192,7 @@ a:hover {
 
 .brand-name {
   font-family: var(--serif);
-  font-size: 34px;
+  font-size: 30px;
   font-weight: 600;
   line-height: 1;
   letter-spacing: -0.015em;
@@ -191,7 +202,7 @@ a:hover {
   margin: 0;
   flex: 1 1 260px;
   font-family: var(--serif);
-  font-size: 17px;
+  font-size: 16px;
   font-style: italic;
   color: var(--ink-2);
 }
@@ -217,38 +228,56 @@ a:hover {
 
 /* --- Layout --- */
 
+/* One column below 960 px: the page scrolls, and the actions stay at the
+   viewport's bottom. From 960 px, an app that fills the viewport (see the
+   end of this file): the stage on the left, the inputs on the right in a
+   column of their own that scrolls when it has to. */
 .layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 340px;
-  gap: 32px;
-  align-items: start;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 24px;
   max-width: 1360px;
   margin: 0 auto;
-  padding: 0 var(--gutter) 32px;
+  padding: 0 var(--gutter);
 }
 
+/* The stage, then the strip of caption and status under it once there is
+   a picture. */
 .stage-column {
+  display: grid;
+  grid-auto-rows: auto;
+  align-content: start;
+  gap: 14px;
   min-width: 0;
+}
+
+/* Below 960 px its parts, the form and the dock, are the layout's own
+   items, so the dock sticks to the viewport over the whole page. */
+.sidebar {
+  display: contents;
 }
 
 /* --- Stage --- */
 
-/* Empty, the stage is a drop target of its own height. With a picture it
-   has no wall: it takes the picture's shape, as wide as the column and at
-   most --picture-height tall, so only a tall picture leaves room at its sides. */
+/* Empty, the stage is a dashed drop target. With a picture it has no wall:
+   the picture is as wide as the stage and at most --picture-height tall,
+   centred. Below 960 px the stage takes the picture's height; from 960 px it
+   has a height of its own, and --picture-height is that height, so the
+   picture is fitted inside it both ways. */
 .stage {
-  --picture-height: max(360px, 100svh - 240px);
+  --picture-height: max(320px, 62svh);
   position: relative;
   container-type: inline-size;
   display: grid;
   place-items: center;
-  overflow: hidden;
 }
 
 .stage[data-state="empty"] {
-  height: clamp(360px, 100svh - 280px, 820px);
-  padding: 28px;
+  height: clamp(320px, 50svh, 480px);
+  padding: 24px;
+  overflow: hidden;
   background: var(--paper-2);
+  border: 1px dashed var(--rule-strong);
 }
 
 .frame {
@@ -471,16 +500,24 @@ a:hover {
 }
 
 .dropzone-hint {
-  margin: 4px 0 14px;
+  margin: 4px 0 0;
   color: var(--ink-2);
 }
 
+/* Where the samples are: to the right, or below on narrow screens. */
+.dropzone-hint::after {
+  content: " \2193" / "";
+}
+
 .dropzone-formats {
-  margin: 14px 0 0;
+  margin: 16px 0 0;
   font-size: 13px;
   color: var(--muted);
 }
 
+/* Shown only while a file is dragged over the stage. It fades in, but has
+   no transition otherwise: a style computed before the stylesheet applies
+   would make it fade out over the drop zone on load. */
 .drop-veil {
   position: absolute;
   inset: 10px;
@@ -506,8 +543,8 @@ a:hover {
   flex-wrap: wrap;
   align-items: flex-end;
   justify-content: space-between;
-  gap: 12px 24px;
-  margin: 16px 0 0;
+  gap: 10px 24px;
+  margin: 0;
 }
 
 .caption[hidden] {
@@ -542,21 +579,26 @@ a:hover {
   gap: 8px;
 }
 
-/* --- Status: shown once there is an image to render --- */
+/* --- Strip: the caption and the status, once there is an image --- */
+
+.strip {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.stage-column:has(> .stage[data-state="empty"]) .strip {
+  display: none;
+}
 
 .status {
   display: grid;
   grid-template-columns: auto minmax(120px, 1fr) auto;
   align-items: center;
   gap: 8px 24px;
-  margin-top: 14px;
-  padding: 12px 0;
+  padding: 8px 0;
   border-top: 1px solid var(--ink);
   border-bottom: 1px solid var(--rule);
-}
-
-.stage-column:has(> .stage[data-state="empty"]) .status {
-  display: none;
 }
 
 .status-head {
@@ -644,25 +686,12 @@ a:hover {
   font-variant-numeric: tabular-nums;
 }
 
-/* --- Samples and credits --- */
-
-.samples {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px 18px;
-  margin-top: 18px;
-}
-
-.samples .section-label {
-  margin: 0;
-  color: var(--muted);
-}
+/* --- Image: the samples, the file picker and the credits --- */
 
 .sample-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -670,8 +699,8 @@ a:hover {
 
 .sample {
   display: block;
-  width: 52px;
-  height: 52px;
+  width: 100%;
+  aspect-ratio: 1;
   padding: 0;
   border: 1px solid var(--rule-strong);
   background: var(--paper-2);
@@ -699,7 +728,7 @@ a:hover {
 }
 
 .credits {
-  flex-basis: 100%;
+  margin-top: 8px;
   color: var(--muted);
   font-size: 13px;
 }
@@ -732,7 +761,7 @@ a:hover {
 .group {
   min-width: 0;
   margin: 0;
-  padding: 14px 0 16px;
+  padding: 9px 0 11px;
   border: 0;
   border-top: 1px solid var(--rule);
 }
@@ -754,13 +783,14 @@ a:hover {
 
 .field-label {
   display: block;
-  margin: 12px 0 6px;
+  margin: 10px 0 6px;
   font-weight: 500;
 }
 
 .hint {
-  margin: 8px 0 0;
+  margin: 4px 0 0;
   font-size: 13px;
+  line-height: 1.4;
   color: var(--muted);
 }
 
@@ -782,8 +812,8 @@ a:hover {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
-  padding: 10px 4px 8px;
+  gap: 2px;
+  padding: 6px 4px 4px;
   background: var(--paper);
   color: var(--ink-2);
   font-size: 12px;
@@ -800,8 +830,8 @@ a:hover {
 }
 
 .shape-option svg {
-  width: 24px;
-  height: 24px;
+  width: 22px;
+  height: 22px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.3;
@@ -877,14 +907,14 @@ a:hover {
 .text {
   flex: 1;
   min-width: 0;
-  padding: 8px 10px;
+  padding: 6px 10px;
   font-family: var(--mono);
   font-size: 14px;
 }
 
 .select {
   width: 100%;
-  padding: 8px 10px;
+  padding: 6px 10px;
 }
 
 /* Ranges: a hairline track and a square ink thumb. */
@@ -892,7 +922,7 @@ a:hover {
   display: block;
   width: 100%;
   height: 20px;
-  margin: 8px 0 0;
+  margin: 6px 0 0;
   background: transparent;
   cursor: pointer;
   -webkit-appearance: none;
@@ -954,7 +984,7 @@ a:hover {
 
 .segmented label {
   position: relative;
-  padding: 5px 18px;
+  padding: 3px 14px;
   background: var(--paper);
   color: var(--ink-2);
   cursor: pointer;
@@ -973,7 +1003,10 @@ a:hover {
   display: flex;
   align-items: center;
   gap: 14px;
-  margin-top: 6px;
+}
+
+.alpha-row .segmented {
+  flex: none;
 }
 
 .alpha-row .range {
@@ -1043,12 +1076,23 @@ a:hover {
 
 /* --- Buttons --- */
 
+/* The dock: the error, if any, and the actions, under a rule. Sticky at
+   the viewport's bottom below 960 px; the right column's foot from 960 px. */
+.dock {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  margin: 0 calc(-1 * var(--gutter));
+  padding: 12px var(--gutter) calc(12px + env(safe-area-inset-bottom));
+  background: var(--paper);
+  border-top: 1px solid var(--ink);
+}
+
+/* Run and its switch take the wider share. */
 .actions {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
   gap: 8px;
-  padding-top: 16px;
-  border-top: 1px solid var(--ink);
 }
 
 .button {
@@ -1070,6 +1114,7 @@ a:hover {
 }
 
 .button svg {
+  flex: none;
   width: 14px;
   height: 14px;
   fill: currentColor;
@@ -1112,6 +1157,25 @@ a:hover {
   stroke: currentColor;
   stroke-width: 2;
   stroke-linecap: square;
+}
+
+/* "Choose image", and the hint beside it. */
+.choose-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 12px;
+}
+
+.choose-row .button {
+  flex: none;
+  min-height: 36px;
+  padding: 6px 14px;
+}
+
+.choose-row .hint {
+  margin: 0;
+  line-height: 1.35;
 }
 
 /* Run and the auto-run switch: one vermilion block, the switch its right
@@ -1188,8 +1252,8 @@ a:hover {
 }
 
 .error {
-  margin-top: 12px;
-  padding: 12px 14px;
+  margin-bottom: 12px;
+  padding: 10px 14px;
   border-left: 3px solid var(--danger);
   background: var(--danger-soft);
   color: var(--danger);
@@ -1214,37 +1278,96 @@ a:hover {
   overflow-wrap: anywhere;
 }
 
-/* --- Footer --- */
+/* --- Colophon: small print at the foot of the settings --- */
 
-.footer {
-  max-width: 1360px;
-  margin: 0 auto;
-  padding: 14px var(--gutter) 36px;
-  color: var(--muted);
-}
-
-.footer p {
-  margin: 0;
-  padding-top: 14px;
+.colophon {
+  margin: auto 0 0;
+  padding: 10px 0;
   border-top: 1px solid var(--rule);
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: none;
+  line-height: 1.5;
 }
 
-/* --- Narrow screens: the stage on top, the panel below. --- */
+/* --- Tablets: the settings in two columns where they fit --- */
 
-@media (max-width: 920px) {
+@media (min-width: 600px) and (max-width: 959px) {
+  .panel {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 32px;
+  }
+
+  .panel > .group:nth-child(2) {
+    padding-top: 0;
+    border-top: 0;
+  }
+
+  .colophon {
+    grid-column: 1 / -1;
+  }
+}
+
+/* --- Below 960 px: one column, the dock over the page's foot --- */
+
+@media (max-width: 959px) {
+  html {
+    /* Focus moves never hide a field under the dock. */
+    scroll-padding-bottom: 96px;
+  }
+}
+
+/* --- Phones --- */
+
+@media (max-width: 599px) {
+  .masthead {
+    gap: 2px 16px;
+    margin-bottom: 14px;
+    padding-top: 12px;
+  }
+
+  .brand-name {
+    font-size: 26px;
+  }
+
+  .tagline {
+    order: 3;
+    flex-basis: 100%;
+    font-size: 15px;
+  }
+
+  .badge {
+    order: 2;
+    margin-left: auto;
+  }
+
   .layout {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 28px;
+    gap: 20px;
   }
 
   .stage {
-    --picture-height: 80svh;
+    --picture-height: max(240px, 58svh);
   }
 
   .stage[data-state="empty"] {
-    height: min(68svh, 118vw);
-    min-height: 300px;
-    padding: 20px;
+    height: 260px;
+    padding: 16px;
+  }
+
+  .dropzone-art {
+    width: 96px;
+    height: 64px;
+    margin-bottom: 12px;
+  }
+
+  .dropzone-title {
+    font-size: 24px;
+  }
+
+  .dropzone-formats {
+    margin-top: 10px;
   }
 
   .status {
@@ -1266,37 +1389,85 @@ a:hover {
     border-left: 0;
   }
 
-  .masthead {
-    padding-top: 18px;
-    margin-bottom: 16px;
-  }
-
-  .brand-name {
-    font-size: 30px;
-  }
-
-  .tagline {
-    order: 3;
+  .exports {
     flex-basis: 100%;
   }
 
-  .badge {
-    order: 4;
+  .exports .button {
+    gap: 8px;
+    padding-inline: 8px;
+    font-size: 11px;
+    white-space: nowrap;
   }
 }
 
-@media (max-width: 420px) {
-  .samples {
-    gap: 8px;
+/* --- From 960 px: an app that fills the viewport, without page scroll --- */
+
+@media (min-width: 960px) {
+  body {
+    display: grid;
+    grid-template-rows: auto 1fr;
+    height: 100svh;
+    min-height: 0;
   }
 
-  .sample {
-    width: 48px;
-    height: 48px;
+  .masthead {
+    width: 100%;
   }
 
-  .exports {
-    flex-basis: 100%;
+  .layout {
+    grid-template-columns: minmax(0, 1fr) clamp(320px, 26vw, 380px);
+    grid-template-rows: 1fr;
+    gap: 32px;
+    width: 100%;
+    padding-bottom: 16px;
+  }
+
+  /* The stage takes what the strip leaves, never less than 320 px: on a
+     shorter viewport the page scrolls instead. */
+  .stage-column {
+    grid-template-rows: minmax(320px, 1fr);
+    align-content: stretch;
+  }
+
+  .stage {
+    --picture-height: 100cqh;
+    container-type: size;
+  }
+
+  .stage[data-state="empty"] {
+    height: auto;
+  }
+
+  .dropzone-hint::after {
+    content: " \2192" / "";
+  }
+
+  /* The right column: the form scrolls, the dock stays at its foot. Its
+     size is the layout's, never its content's. */
+  .sidebar {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    contain: size;
+  }
+
+  .panel {
+    flex: 1;
+    min-height: 0;
+    /* Room for the samples' and fields' focus rings inside the scroller. */
+    margin: 0 -4px;
+    padding: 0 4px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    scrollbar-color: var(--rule-strong) transparent;
+  }
+
+  .dock {
+    position: static;
+    margin: 0;
+    padding: 10px 0 0;
   }
 }
 
@@ -1312,7 +1483,7 @@ a:hover {
     animation: fade 0.4s ease-out;
   }
 
-  .drop-veil {
+  .stage[data-dragging="true"] .drop-veil {
     transition: opacity 0.15s ease;
   }
 

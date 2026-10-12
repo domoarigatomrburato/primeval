@@ -31,11 +31,16 @@ after(async () => {
 });
 
 /**
- * A fresh context and page on `origin`; `serviceWorkers` is Playwright's
- * option, and `initScript`, if given, runs in the page before the demo.
+ * A fresh context and page on `origin`; `serviceWorkers` and `viewport` are
+ * Playwright's options, and `initScript`, if given, runs in the page before
+ * the demo.
  */
-async function openDemo(origin, { serviceWorkers = "block", initScript } = {}) {
-  const context = await browser.newContext({ serviceWorkers, acceptDownloads: true });
+async function openDemo(origin, { serviceWorkers = "block", initScript, viewport } = {}) {
+  const context = await browser.newContext({
+    serviceWorkers,
+    acceptDownloads: true,
+    ...(viewport === undefined ? {} : { viewport }),
+  });
   if (initScript !== undefined) {
     await context.addInitScript(initScript);
   }
@@ -574,6 +579,184 @@ describe("demo, cross-origin isolated by headers", () => {
       assert.equal(await progress.count(), 1);
       assert.equal(await page.getByRole("button", { name: "Choose image" }).count(), 1);
       assert.equal(await page.getByRole("switch", { name: "Auto-run" }).count(), 1);
+    } finally {
+      await context.close();
+    }
+  });
+});
+
+/** A portrait sample and a landscape one. */
+const PORTRAIT = /American Gothic/;
+const LANDSCAPE = /Grand Prismatic Spring/;
+
+/** Loads a sample and waits for its run, a small one, to finish. */
+async function runSample(page, name) {
+  const previous = await page.evaluate(() => window.finishedRuns.length);
+  await page.getByRole("button", { name }).click();
+  const run = await waitForRun(page, previous);
+  assert.equal(run.outcome, "done");
+}
+
+/**
+ * The page's geometry: the viewport, the document's scroll size, and the
+ * client rectangles of the stage, the frame, the Run button, the sample
+ * buttons and the right column, the closest element holding both the
+ * settings form and Run.
+ */
+function layoutOf(page) {
+  return page.evaluate(() => {
+    const box = (element) => element.getBoundingClientRect().toJSON();
+    const run = document.querySelector("#run");
+    return {
+      width: window.innerWidth,
+      height: window.innerHeight,
+      scrollWidth: document.documentElement.scrollWidth,
+      scrollHeight: document.documentElement.scrollHeight,
+      stage: box(document.querySelector("#stage")),
+      frame: box(document.querySelector("#frame")),
+      run: box(run),
+      samples: [...document.querySelectorAll(".sample")].map(box),
+      column: box(document.querySelector("#controls").closest(":has(#run)")),
+    };
+  });
+}
+
+/** Whether `inner` lies inside `outer`, within `slack` pixels. */
+const inside = (inner, outer, slack = 1) =>
+  inner.left >= outer.left - slack &&
+  inner.top >= outer.top - slack &&
+  inner.right <= outer.right + slack &&
+  inner.bottom <= outer.bottom + slack;
+
+const viewportBox = ({ width, height }) => ({ left: 0, top: 0, right: width, bottom: height });
+
+describe("demo layout", () => {
+  let server;
+
+  before(async () => {
+    server = await startServer({ isolated: true, root: siteDir });
+  });
+
+  after(async () => {
+    await server?.close();
+  });
+
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 1280, height: 720 },
+    { width: 1024, height: 768 },
+  ]) {
+    const size = `${viewport.width}x${viewport.height}`;
+    test(`at ${size} the page does not scroll and the picture fits its stage`, async () => {
+      const { context, page, errors } = await openDemo(server.origin, { viewport });
+      try {
+        await setControls(page, { count: 4, resolution: 128 });
+        for (const sample of [PORTRAIT, LANDSCAPE]) {
+          await runSample(page, sample);
+          const layout = await layoutOf(page);
+          const what = `${size}, ${sample}: ${JSON.stringify(layout)}`;
+          assert.ok(layout.scrollHeight <= layout.height, `no vertical scroll, ${what}`);
+          assert.ok(layout.scrollWidth <= layout.width, `no horizontal scroll, ${what}`);
+          assert.ok(inside(layout.frame, viewportBox(layout)), `frame in the viewport, ${what}`);
+          assert.ok(inside(layout.frame, layout.stage), `frame in the stage, ${what}`);
+          assert.ok(
+            Math.abs(layout.frame.width - layout.stage.width) <= 1 ||
+              Math.abs(layout.frame.height - layout.stage.height) <= 1,
+            `frame fitted to the stage, ${what}`,
+          );
+          assert.ok(layout.column.left >= layout.stage.right, `column right of the stage, ${what}`);
+          for (const button of [...layout.samples, layout.run]) {
+            assert.ok(inside(button, layout.column), `control in the right column, ${what}`);
+          }
+          assert.ok(inside(layout.run, viewportBox(layout), 0), `Run in the viewport, ${what}`);
+        }
+        assert.deepEqual(errors, []);
+      } finally {
+        await context.close();
+      }
+    });
+  }
+
+  test("at 1280x560 the stage keeps at least 320 px", async () => {
+    const { context, page } = await openDemo(server.origin, {
+      viewport: { width: 1280, height: 560 },
+    });
+    try {
+      assert.ok((await layoutOf(page)).stage.height >= 320, "empty");
+      await setControls(page, { count: 4, resolution: 128 });
+      await runSample(page, PORTRAIT);
+      assert.ok((await layoutOf(page)).stage.height >= 320, "with a portrait");
+    } finally {
+      await context.close();
+    }
+  });
+
+  for (const viewport of [
+    { width: 390, height: 844 },
+    { width: 320, height: 640 },
+  ]) {
+    const size = `${viewport.width}x${viewport.height}`;
+    test(`on a ${size} phone the picture fits and Run stays in view`, async () => {
+      const { context, page, errors } = await openDemo(server.origin, { viewport });
+      try {
+        const empty = await layoutOf(page);
+        assert.ok(empty.scrollWidth <= empty.width, `no horizontal scroll, ${size}`);
+        assert.ok(
+          inside(empty.samples[0], viewportBox(empty), 0),
+          `the first sample above the fold, ${JSON.stringify(empty)}`,
+        );
+
+        await setControls(page, { count: 4, resolution: 128 });
+        await runSample(page, PORTRAIT);
+        for (const end of ["top", "bottom"]) {
+          await page.evaluate((to) => {
+            window.scrollTo(0, to === "top" ? 0 : document.documentElement.scrollHeight);
+          }, end);
+          const layout = await layoutOf(page);
+          const what = `${size}, ${end}: ${JSON.stringify(layout)}`;
+          assert.ok(layout.scrollWidth <= layout.width, `no horizontal scroll, ${what}`);
+          assert.ok(
+            layout.frame.height <= Math.max(240, 0.58 * layout.height) + 1,
+            `frame height, ${what}`,
+          );
+          assert.ok(
+            layout.frame.left >= -1 && layout.frame.right <= layout.width + 1,
+            `frame fits the width, ${what}`,
+          );
+          assert.ok(inside(layout.run, viewportBox(layout), 0), `Run in the viewport, ${what}`);
+        }
+        assert.deepEqual(errors, []);
+      } finally {
+        await context.close();
+      }
+    });
+  }
+
+  test("the drop veil starts hidden, with no fade on load", async () => {
+    const { context, page } = await openDemo(server.origin, {
+      // Each frame's veil opacity, from the first frame the page paints.
+      initScript: () => {
+        window.veilOpacities = [];
+        const sample = () => {
+          const veil = document.querySelector(".drop-veil");
+          if (veil !== null) {
+            window.veilOpacities.push(Number(getComputedStyle(veil).opacity));
+          }
+          if (window.veilOpacities.length < 40) {
+            requestAnimationFrame(sample);
+          }
+        };
+        requestAnimationFrame(sample);
+      },
+    });
+    try {
+      await page.waitForFunction(() => window.veilOpacities.length >= 40);
+      const opacities = await page.evaluate(() => window.veilOpacities);
+      assert.deepEqual(
+        opacities.filter((opacity) => opacity !== 0),
+        [],
+        `veil opacity per frame: ${opacities.join(", ")}`,
+      );
     } finally {
       await context.close();
     }
