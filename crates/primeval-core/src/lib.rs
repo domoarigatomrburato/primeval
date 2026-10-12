@@ -12,12 +12,14 @@
 
 #![warn(missing_docs)]
 // `clippy.toml` bans the methods whose results differ between platforms.
-// Tests and benches may use them as references; the non-test library pass of
-// `cargo clippy --all-targets` still holds the engine to the ban.
-#![cfg_attr(any(test, feature = "bench"), allow(clippy::disallowed_methods))]
+// Tests may use them as references, and the benches module allows the lint
+// itself; the library is held to the ban in every clippy pass, the
+// `--all-features` one included.
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 mod alpha;
 #[cfg(feature = "bench")]
+#[allow(clippy::disallowed_methods)] // benches may use the banned methods as references
 mod benches;
 mod buffer;
 mod coarse;

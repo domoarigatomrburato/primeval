@@ -26,7 +26,7 @@ npm run build
 npm run build:node
 ```
 
-The WebAssembly builds (`npm run build:wasm`, also part of `npm run verify`) need two more tools, both pinned by `scripts/build-wasm.mjs`: the dated nightly for the threaded build, with rust-src, and wasm-bindgen-cli at the version of the wasm-bindgen crate in `Cargo.lock`. `install-tools` installs both, skipping the CLI when the installed one already matches:
+The WebAssembly builds (`npm run build:wasm`, also part of `npm run verify`) need more tools, pinned by `scripts/build-wasm.mjs`: the dated nightly for the threaded build, with rust-src, wasm-bindgen-cli at the version of the wasm-bindgen crate in `Cargo.lock`, and the `wasm32-wasip1` target of the pinned stable toolchain, which only the kernel tests below use. `install-tools` installs all three, skipping the CLI when the installed one already matches:
 
 ```bash
 node scripts/build-wasm.mjs install-tools
@@ -35,7 +35,7 @@ npm run build:wasm
 
 The single-threaded build uses the pinned stable toolchain, whose `wasm32-unknown-unknown` target `rust-toolchain.toml` installs. Both builds enable WebAssembly SIMD (`simd128`), which every current browser supports. `npm run build:wasm` writes `wasm/single/` and `wasm/threaded/` and prints each `.wasm` file's raw and gzip size; `node scripts/build-wasm.mjs build single` builds one variant.
 
-The scoring kernels in `crates/primeval-core/src/score.rs` have NEON and simd128 versions that must equal the scalar ones bit for bit. `node scripts/build-wasm.mjs test-kernels` (also part of `npm run verify`) runs the `score` tests on the `wasm32-wasip1` target, which `rust-toolchain.toml` also lists, under Node's WASI; the aarch64 tests cover NEON:
+The scoring kernels in `crates/primeval-core/src/score.rs` have NEON and simd128 versions that must equal the scalar ones bit for bit. `node scripts/build-wasm.mjs test-kernels` (also part of `npm run verify`) runs the `score` tests on the `wasm32-wasip1` target, which `install-tools` added above, under Node's WASI; the aarch64 tests cover NEON:
 
 ```bash
 node scripts/build-wasm.mjs test-kernels

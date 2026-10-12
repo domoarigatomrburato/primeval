@@ -104,9 +104,10 @@ jobs:
         with:
           shared-key: wasm-checks
 
-      # The dated nightly for the threaded build and wasm-bindgen-cli at the
-      # version of the crate in Cargo.lock, both pinned in the script. After
-      # the cache restore: the install is skipped when the cached CLI matches.
+      # The dated nightly for the threaded build, the wasip1 target for the
+      # kernel tests, and wasm-bindgen-cli at the version of the crate in
+      # Cargo.lock, all pinned in the script. After the cache restore: the
+      # install is skipped when the cached CLI matches.
       - run: node scripts/build-wasm.mjs install-tools
 
       - run: npm ci

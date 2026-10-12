@@ -385,24 +385,45 @@ const NIGHTLY_INSTALL = {
   ],
 };
 
-test("install-tools installs the nightly and the locked wasm-bindgen-cli", () => {
-  assert.deepEqual(installToolsCommands({ required: "0.2.129", installed: null }), [
-    NIGHTLY_INSTALL,
-    {
-      command: "cargo",
-      args: ["install", "wasm-bindgen-cli", "--locked", "--version", "0.2.129"],
-    },
-  ]);
-  assert.deepEqual(installToolsCommands({ required: "0.2.129", installed: "0.2.128" })[1], {
-    command: "cargo",
-    args: ["install", "wasm-bindgen-cli", "--locked", "--version", "0.2.129"],
-  });
+// The wasip1 std only the kernel tests use: added to the pinned stable here,
+// not in rust-toolchain.toml, so the jobs that never run them do not download it.
+const WASIP1_INSTALL = {
+  command: "rustup",
+  args: ["target", "add", "--toolchain", "1.99.0", "wasm32-wasip1"],
+};
+
+const CLI_INSTALL = {
+  command: "cargo",
+  args: ["install", "wasm-bindgen-cli", "--locked", "--version", "0.2.129"],
+};
+
+test("install-tools installs the nightly, the wasip1 target and the locked wasm-bindgen-cli", () => {
+  assert.deepEqual(
+    installToolsCommands({ required: "0.2.129", installed: null, stable: "1.99.0" }),
+    [NIGHTLY_INSTALL, WASIP1_INSTALL, CLI_INSTALL],
+  );
+  assert.deepEqual(
+    installToolsCommands({ required: "0.2.129", installed: "0.2.128", stable: "1.99.0" })[2],
+    CLI_INSTALL,
+  );
 });
 
 test("install-tools skips wasm-bindgen-cli when the installed one matches", () => {
-  assert.deepEqual(installToolsCommands({ required: "0.2.129", installed: "0.2.129" }), [
-    NIGHTLY_INSTALL,
-  ]);
+  assert.deepEqual(
+    installToolsCommands({ required: "0.2.129", installed: "0.2.129", stable: "1.99.0" }),
+    [NIGHTLY_INSTALL, WASIP1_INSTALL],
+  );
+});
+
+test("install-tools adds the wasip1 target to the channel rust-toolchain.toml pins", () => {
+  const channel = readRepoFile("rust-toolchain.toml").match(/^channel = "([^"]+)"$/m)[1];
+  const commands = installToolsCommands({
+    required: "0.2.129",
+    installed: "0.2.129",
+    stable: channel,
+  });
+
+  assert.deepEqual(commands[1].args, ["target", "add", "--toolchain", channel, "wasm32-wasip1"]);
 });
 
 // --- Pins and wiring ---
@@ -468,11 +489,11 @@ test("the nightly and wasm-bindgen-cli pins have one source", () => {
   }
 });
 
-test("the pinned stable toolchain has the wasm targets", () => {
-  assert.match(
-    readRepoFile("rust-toolchain.toml"),
-    /^targets = \["wasm32-unknown-unknown", "wasm32-wasip1"\]$/m,
-  );
+test("the pinned stable toolchain has the browser wasm target and not the kernel tests' wasip1", () => {
+  const toolchain = readRepoFile("rust-toolchain.toml");
+
+  assert.match(toolchain, /^targets = \["wasm32-unknown-unknown"\]$/m);
+  assert.doesNotMatch(toolchain, /wasip1/);
 });
 
 test("verify runs the wasm checks", () => {

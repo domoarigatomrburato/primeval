@@ -215,11 +215,14 @@ export function parseWasmBindgenVersion(output) {
 
 /**
  * What `install-tools` runs: the nightly with rust-src (for build-std) and
- * the wasm target, then wasm-bindgen-cli at `required` (the crate's version
- * in Cargo.lock) built with its own lockfile, unless `installed` (the CLI's
- * version, or null) already matches.
+ * the wasm target; the wasip1 target of the `stable` toolchain (the channel
+ * in rust-toolchain.toml), which only the kernel tests use and so is not in
+ * that file, where every job that installs the toolchain would download it;
+ * then wasm-bindgen-cli at `required` (the crate's version in Cargo.lock)
+ * built with its own lockfile, unless `installed` (the CLI's version, or
+ * null) already matches.
  */
-export function installToolsCommands({ required, installed }) {
+export function installToolsCommands({ required, installed, stable }) {
   const commands = [
     {
       command: "rustup",
@@ -234,6 +237,10 @@ export function installToolsCommands({ required, installed }) {
         "--target",
         TARGET,
       ],
+    },
+    {
+      command: "rustup",
+      args: ["target", "add", "--toolchain", stable, TEST_TARGET],
     },
   ];
   if (installed !== required) {
@@ -438,6 +445,31 @@ function checkedWasmBindgen() {
   return command;
 }
 
+/** The channel rust-toolchain.toml pins. */
+function stableChannel() {
+  const toolchain = fs.readFileSync(path.join(REPO_ROOT, "rust-toolchain.toml"), "utf8");
+  const channel = toolchain.match(/^channel = "([^"]+)"$/m)?.[1];
+  if (channel === undefined) {
+    throw new Error("rust-toolchain.toml has no channel");
+  }
+  return channel;
+}
+
+/** Fails with the fix when the kernel tests' target is not installed. */
+function checkTestTarget() {
+  const result = spawnSync("rustc", ["--print", "target-libdir", "--target", TEST_TARGET], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+  });
+  // rustc prints the directory even when the target is not installed.
+  if (result.status !== 0 || !fs.existsSync(result.stdout.trim())) {
+    throw new Error(
+      `the ${TEST_TARGET} target is not installed for the pinned stable toolchain. ` +
+        "Install it: node scripts/build-wasm.mjs install-tools",
+    );
+  }
+}
+
 function build(names) {
   const wasmBindgen = checkedWasmBindgen();
   for (const name of names) {
@@ -471,7 +503,7 @@ function usage() {
       "  node scripts/build-wasm.mjs [build [single|threaded]]  build into wasm/ (default: both)",
       "  node scripts/build-wasm.mjs clippy                     clippy for wasm32 on the pinned stable",
       "  node scripts/build-wasm.mjs test-kernels               the scoring kernels' tests on wasm32-wasip1",
-      "  node scripts/build-wasm.mjs install-tools              install the nightly and wasm-bindgen-cli",
+      "  node scripts/build-wasm.mjs install-tools              install the nightly, wasip1 and wasm-bindgen-cli",
       "  node scripts/build-wasm.mjs wasm-bindgen-version       print the required wasm-bindgen-cli version",
     ].join("\n"),
   );
@@ -494,12 +526,13 @@ function main([command = "build", ...args]) {
         run(cargoClippyCommand());
         break;
       case "test-kernels":
+        checkTestTarget();
         run(cargoKernelTestCommand());
         break;
       case "install-tools": {
         const required = requiredWasmBindgenVersion();
         const installed = installedWasmBindgenVersion();
-        for (const step of installToolsCommands({ required, installed })) {
+        for (const step of installToolsCommands({ required, installed, stable: stableChannel() })) {
           run(step);
         }
         if (installed === required) {

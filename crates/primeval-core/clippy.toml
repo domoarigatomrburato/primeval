@@ -1,7 +1,8 @@
 # The engine's arithmetic must give bit-identical output on every target
 # (aarch64, x86_64, wasm32): see the `# Arithmetic` section of
 # `src/joint.rs`. Tests and benches may use these methods as references:
-# `src/lib.rs` allows the lint in test and bench builds only.
+# `src/lib.rs` allows the lint for test builds and for the benches module only,
+# so every clippy pass, `--all-features` included, checks the rest.
 disallowed-methods = [
     { path = "f64::mul_add", reason = "mul_add is a software call in WebAssembly and on x86 without FMA: write the product and the sum, rounding each separately" },
     { path = "f32::mul_add", reason = "mul_add is a software call in WebAssembly and on x86 without FMA: write the product and the sum, rounding each separately" },

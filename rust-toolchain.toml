@@ -1,7 +1,6 @@
 [toolchain]
 channel = "1.99.0"
 components = ["rustfmt", "clippy"]
-# The single-threaded wasm build (scripts/build-wasm.mjs) uses this toolchain;
-# wasm32-wasip1 runs the SIMD kernel tests (`build-wasm.mjs test-kernels`).
-targets = ["wasm32-unknown-unknown", "wasm32-wasip1"]
+# The single-threaded wasm build (scripts/build-wasm.mjs) uses this toolchain.
+targets = ["wasm32-unknown-unknown"]
 profile = "minimal"
