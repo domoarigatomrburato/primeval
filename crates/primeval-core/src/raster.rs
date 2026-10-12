@@ -105,8 +105,8 @@ pub(crate) fn stroke_quadratic_direct<R: Rng>(
 fn lengthen_ends(points: &mut Vec<(f64, f64)>, caps: &mut [CapPlane; 2], distance: f64) {
     for cap in caps.iter_mut() {
         cap.point = (
-            (-distance).mul_add(cap.inward.0, cap.point.0),
-            (-distance).mul_add(cap.inward.1, cap.point.1),
+            cap.point.0 - distance * cap.inward.0,
+            cap.point.1 - distance * cap.inward.1,
         );
     }
     // Keep the original first and last chords: extending those chords
@@ -196,10 +196,8 @@ impl CapPlane {
     }
 
     fn coverage(&self, x: i32, y: i32) -> f64 {
-        let offset = (f64::from(x) + 0.5 - self.point.0).mul_add(
-            self.inward.0,
-            (f64::from(y) + 0.5 - self.point.1) * self.inward.1,
-        );
+        let offset = (f64::from(x) + 0.5 - self.point.0) * self.inward.0
+            + (f64::from(y) + 0.5 - self.point.1) * self.inward.1;
         self.filter.inside(offset)
     }
 }
@@ -406,8 +404,8 @@ fn stroke_polyline(
 /// trapezoid of height `1 / long` on `[-end, end]`, `end = (long + short) / 2`,
 /// with ramps `short` wide. The share of a pixel on one side of a line, or
 /// within a band around it, is an area under this trapezoid. The functions
-/// run for every pixel of a stroke, so they compute both pieces of the
-/// primitive and select one rather than branch on the distance.
+/// run for every pixel of a stroke, so the primitive returns on the flat
+/// top before computing the ramp.
 #[derive(Clone, Copy)]
 struct Trapezoid {
     /// `(long - short) / 2`, where the flat top ends.
@@ -441,13 +439,11 @@ impl Trapezoid {
     /// `1/2` less the ramp's remaining triangle, which is empty past `end`.
     #[inline]
     fn primitive(self, x: f64) -> f64 {
-        let rest = (self.end - x).max(0.0);
-        let ramp = (rest * rest).mul_add(-self.inv_ramp, 0.5);
         if x <= self.top {
-            x * self.inv_long
-        } else {
-            ramp
+            return x * self.inv_long;
         }
+        let rest = (self.end - x).max(0.0);
+        0.5 - (rest * rest) * self.inv_ramp
     }
 
     /// The share of a pixel on the positive side of a line its centre is at
@@ -523,7 +519,7 @@ impl Segment {
         let steep = dy.abs() > dx.abs();
         let (major, minor) = if steep { (dy, dx) } else { (dx, dy) };
         let gradient = minor / major;
-        let cos_theta = 1.0 / gradient.mul_add(gradient, 1.0).sqrt();
+        let cos_theta = 1.0 / (gradient * gradient + 1.0).sqrt();
         let along_major = cos_theta.copysign(major);
         let along_minor = gradient * along_major;
         let direction = if steep {
@@ -545,13 +541,13 @@ impl Segment {
 
     fn coverage(&self, x: f64, y: f64, half_width: f64) -> f64 {
         let (dx, dy) = (x - self.point.0, y - self.point.1);
-        let along = dx.mul_add(self.direction.0, dy * self.direction.1);
+        let along = dx * self.direction.0 + dy * self.direction.1;
         if along <= 0.0 {
             round_cap(half_width, dx, dy)
         } else if along >= self.length {
             round_cap(half_width, x - self.end.0, y - self.end.1)
         } else {
-            let across = dx.mul_add(-self.direction.1, dy * self.direction.0);
+            let across = dy * self.direction.0 - dx * self.direction.1;
             self.filter.band(half_width, across.abs())
         }
     }
@@ -612,7 +608,7 @@ fn stroke_segment(
     let end = ((a_major.max(b_major) + past_hi - 0.5).ceil() as i32).min(major_hi + 1);
     for i in first..end {
         let centre = f64::from(i) + 0.5;
-        let minor = gradient.mul_add(centre - a_major, a_minor);
+        let minor = gradient * (centre - a_major) + a_minor;
         // Minor indices whose centre is within `half_band` of the line.
         let lo = ((minor - half_band - 0.5).ceil() as i32).max(minor_lo);
         let hi = ((minor + half_band - 0.5).floor() as i32).min(minor_hi);
@@ -646,8 +642,7 @@ fn stroke_segment(
             // The pixel centre's offsets across the segment's line and
             // along it from `a`.
             let across = (minor_centre - minor) * cos_theta;
-            let along =
-                (centre - a_major).mul_add(along_major, (minor_centre - a_minor) * along_minor);
+            let along = (centre - a_major) * along_major + (minor_centre - a_minor) * along_minor;
             let neighbour = if along < 0.0 {
                 &neighbours[0]
             } else if along > length {
@@ -699,7 +694,7 @@ fn stroke_segment(
 /// across the centre's direction from the end point, at its distance.
 #[inline]
 fn round_cap(half_width: f64, dx: f64, dy: f64) -> f64 {
-    let distance = dx.mul_add(dx, dy * dy).sqrt();
+    let distance = (dx * dx + dy * dy).sqrt();
     if distance == 0.0 {
         return Trapezoid::across((1.0, 0.0)).band(half_width, 0.0);
     }
@@ -1067,6 +1062,80 @@ mod tests {
     use rand::{RngExt, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
+    /// The engine writes a product and a sum where `mul_add` would fuse
+    /// them: `mul_add` is a software call in WebAssembly and on x86 without
+    /// FMA, which made quadratic strokes twice as slow in the browser. The
+    /// crate has no block comments, so a line's code is what precedes `//`.
+    #[test]
+    fn the_engine_uses_no_fused_multiply_add() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut directories = vec![root.clone()];
+        let mut checked = 0;
+        while let Some(directory) = directories.pop() {
+            for entry in std::fs::read_dir(directory).expect("source directory") {
+                let path = entry.expect("source entry").path();
+                if path.is_dir() {
+                    directories.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|extension| extension != "rs") {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("source file");
+                assert!(
+                    !source.contains(concat!("/", "*")),
+                    "{}: a block comment",
+                    path.display()
+                );
+                for (index, line) in source.lines().enumerate() {
+                    let code = line.split("//").next().unwrap_or_default();
+                    assert!(
+                        !code.contains(concat!("mul_add", "(")),
+                        "{}:{}: write the product and the sum, not mul_add",
+                        path.display(),
+                        index + 1,
+                    );
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "no source files under {}", root.display());
+    }
+
+    #[test]
+    fn trapezoid_primitive_is_unchanged_by_its_flat_branch() {
+        let mut rng = ChaCha8Rng::seed_from_u64(789);
+        for _ in 0..100_000 {
+            let (dx, dy) = (rng.random::<f64>(), rng.random::<f64>());
+            let length = (dx * dx + dy * dy).sqrt();
+            let trapezoid = Trapezoid::across((dx / length, dy / length));
+            for x in [
+                rng.random::<f64>() * 2.0 * trapezoid.end,
+                0.0,
+                trapezoid.top * 0.5,
+                trapezoid.top,
+                (trapezoid.top + trapezoid.end) * 0.5,
+                trapezoid.end,
+                trapezoid.end * 2.0,
+            ] {
+                let rest = (trapezoid.end - x).max(0.0);
+                let ramp = 0.5 - (rest * rest) * trapezoid.inv_ramp;
+                let expected = if x <= trapezoid.top {
+                    x * trapezoid.inv_long
+                } else {
+                    ramp
+                };
+                assert_eq!(
+                    trapezoid.primitive(x).to_bits(),
+                    expected.to_bits(),
+                    "top={}, end={}, x={x}",
+                    trapezoid.top,
+                    trapezoid.end,
+                );
+            }
+        }
+    }
+
     /// [`Trapezoid::band`] as both its terms computed in full: the
     /// reference for its shortcuts.
     fn two_term_band(trapezoid: Trapezoid, half_width: f64, distance: f64) -> f64 {
@@ -1092,13 +1161,13 @@ mod tests {
         let mut directions: Vec<(f64, f64)> = (0..=64)
             .map(|k| {
                 let gradient = f64::from(k) / 64.0;
-                let cos_theta = 1.0 / gradient.mul_add(gradient, 1.0).sqrt();
+                let cos_theta = 1.0 / (gradient * gradient + 1.0).sqrt();
                 (cos_theta, gradient * cos_theta)
             })
             .collect();
         directions.extend((0..64).map(|_| {
             let (dx, dy): (f64, f64) = (rng.random_range(-5.0..5.0), rng.random_range(-5.0..5.0));
-            let distance: f64 = dx.mul_add(dx, dy * dy).sqrt();
+            let distance: f64 = (dx * dx + dy * dy).sqrt();
             (dx / distance, dy / distance)
         }));
         let mut checked = 0;
