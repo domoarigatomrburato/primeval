@@ -334,6 +334,130 @@ struct Parts<F> {
     fixed: Vec<Geometry>,
 }
 
+impl Layer {
+    /// The layer's geometry in drawing coordinates, where pixel centres are
+    /// half-integers, from its parameters in engine coordinates, where they
+    /// are integers: every position moves by `+0.5`. A rectangle becomes a
+    /// [`Geometry::Rect`]; a curved layer a [`Geometry::Ellipse`] with `|a|`
+    /// and `b` as its radii and, for a rotated ellipse, the angle of `a` in
+    /// degrees ([`atan2_degrees`]) as its rotation; a triangle, a
+    /// quadrilateral or a rotated rectangle the polygon of its corners
+    /// ([`Layer::corners`]).
+    ///
+    /// # Panics
+    ///
+    /// For a fixed layer, which has no geometry of its own: its geometry is
+    /// the engine shape's.
+    fn to_geometry(self) -> Geometry {
+        match self.outline {
+            Outline::Fixed(_) => panic!("a fixed layer has no geometry of its own"),
+            Outline::Rect => {
+                let [x0, y0, x1, y1, ..] = self.params;
+                Geometry::Rect {
+                    x: x0 + 0.5,
+                    y: y0 + 0.5,
+                    width: x1 - x0,
+                    height: y1 - y0,
+                }
+            }
+            Outline::Circle | Outline::Ellipse | Outline::RotatedEllipse => {
+                let [cx, cy, ax, ay, b] = self.conic();
+                Geometry::Ellipse {
+                    cx: cx + 0.5,
+                    cy: cy + 0.5,
+                    rx: (ax * ax + ay * ay).sqrt(),
+                    ry: b,
+                    rotation: if self.outline == Outline::RotatedEllipse {
+                        atan2_degrees(ay, ax)
+                    } else {
+                        0.0
+                    },
+                }
+            }
+            outline => {
+                let corners = self.corners();
+                Geometry::Polygon(
+                    (0..outline.sides())
+                        .map(|k| Point::new(corners[2 * k] + 0.5, corners[2 * k + 1] + 0.5))
+                        .collect(),
+                )
+            }
+        }
+    }
+
+    /// The parameters of an `outline` layer at `geometry`, the inverse of
+    /// [`Self::to_geometry`]: every position moves by `−0.5`, so a
+    /// rectangle's pixels `x1..=x2` span `x1 − 0.5..x2 + 0.5` and an engine
+    /// shape's integer vertex or centre, a pixel centre at `x + 0.5` in its
+    /// geometry, comes back as `x` exactly. A rotated ellipse's semi-axis
+    /// vector `a` is its radius `rx` along its rotation
+    /// ([`sin_cos_degrees`]). A rotated rectangle's polygon gives its corners,
+    /// the parameters of a [`Outline::Quad`], not its centre, `u` and `h`.
+    /// `None` for a geometry of another family, a polygon of another number
+    /// of points, a circle whose radii differ or that is rotated, an
+    /// axis-aligned ellipse that is rotated, and a fixed outline.
+    fn from_geometry(outline: Outline, geometry: &Geometry) -> Option<[f64; COORDS]> {
+        let mut params = [0.0; COORDS];
+        match (outline, geometry) {
+            (
+                Outline::Rect,
+                &Geometry::Rect {
+                    x,
+                    y,
+                    width,
+                    height,
+                },
+            ) => {
+                params[..4].copy_from_slice(&[x - 0.5, y - 0.5, x + width - 0.5, y + height - 0.5]);
+            }
+            (
+                outline @ (Outline::Circle | Outline::Ellipse | Outline::RotatedEllipse),
+                &Geometry::Ellipse {
+                    cx,
+                    cy,
+                    rx,
+                    ry,
+                    rotation,
+                },
+            ) => {
+                let centre = [cx - 0.5, cy - 0.5];
+                params[..2].copy_from_slice(&centre);
+                match outline {
+                    Outline::Circle => {
+                        if rx != ry || rotation != 0.0 {
+                            return None;
+                        }
+                        params[2] = rx;
+                    }
+                    Outline::Ellipse => {
+                        if rotation != 0.0 {
+                            return None;
+                        }
+                        params[2] = rx;
+                        params[3] = ry;
+                    }
+                    _ => {
+                        let (sin, cos) = sin_cos_degrees(rotation);
+                        params[2..5].copy_from_slice(&[rx * cos, rx * sin, ry]);
+                    }
+                }
+            }
+            (outline, Geometry::Polygon(points))
+                if points.len() == outline.sides()
+                    && outline.sides() > 0
+                    && outline != Outline::Rect =>
+            {
+                for (k, point) in points.iter().enumerate() {
+                    params[2 * k] = point.x - 0.5;
+                    params[2 * k + 1] = point.y - 0.5;
+                }
+            }
+            _ => return None,
+        }
+        Some(params)
+    }
+}
+
 /// The [`Parts`] of the committed shapes `history` on `target` and
 /// `background`: triangles, quadrilaterals and rectangles, rotated or not,
 /// and with `curved` ellipses, circles and rotated ellipses, become layers
@@ -360,36 +484,17 @@ fn parts<F: Real>(
             );
             let mut params = [0.0; COORDS];
             let outline = match &committed.shape {
-                Shape::Triangle(t) => {
-                    params[..6]
-                        .copy_from_slice(&[t.x1, t.y1, t.x2, t.y2, t.x3, t.y3].map(f64::from));
-                    Outline::Triangle
-                }
-                // Polygon vertices are continuous: the engine's coordinates
-                // are 0.5 below them.
+                Shape::Triangle(_) => Outline::Triangle,
                 Shape::Polygon(polygon) if matches!(polygon.order, 3 | 4) => {
-                    for (k, param) in params[..2 * polygon.order].iter_mut().enumerate() {
-                        let axis = if k % 2 == 0 { &polygon.x } else { &polygon.y };
-                        *param = axis[k / 2] - 0.5;
-                    }
                     if polygon.order == 3 {
                         Outline::Triangle
                     } else {
                         Outline::Quad
                     }
                 }
-                // The pixels `x1..=x2` span `x1 − 0.5..x2 + 0.5`.
-                Shape::Rectangle(rectangle) => {
-                    let (x1, y1, x2, y2) = rectangle.bounds();
-                    params[..4].copy_from_slice(&[
-                        f64::from(x1) - 0.5,
-                        f64::from(y1) - 0.5,
-                        f64::from(x2) + 0.5,
-                        f64::from(y2) + 0.5,
-                    ]);
-                    Outline::Rect
-                }
-                // The centre is continuous; `u` runs along the side `sx`.
+                Shape::Rectangle(_) => Outline::Rect,
+                // Keep the engine's angle-based c, u, h: its geometry is a
+                // corner polygon, which cannot recover u and h bit for bit.
                 Shape::RotatedRectangle(rectangle) => {
                     let (sin, cos) = sin_cos_degrees(f64::from(rectangle.angle));
                     let half = f64::from(rectangle.sx) / 2.0;
@@ -402,31 +507,9 @@ fn parts<F: Real>(
                     ]);
                     Outline::Rotated
                 }
-                // The engine's integer centre is a pixel centre, as a
-                // triangle's vertices.
-                &Shape::Ellipse(ellipse) if curved => {
-                    params[..4].copy_from_slice(
-                        &[ellipse.x, ellipse.y, ellipse.rx, ellipse.ry].map(f64::from),
-                    );
-                    Outline::Ellipse
-                }
-                &Shape::Circle(circle) if curved => {
-                    params[..3].copy_from_slice(&[circle.x, circle.y, circle.r].map(f64::from));
-                    Outline::Circle
-                }
-                // The centre is continuous; `a` runs along the radius `rx`,
-                // at the angle `angle` in degrees.
-                &Shape::RotatedEllipse(ellipse) if curved => {
-                    let (sin, cos) = sin_cos_degrees(ellipse.angle);
-                    params[..5].copy_from_slice(&[
-                        ellipse.x - 0.5,
-                        ellipse.y - 0.5,
-                        ellipse.rx * cos,
-                        ellipse.rx * sin,
-                        ellipse.ry,
-                    ]);
-                    Outline::RotatedEllipse
-                }
+                Shape::Ellipse(_) if curved => Outline::Ellipse,
+                Shape::Circle(_) if curved => Outline::Circle,
+                Shape::RotatedEllipse(_) if curved => Outline::RotatedEllipse,
                 shape => {
                     masks.push(Mask::from_lines(
                         shape.rasterize(&mut worker),
@@ -437,6 +520,10 @@ fn parts<F: Real>(
                     Outline::Fixed(masks.len() - 1)
                 }
             };
+            if !matches!(outline, Outline::Rotated | Outline::Fixed(_)) {
+                params = Layer::from_geometry(outline, &committed.shape.geometry())
+                    .expect("the engine shape matches its outline");
+            }
             Layer {
                 outline,
                 params,
@@ -530,51 +617,23 @@ fn score_shapes(
         match (layer.outline, &shape.geometry) {
             (Outline::Fixed(index), geometry) => {
                 assert_eq!(geometry, &fixed[index], "a fixed shape moved");
+                continue;
             }
-            (
-                Outline::Rect,
-                &Geometry::Rect {
-                    x,
-                    y,
-                    width,
-                    height,
-                },
-            ) => {
-                layer.params[..4].copy_from_slice(&[
-                    x - 0.5,
-                    y - 0.5,
-                    x + width - 0.5,
-                    y + height - 0.5,
-                ]);
-            }
+            (Outline::Rect, Geometry::Rect { .. }) => {}
             (
                 outline @ (Outline::Circle | Outline::Ellipse | Outline::RotatedEllipse),
                 &Geometry::Ellipse {
-                    cx,
-                    cy,
-                    rx,
-                    ry,
-                    rotation,
+                    rx, ry, rotation, ..
                 },
-            ) => {
-                let centre = [cx - 0.5, cy - 0.5];
-                layer.params[..2].copy_from_slice(&centre);
-                match outline {
-                    Outline::Circle => {
-                        assert!(rx == ry && rotation == 0.0, "not a circle: {rx} {ry}");
-                        layer.params[2] = rx;
-                    }
-                    Outline::Ellipse => {
-                        assert!(rotation == 0.0, "not axis-aligned: {rotation}");
-                        layer.params[2] = rx;
-                        layer.params[3] = ry;
-                    }
-                    _ => {
-                        let (sin, cos) = sin_cos_degrees(rotation);
-                        layer.params[2..5].copy_from_slice(&[rx * cos, rx * sin, ry]);
-                    }
+            ) => match outline {
+                Outline::Circle => {
+                    assert!(rx == ry && rotation == 0.0, "not a circle: {rx} {ry}");
                 }
-            }
+                Outline::Ellipse => {
+                    assert!(rotation == 0.0, "not axis-aligned: {rotation}");
+                }
+                _ => {}
+            },
             (outline, Geometry::Polygon(points))
                 if points.len() == outline.sides()
                     && outline.sides() > 0
@@ -585,13 +644,11 @@ fn score_shapes(
                 if outline == Outline::Rotated {
                     layer.outline = Outline::Quad;
                 }
-                for (k, point) in points.iter().enumerate() {
-                    layer.params[2 * k] = point.x - 0.5;
-                    layer.params[2 * k + 1] = point.y - 0.5;
-                }
             }
             (_, geometry) => panic!("not the model's shape: {geometry:?}"),
         }
+        layer.params = Layer::from_geometry(layer.outline, &shape.geometry)
+            .expect("the drawing geometry matches its outline");
     }
     let loss = diff::loss(&scene, &layers, &mut Workspace::default());
     (loss / (3 * scene.width * scene.height) as f64).sqrt() / 255.0
@@ -865,37 +922,7 @@ fn export<F: Real>(
             .map(|layer| {
                 let geometry = match layer.outline {
                     Outline::Fixed(index) => fixed[index].clone(),
-                    Outline::Rect => {
-                        let [x0, y0, x1, y1, ..] = layer.params;
-                        Geometry::Rect {
-                            x: x0 + 0.5,
-                            y: y0 + 0.5,
-                            width: x1 - x0,
-                            height: y1 - y0,
-                        }
-                    }
-                    Outline::Circle | Outline::Ellipse | Outline::RotatedEllipse => {
-                        let [cx, cy, ax, ay, b] = layer.conic();
-                        Geometry::Ellipse {
-                            cx: cx + 0.5,
-                            cy: cy + 0.5,
-                            rx: (ax * ax + ay * ay).sqrt(),
-                            ry: b,
-                            rotation: if layer.outline == Outline::RotatedEllipse {
-                                atan2_degrees(ay, ax)
-                            } else {
-                                0.0
-                            },
-                        }
-                    }
-                    outline => {
-                        let corners = layer.corners();
-                        Geometry::Polygon(
-                            (0..outline.sides())
-                                .map(|k| Point::new(corners[2 * k] + 0.5, corners[2 * k + 1] + 0.5))
-                                .collect(),
-                        )
-                    }
+                    _ => layer.to_geometry(),
                 };
                 let [r, g, b] = layer.color.map(|c| c.round().clamp(0.0, 255.0) as u8);
                 DrawnShape {
@@ -914,6 +941,133 @@ mod tests {
     use crate::{ModelOptions, ShapeKind};
     use rand::{RngExt, SeedableRng};
     use rand_chacha::ChaCha8Rng;
+
+    #[test]
+    fn layers_round_trip_through_their_geometry() {
+        for (outline, params) in [
+            (
+                Outline::Triangle,
+                [0.25, -1.5, 6.75, 2.0, -2.25, 8.5, 0.0, 0.0],
+            ),
+            (
+                Outline::Quad,
+                [-2.25, -1.5, 6.75, -1.5, 6.75, 8.5, -2.25, 8.5],
+            ),
+            (Outline::Rect, [-2.5, -1.0, 6.5, 8.0, 0.0, 0.0, 0.0, 0.0]),
+            (Outline::Rotated, [6.25, -1.5, 3.0, 4.0, 2.5, 0.0, 0.0, 0.0]),
+            (Outline::Circle, [6.25, -1.5, 2.75, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            (
+                Outline::Ellipse,
+                [6.25, -1.5, 2.75, 4.5, 0.0, 0.0, 0.0, 0.0],
+            ),
+            (
+                Outline::RotatedEllipse,
+                [6.25, -1.5, 2.75, -1.25, 4.5, 0.0, 0.0, 0.0],
+            ),
+        ] {
+            let quantum = if outline == Outline::Rect {
+                RECT_QUANTUM
+            } else {
+                QUANTUM
+            };
+            assert!(params.iter().all(|p| (p / quantum).fract() == 0.0));
+            let layer = Layer {
+                outline,
+                params,
+                alpha: 128.0,
+                color: [128.0; 3],
+            };
+            let recovered = Layer::from_geometry(
+                if outline == Outline::Rotated {
+                    Outline::Quad
+                } else {
+                    outline
+                },
+                &layer.to_geometry(),
+            )
+            .expect("matching geometry");
+            if outline == Outline::RotatedEllipse {
+                for (actual, expected) in recovered.into_iter().zip(params) {
+                    assert!((actual - expected).abs() <= 1e-12, "{actual} != {expected}");
+                }
+            } else {
+                let expected = if outline == Outline::Rotated {
+                    layer.corners()
+                } else {
+                    params
+                };
+                assert_eq!(
+                    recovered.map(f64::to_bits),
+                    expected.map(f64::to_bits),
+                    "{outline:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn from_geometry_refuses_other_families() {
+        let rectangle = Geometry::Rect {
+            x: 1.0,
+            y: 2.0,
+            width: 3.0,
+            height: 4.0,
+        };
+        let ellipse = |rx, ry, rotation| Geometry::Ellipse {
+            cx: 1.0,
+            cy: 2.0,
+            rx,
+            ry,
+            rotation,
+        };
+        let quadratic = Geometry::Quadratic {
+            start: Point::new(0.0, 0.0),
+            control: Point::new(1.0, 2.0),
+            end: Point::new(3.0, 4.0),
+            width: 2.0,
+            cap: crate::LineCap::Round,
+        };
+        for outline in [
+            Outline::Triangle,
+            Outline::Quad,
+            Outline::Rect,
+            Outline::Rotated,
+            Outline::Circle,
+            Outline::Ellipse,
+            Outline::RotatedEllipse,
+            Outline::Fixed(0),
+        ] {
+            assert_eq!(Layer::from_geometry(outline, &quadratic), None);
+            if outline != Outline::Rect {
+                assert_eq!(Layer::from_geometry(outline, &rectangle), None);
+            }
+            if !outline.curved() {
+                assert_eq!(Layer::from_geometry(outline, &ellipse(3.0, 3.0, 0.0)), None);
+            }
+            for count in 0..=5 {
+                let polygon = Geometry::Polygon(vec![Point::new(1.0, 2.0); count]);
+                if count != outline.sides() || count == 0 || outline == Outline::Rect {
+                    assert_eq!(
+                        Layer::from_geometry(outline, &polygon),
+                        None,
+                        "{outline:?}, {count}"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            Layer::from_geometry(Outline::Circle, &ellipse(3.0, 4.0, 0.0)),
+            None
+        );
+        assert_eq!(
+            Layer::from_geometry(Outline::Circle, &ellipse(3.0, 3.0, 15.0)),
+            None
+        );
+        assert_eq!(
+            Layer::from_geometry(Outline::Ellipse, &ellipse(3.0, 4.0, 15.0)),
+            None
+        );
+    }
 
     /// Both areas are signed by orientation, and the shoelace of a
     /// triangle is its cross product's area.
@@ -1443,7 +1597,17 @@ mod tests {
                 w >= 1.0 && h >= 1.0 && w <= 8.0 * h && h <= 8.0 * w,
                 "{r:?}"
             );
-            for value in [x - 0.5, y - 0.5, w, h] {
+            let params = Layer::from_geometry(
+                Outline::Rect,
+                &Geometry::Rect {
+                    x,
+                    y,
+                    width: w,
+                    height: h,
+                },
+            )
+            .expect("a rectangle");
+            for value in [params[0], params[1], w, h] {
                 assert_eq!((value / RECT_QUANTUM).fract(), 0.0, "{r:?}");
             }
         };
@@ -1802,16 +1966,13 @@ mod tests {
     /// coordinates, its radii and its rotation in degrees.
     fn ellipse_parameters(geometry: &Geometry) -> [f64; 5] {
         let &Geometry::Ellipse {
-            cx,
-            cy,
-            rx,
-            ry,
-            rotation,
+            rx, ry, rotation, ..
         } = geometry
         else {
             panic!("not an ellipse: {geometry:?}");
         };
-        [cx - 0.5, cy - 0.5, rx, ry, rotation]
+        let params = Layer::from_geometry(Outline::RotatedEllipse, geometry).expect("an ellipse");
+        [params[0], params[1], rx, ry, rotation]
     }
 
     /// Checks an exported curved shape of `outline`: its centre and radii
