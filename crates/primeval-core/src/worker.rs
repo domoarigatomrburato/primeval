@@ -377,7 +377,7 @@ impl<R: Rng> WorkerCtx<R> {
         rasterize: impl FnOnce(&mut Self) -> &[Scanline],
         alpha: i32,
     ) -> u64 {
-        self.evaluate(round, rasterize, alpha, None)
+        self.evaluate(round, rasterize, alpha, None, None)
             .expect("an evaluation without a bound always has an energy")
     }
 
@@ -386,11 +386,17 @@ impl<R: Rng> WorkerCtx<R> {
     pub(crate) fn energy_below(
         &mut self,
         round: &SearchRound<'_>,
-        rasterize: impl FnOnce(&mut Self) -> &[Scanline],
+        shape: &Shape,
         alpha: i32,
         bound: u64,
     ) -> Option<u64> {
-        let energy = self.evaluate(round, rasterize, alpha, Some(bound));
+        let energy = self.evaluate(
+            round,
+            |ctx| shape.rasterize(ctx),
+            alpha,
+            Some(bound),
+            Some((shape, false)),
+        );
         #[cfg(test)]
         {
             self.rejected += u64::from(energy.is_none());
@@ -417,6 +423,7 @@ impl<R: Rng> WorkerCtx<R> {
             |ctx| state.shape.rasterize_coarse(ctx),
             alpha,
             bound,
+            Some((&state.shape, true)),
         );
         (self.width, self.height) = full;
         #[cfg(test)]
@@ -432,6 +439,7 @@ impl<R: Rng> WorkerCtx<R> {
         rasterize: impl FnOnce(&mut Self) -> &[Scanline],
         alpha: i32,
         bound: Option<u64>,
+        geometry: Option<(&Shape, bool)>,
     ) -> Option<u64> {
         #[cfg(test)]
         let pruning = self.pruning;
@@ -439,6 +447,23 @@ impl<R: Rng> WorkerCtx<R> {
         let pruning = true;
 
         self.evaluations += 1;
+        // The rectangle contains each emitted pixel at most once, hence
+        // its old error is an upper bound on fit.before. Preserve the
+        // legacy signed running-total path for scores beyond i64::MAX.
+        if pruning
+            && round.score <= i64::MAX as u64
+            && let (Some(bound), Some((shape, coarse))) = (bound, geometry)
+            && let Some(upper) = round
+                .error_grid
+                .sums()
+                .rectangle_error(shape.candidate_rectangle(self.width, self.height, coarse))
+            && round
+                .score
+                .checked_sub(upper)
+                .is_some_and(|lower| lower >= bound)
+        {
+            return None;
+        }
         let lines = rasterize(self);
         let below = |energy: u64| bound.is_none_or(|bound| energy < bound);
         if lines.is_empty() {
@@ -883,6 +908,168 @@ mod tests {
         // Drawing something should change the score from the baseline.
         assert_ne!(energy, base_score, "energy should differ from base_score");
         assert_eq!(w.evaluations, 1);
+    }
+
+    #[test]
+    fn rectangle_rejection_skips_rasterization_and_preserves_counts() {
+        let (mut worker, round) = crate::test_util::make_test_round(32, 24, 17);
+        let shape = Shape::Circle(crate::shapes::Circle { x: 16, y: 12, r: 2 });
+        let sentinel = Scanline {
+            y: 0,
+            x1: 0,
+            x2: 0,
+            alpha: 1,
+        };
+        worker.lines.push(sentinel);
+        let mut state = State::new(shape, fixed_alpha(128));
+        assert_eq!(state.energy_below(&mut worker, &round, 0), None);
+        assert_eq!(worker.lines, vec![sentinel]);
+        assert_eq!((worker.evaluations, worker.rejected), (1, 1));
+        assert_eq!(state.cached_energy, None);
+        worker.pruning = false;
+        assert_eq!(state.energy_below(&mut worker, &round, 0), None);
+        assert_ne!(worker.lines, vec![sentinel]);
+        assert_eq!((worker.evaluations, worker.rejected), (2, 2));
+    }
+
+    #[test]
+    fn rectangle_rejection_preserves_legacy_wrapping_scores() {
+        let (mut worker, round) = crate::test_util::make_test_round(32, 24, 19);
+        let shape = Shape::Circle(crate::shapes::Circle { x: 16, y: 12, r: 2 });
+        for baseline in [0, i64::MAX as u64 - 1, i64::MAX as u64 + 1, u64::MAX] {
+            let view = SearchRound {
+                score: baseline,
+                ..round
+            };
+            let mut reference = worker.clone();
+            let lines = shape.rasterize(&mut reference);
+            let fit = score::fit(
+                view.target,
+                view.current,
+                Some(view.error_grid.sums()),
+                lines,
+                128,
+            );
+            for bound in [0, 1, i64::MAX as u64, i64::MAX as u64 + 1, u64::MAX] {
+                let expected =
+                    score::energy_below(view.target, view.current, lines, fit, baseline, bound);
+                assert_eq!(worker.energy_below(&view, &shape, 128, bound), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn rectangle_rejection_matches_original_full_and_coarse_evaluation() {
+        use crate::shapes::Step;
+        for (width, height) in [(2, 2), (3, 7), (65, 49)] {
+            let (target, current) = noise_round(width, height);
+            let mut grid = ErrorGrid::new(width, height, 4, 4);
+            grid.compute(&target, &current);
+            let round = SearchRound {
+                target: &target,
+                current: &current,
+                error_grid: &grid,
+                score: score::difference_full_raw(&target, &current),
+                coarse: None,
+            };
+            let mut coarse_copy = crate::coarse::Coarse::new(&target, &current);
+            let coarse = coarse_copy.as_mut().map(|copy| copy.round(&current));
+            let mut worker =
+                WorkerCtx::new(width as i32, height as i32, crate::rng::create_rng(0xb0a));
+            for kind in
+                std::iter::once(ShapeKind::Any).chain(ShapeKind::all_kinds().iter().copied())
+            {
+                for alpha in 1..=255 {
+                    worker.quadratic_cap =
+                        [LineCap::Butt, LineCap::Round, LineCap::Square][usize::from(alpha) % 3];
+                    worker.quadratic_width = (1.0, 32.0);
+                    for _ in 0..2 {
+                        let mut shape = Shape::random(kind, &mut worker, &round);
+                        for step in [
+                            Step::Coarse,
+                            Step::Scaled(1.0),
+                            Step::Scaled(crate::refine::MIN_SCALE),
+                            Step::Scaled(crate::refine::MIN_SCALE),
+                        ] {
+                            let state = State::committed(shape.clone(), Alpha::Auto, alpha);
+                            for (coarse_mode, view) in std::iter::once((false, &round))
+                                .chain(coarse.as_ref().map(|view| (true, view)))
+                            {
+                                let mut reference = worker.clone();
+                                reference.width = view.target.width() as i32;
+                                reference.height = view.target.height() as i32;
+                                let lines = if coarse_mode {
+                                    shape.rasterize_coarse(&mut reference)
+                                } else {
+                                    shape.rasterize(&mut reference)
+                                };
+                                let fit = score::fit(
+                                    view.target,
+                                    view.current,
+                                    Some(view.error_grid.sums()),
+                                    lines,
+                                    i32::from(alpha),
+                                );
+                                let energy = score::energy(
+                                    view.target,
+                                    view.current,
+                                    lines,
+                                    fit,
+                                    view.score,
+                                );
+                                let counts = worker.evaluations;
+                                let unbounded = if coarse_mode {
+                                    worker.coarse_energy(view, &state, None).unwrap()
+                                } else {
+                                    state.clone().energy(&mut worker, view)
+                                };
+                                assert_eq!(unbounded, energy);
+                                assert_eq!(worker.evaluations, counts + 1);
+                                for bound in [
+                                    0,
+                                    energy.saturating_sub(1),
+                                    energy,
+                                    energy + 1,
+                                    energy.saturating_add(view.score),
+                                    i64::MAX as u64 + 1,
+                                    u64::MAX,
+                                ] {
+                                    let expected = score::energy_below(
+                                        view.target,
+                                        view.current,
+                                        lines,
+                                        fit,
+                                        view.score,
+                                        bound,
+                                    );
+                                    for pruning in [false, true] {
+                                        worker.pruning = pruning;
+                                        let counts = (worker.evaluations, worker.rejected);
+                                        let actual = if coarse_mode {
+                                            worker.coarse_energy(view, &state, Some(bound))
+                                        } else {
+                                            state.clone().energy_below(&mut worker, view, bound)
+                                        };
+                                        assert_eq!(
+                                            actual, expected,
+                                            "{kind:?} alpha={alpha} coarse={coarse_mode} bound={bound}"
+                                        );
+                                        assert_eq!(
+                                            (worker.evaluations, worker.rejected),
+                                            (
+                                                counts.0 + 1,
+                                                counts.1 + u64::from(expected.is_none())
+                                            )
+                                        );
+                                    }
+                                }
+                            }
+                            shape.mutate(&mut worker, step);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

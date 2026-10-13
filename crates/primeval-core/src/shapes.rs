@@ -254,6 +254,108 @@ impl Shape {
         }
     }
 
+    /// Conservative, inclusive pixel bounds, clamped to the canvas. An
+    /// inverted interval is empty. This never rasterizes the shape.
+    ///
+    /// Triangles and polygons stay inside their vertex extrema; one extra
+    /// pixel covers integer edge rounding, AA and the coarse triangle's
+    /// +0.25 centre offset. Rectangles use their exact inclusive bounds and
+    /// the coarse rasterizer's half-open mapping. Binary ellipses/circles
+    /// stay inside their radii; the coarse +0.25 centre offset fits within
+    /// the extra pixel. Rotated rectangles use the rasterizer's exact
+    /// rotated corners, with a pixel for outward rounding.
+    ///
+    /// Quadratic segments stay in the control points' convex hull. Square
+    /// caps extend endpoints by half the stroke width. The stroke grid's
+    /// margin is (half_width + sqrt(2)/2) * sqrt(2) + 1; twice the scaled
+    /// width plus four covers that margin, the cap extension and rounding
+    /// for all three caps. Rotated ellipses use their rotated axis extrema,
+    /// with two pixels covering the rasterizer's one-pixel y margin and AA.
+    /// Coarse continuous coordinates and widths are halved before margins.
+    pub(crate) fn candidate_rectangle(
+        &self,
+        width: i32,
+        height: i32,
+        coarse: bool,
+    ) -> (i32, i32, i32, i32) {
+        let scale = if coarse { 0.5 } else { 1.0 };
+        let points = |points: &[(f64, f64)], margin: f64| {
+            let (mut x1, mut y1, mut x2, mut y2) = (
+                f64::INFINITY,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::NEG_INFINITY,
+            );
+            for &(x, y) in points {
+                x1 = x1.min(x * scale);
+                y1 = y1.min(y * scale);
+                x2 = x2.max(x * scale);
+                y2 = y2.max(y * scale);
+            }
+            (
+                ((x1 - margin).floor() as i32).max(0),
+                ((y1 - margin).floor() as i32).max(0),
+                ((x2 + margin).ceil() as i32).min(width - 1),
+                ((y2 + margin).ceil() as i32).min(height - 1),
+            )
+        };
+        let ellipse = |x: f64, y: f64, rx: f64, ry: f64, margin: f64| {
+            points(&[(x - rx, y - ry), (x + rx, y + ry)], margin)
+        };
+        match self {
+            Self::Triangle(s) => points(
+                &[
+                    (f64::from(s.x1), f64::from(s.y1)),
+                    (f64::from(s.x2), f64::from(s.y2)),
+                    (f64::from(s.x3), f64::from(s.y3)),
+                ],
+                1.0,
+            ),
+            Self::Rectangle(s) => {
+                let (x1, y1, x2, y2) = s.bounds();
+                if coarse {
+                    (
+                        (x1 >> 1).max(0),
+                        (y1 >> 1).max(0),
+                        (((x2 + 1) >> 1) - 1).min(width - 1),
+                        (((y2 + 1) >> 1) - 1).min(height - 1),
+                    )
+                } else {
+                    (x1.max(0), y1.max(0), x2.min(width - 1), y2.min(height - 1))
+                }
+            }
+            Self::Ellipse(s) => ellipse(
+                f64::from(s.x),
+                f64::from(s.y),
+                f64::from(s.rx),
+                f64::from(s.ry),
+                if coarse { 1.0 } else { 0.0 },
+            ),
+            Self::Circle(s) => ellipse(
+                f64::from(s.x),
+                f64::from(s.y),
+                f64::from(s.r),
+                f64::from(s.r),
+                if coarse { 1.0 } else { 0.0 },
+            ),
+            Self::RotatedRectangle(s) => points(&s.corners(), 1.0),
+            Self::Quadratic(s) => points(
+                &[(s.x1, s.y1), (s.x2, s.y2), (s.x3, s.y3)],
+                s.width * scale * 2.0 + 4.0,
+            ),
+            Self::RotatedEllipse(s) => {
+                let (sin, cos) = crate::util::sin_cos_degrees(s.angle);
+                let rx = ((s.rx * cos) * (s.rx * cos) + (s.ry * sin) * (s.ry * sin)).sqrt();
+                let ry = ((s.rx * sin) * (s.rx * sin) + (s.ry * cos) * (s.ry * cos)).sqrt();
+                ellipse(s.x, s.y, rx, ry, 2.0)
+            }
+            Self::Polygon(s) => points(
+                &std::array::from_fn::<_, 4, _>(|i| (s.x[i], s.y[i]))[..s.order],
+                1.0,
+            ),
+        }
+    }
+
     pub(crate) fn rasterize<'a, R: Rng>(&self, worker: &'a mut WorkerCtx<R>) -> &'a [Scanline] {
         match self {
             Self::Triangle(shape) => shape.rasterize(worker),
@@ -2697,6 +2799,60 @@ mod tests {
                     line.y
                 );
                 seen[i] = true;
+            }
+        }
+    }
+
+    #[test]
+    fn candidate_rectangles_contain_full_and_coarse_rasterization() {
+        for (index, (width, height)) in [(2, 2), (3, 7), (65, 49), (257, 255)]
+            .into_iter()
+            .enumerate()
+        {
+            let (mut worker, round) = make_test_round(width, height, 100 + index as u64);
+            for kind in
+                std::iter::once(ShapeKind::Any).chain(ShapeKind::all_kinds().iter().copied())
+            {
+                for sample in 0..150 {
+                    worker.quadratic_cap =
+                        [LineCap::Butt, LineCap::Round, LineCap::Square][sample % 3];
+                    worker.quadratic_width = (1.0, 32.0);
+                    let mut shape = Shape::random(kind, &mut worker, &round);
+                    for step in [
+                        Step::Coarse,
+                        Step::Coarse,
+                        Step::Scaled(1.0),
+                        Step::Scaled(crate::refine::MIN_SCALE),
+                        Step::Scaled(crate::refine::MIN_SCALE),
+                    ] {
+                        for coarse in [false, true] {
+                            let (w, h) = if coarse {
+                                (width.div_ceil(2), height.div_ceil(2))
+                            } else {
+                                (width, height)
+                            };
+                            worker.width = w as i32;
+                            worker.height = h as i32;
+                            let (x1, y1, x2, y2) =
+                                shape.candidate_rectangle(w as i32, h as i32, coarse);
+                            let lines = if coarse {
+                                shape.rasterize_coarse(&mut worker)
+                            } else {
+                                shape.rasterize(&mut worker)
+                            };
+                            for line in lines {
+                                assert!(
+                                    x1 <= line.x1 && line.x2 <= x2 && y1 <= line.y && line.y <= y2,
+                                    "{kind:?} {shape:?} coarse={coarse} rect={:?} line={line:?}",
+                                    (x1, y1, x2, y2)
+                                );
+                            }
+                        }
+                        worker.width = width as i32;
+                        worker.height = height as i32;
+                        shape.mutate(&mut worker, step);
+                    }
+                }
             }
         }
     }

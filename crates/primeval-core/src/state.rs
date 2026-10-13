@@ -85,12 +85,7 @@ impl State {
             return (energy < bound).then_some(energy);
         }
 
-        let energy = worker.energy_below(
-            round,
-            |ctx| self.shape.rasterize(ctx),
-            i32::from(self.alpha),
-            bound,
-        );
+        let energy = worker.energy_below(round, &self.shape, i32::from(self.alpha), bound);
         if energy.is_some() {
             self.cached_energy = energy;
         }

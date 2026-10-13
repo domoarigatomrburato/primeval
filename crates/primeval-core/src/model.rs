@@ -788,11 +788,23 @@ mod tests {
             age: Some(5),
             seeds: None,
         };
-        let check = |model: &mut Model| {
+        let mut rectangles = ChaCha8Rng::seed_from_u64(0x57a1e);
+        let mut check = |model: &mut Model| {
             model.prepare_grid();
             let mut expected = model.error_grid.clone();
             expected.compute(&model.target, model.canvas.buffer());
             assert_eq!(model.error_grid, expected);
+            for _ in 0..50 {
+                let x1 = rectangles.random_range(0..43_i32);
+                let x2 = rectangles.random_range(x1..43);
+                let y1 = rectangles.random_range(0..35_i32);
+                let y2 = rectangles.random_range(y1..35);
+                let sums = model.error_grid.sums();
+                assert_eq!(
+                    sums.rectangle_error((x1, y1, x2, y2)),
+                    Some((y1..=y2).map(|y| sums.error(y, x1, x2)).sum())
+                );
+            }
             let mut coarse =
                 crate::coarse::Coarse::new(&model.target, model.canvas.buffer()).unwrap();
             let expected = coarse.round(model.canvas.buffer());

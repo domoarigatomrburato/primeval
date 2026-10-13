@@ -1772,11 +1772,11 @@ pub(crate) fn difference_partial(
 /// error of the covered pixels, from `fit.before`, plus their error after
 /// blending, computed on the fly.
 ///
-/// The running total uses wrapping arithmetic: a scanline set that covers a
-/// pixel twice (the quadratic stroke, ENG-2) subtracts that pixel's old
-/// difference twice, so on a small canvas `score - fit.before` can be
-/// negative before the new errors are added. Wrapping keeps debug builds
-/// from panicking and matches release builds.
+/// Shape rasterizers emit every pixel at most once, including quadratic
+/// strokes, so their covered old error never exceeds the canvas's error.
+/// The running total retains wrapping arithmetic for arbitrary scanline
+/// sets supplied by internal callers and tests, which may repeat pixels
+/// and subtract their old error more than once.
 ///
 /// # Panics
 ///
