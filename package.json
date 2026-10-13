@@ -1,6 +1,6 @@
 {
   "name": "@domoarigatomrburato/primeval",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": false,
   "type": "module",
   "description": "Approximate images with geometric shapes (triangles, ellipses, curves, polygons) and export SVG or PNG. Native Rust engine with a Node API and CLI, and a WebAssembly build for browsers.",
