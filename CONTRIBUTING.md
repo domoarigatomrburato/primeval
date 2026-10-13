@@ -26,6 +26,12 @@ npm run build
 npm run build:node
 ```
 
+`npm run verify` also checks for unused crate dependencies with cargo-machete, which CI installs at the same pin; install it once per machine:
+
+```bash
+cargo install cargo-machete --locked --version 0.9.2
+```
+
 The WebAssembly builds (`npm run build:wasm`, also part of `npm run verify`) need more tools, pinned by `scripts/build-wasm.mjs`: the dated nightly for the threaded build, with rust-src, wasm-bindgen-cli at the version of the wasm-bindgen crate in `Cargo.lock`, and the `wasm32-wasip1` target of the pinned stable toolchain, which only the kernel tests below use. `install-tools` installs all three, skipping the CLI when the installed one already matches:
 
 ```bash
@@ -85,7 +91,7 @@ npm ci
 npm run verify
 ```
 
-`npm run verify` includes `npm run lint`, which runs Biome over `src/`, `scripts/`, `test/`, and `demo/` to check formatting, import order, and lint rules. Run `npm run format` to apply formatting, import order, and safe lint fixes.
+`npm run verify` includes `npm run lint`, which runs Biome over `src/`, `scripts/`, `test/`, and `demo/` to check formatting, import order, and lint rules. Run `npm run format` to apply formatting, import order, and safe lint fixes. It also runs knip (`npm run knip`, configured in `knip.jsonc`), which reports unused files, exports and npm dependencies; run it after adding or removing any of them. Run `cargo machete` after editing a `Cargo.toml`.
 
 ## Benchmarks
 

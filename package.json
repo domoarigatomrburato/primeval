@@ -79,8 +79,8 @@
     "build:node": "napi build -p primeval-node --release --platform --no-js --dts binding.d.ts --output-dir . && npm run generate:binding",
     "check:napi-targets": "node scripts/napi-targets.mjs check-package",
     "bump:version": "node scripts/napi-targets.mjs bump-version",
-    "verify:rust": "cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo clippy --all-targets --all-features -- -D warnings && cargo doc --no-deps --workspace && cargo test --workspace --all-features",
-    "verify:node": "npm run lint && npm run check:napi-targets && npm run typecheck && npm run build && npm run build:node && npm test && npm run test:tooling",
+    "verify:rust": "cargo fmt --check && cargo machete && cargo clippy --all-targets -- -D warnings && cargo clippy --all-targets --all-features -- -D warnings && cargo doc --no-deps --workspace && cargo test --workspace --all-features",
+    "verify:node": "npm run lint && npm run knip && npm run check:napi-targets && npm run typecheck && npm run build && npm run build:node && npm test && npm run test:tooling",
     "verify:pack": "npm run prepare:package && npm pack --dry-run --ignore-scripts",
     "verify:wasm": "node scripts/build-wasm.mjs clippy && node scripts/build-wasm.mjs test-kernels && npm run build:wasm && npm run build && npm run build:node && node scripts/release-packages.mjs verify-root && npm run test:browser",
     "verify": "npm run verify:rust && npm run verify:node && npm run verify:pack && npm run verify:wasm",
@@ -90,6 +90,7 @@
     "test:browser": "node --test test/browser/*.test.js",
     "prepack": "npm run prepare:package",
     "lint": "biome check --error-on-warnings",
+    "knip": "knip",
     "format": "biome check --write"
   },
   "optionalDependencies": {
@@ -111,10 +112,11 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",
-    "@napi-rs/cli": "^3.10.6",
-    "@types/node": "^26.6.3",
-    "playwright": "1.63.0",
+    "@napi-rs/cli": "^3.10.8",
+    "@types/node": "^26.6.5",
+    "knip": "6.41.0",
+    "playwright": "1.64.0",
     "typescript": "^7.0.2",
-    "vite": "8.3.2"
+    "vite": "8.3.4"
   }
 }

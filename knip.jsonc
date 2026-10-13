@@ -1,0 +1,22 @@
+{
+  "$schema": "https://unpkg.com/knip@6.41.0/schema-jsonc.json",
+  // Package entries (package.json exports and bin) and the npm-script and
+  // node --test entries are found by knip's own plugins; listed here are the
+  // ones it cannot see.
+  "entry": [
+    // Started by URL from src/browser-runtime.ts (`new Worker(new URL(...))`).
+    "src/worker-single.ts",
+    "src/worker-threaded.ts",
+    // The demo: plain ES modules loaded by demo/index.html, and its service
+    // worker registered there by URL.
+    "demo/app.js",
+    "demo/coi-sw.js",
+    // Spawned by path from scripts/build-wasm.mjs as the wasm32-wasip1 test runner.
+    "scripts/wasi-runner.mjs"
+  ],
+  // Exports tagged @testonly are reached only by the browser tests, which
+  // import the built dist/ files from test/browser/page.html.
+  "tags": ["-testonly"],
+  // System commands spawned by scripts and tests, not npm binaries.
+  "ignoreBinaries": ["rustc", "mkfifo"]
+}

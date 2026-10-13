@@ -41,7 +41,7 @@ export const OUTPUT_FILES = { glue: `${OUT_NAME}.js`, wasm: `${OUT_NAME}_bg.wasm
  * deliberately, like the stable pin, and re-check the `atomics` target
  * feature, which nightly is phasing out (rust-lang/rust#162235).
  */
-export const NIGHTLY_TOOLCHAIN = "nightly-2026-09-25";
+export const NIGHTLY_TOOLCHAIN = "nightly-2026-10-12";
 
 /**
  * Every wasm32 build enables SIMD, which every current browser supports

@@ -2,7 +2,6 @@
 name = "primeval-wasm"
 version.workspace = true
 edition = "2024"
-homepage.workspace = true
 repository.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -26,5 +25,5 @@ crossbeam-channel = { version = "0.5.17", optional = true }
 js-sys = "0.3.106"
 primeval-js = { path = "../crates/primeval-js" }
 primeval-render = { path = "../crates/primeval-render" }
-rayon = "1.10"
+rayon = "1.12.0"
 wasm-bindgen = "0.2.129"

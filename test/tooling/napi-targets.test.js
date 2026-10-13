@@ -154,6 +154,19 @@ test("rust checks also run on arm64 macOS so the NEON paths are tested", () => {
   assert.match(rustChecks[1], /run: npm run verify:rust/);
 });
 
+test("rust checks install cargo-machete, pinned, before verify:rust", () => {
+  const qualityWorkflow = fs.readFileSync(
+    path.join(process.cwd(), ".github", "workflows", "quality.yml"),
+    "utf8",
+  );
+  const rustChecks = qualityWorkflow.match(/^ {2}rust-checks:\n((?:(?: {4,}.*)?\n)+)/m);
+  assert.ok(rustChecks, "missing rust-checks job");
+  const install = rustChecks[1].indexOf("tool: cargo-machete@");
+  assert.ok(install >= 0, "rust-checks job does not install cargo-machete");
+  assert.match(rustChecks[1], /tool: cargo-machete@\d+\.\d+\.\d+\s*$/m);
+  assert.ok(install < rustChecks[1].indexOf("run: npm run verify:rust"));
+});
+
 test("package metadata validation rejects drift between targets and optional dependencies", () => {
   assert.throws(
     () =>
@@ -331,9 +344,12 @@ test("package exposes canonical verify scripts and CI uses the split workflow", 
     /cargo clippy --all-targets --all-features -- -D warnings/,
   );
   assert.match(pkg.scripts["verify:rust"], /cargo test/);
+  assert.match(pkg.scripts["verify:rust"], /^cargo fmt --check && cargo machete && cargo clippy /);
 
   assert.equal(pkg.scripts.lint, "biome check --error-on-warnings");
-  assert.match(pkg.scripts["verify:node"], /^npm run lint && /);
+  assert.match(pkg.scripts["verify:node"], /^npm run lint && npm run knip && /);
+  assert.match(pkg.scripts.knip, /^knip\b/);
+  assert.match(pkg.devDependencies.knip, /^\d+\.\d+\.\d+$/);
   assert.match(pkg.scripts["verify:node"], /npm run check:napi-targets/);
   assert.match(pkg.scripts["verify:node"], /npm run typecheck/);
   assert.match(pkg.scripts["verify:node"], /npm run build/);

@@ -2,7 +2,6 @@
 name = "primeval-node"
 version.workspace = true
 edition = "2024"
-homepage.workspace = true
 repository.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -15,10 +14,10 @@ crate-type = ["cdylib"]
 workspace = true
 
 [dependencies]
-napi = { version = "3", features = ["napi6", "tokio_rt"] }
-napi-derive = "3"
+napi = { version = "3.14.2", features = ["napi6", "tokio_rt"] }
+napi-derive = "3.6.12"
 primeval-js = { path = "../crates/primeval-js" }
 primeval-render = { path = "../crates/primeval-render" }
 
 [build-dependencies]
-napi-build = "2"
+napi-build = "2.6.0"

@@ -256,6 +256,8 @@ export async function approximateInWorker(request: unknown): Promise<WorkerResul
  * Internal, for the browser tests only: panics in a fresh worker, on the
  * calling thread or in a rayon pool task, through binding-wasm's hidden
  * `__panicForTests`. Rejects with the `InternalError` a render panic gives.
+ *
+ * @testonly
  */
 export async function panicForTests(site: PanicSite): Promise<never> {
   await runInWorker({ kind: "panic", site }, undefined, undefined);
