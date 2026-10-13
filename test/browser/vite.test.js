@@ -41,7 +41,7 @@ function variantAssets(variant) {
 before(async () => {
   tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "primeval-vite-"));
   const app = path.join(tempDir, "app");
-  const installed = path.join(app, "node_modules", "@aleburato", "primeval");
+  const installed = path.join(app, "node_modules", "@domoarigatomrburato", "primeval");
   fs.mkdirSync(installed, { recursive: true });
 
   // The tarball's contents are what an install unpacks; extracting it avoids

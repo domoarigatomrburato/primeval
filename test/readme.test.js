@@ -20,7 +20,7 @@ function readmeExamples() {
     return /^import /m.test(source)
       ? source
       : [
-          'import { approximate } from "@aleburato/primeval";',
+          'import { approximate } from "@domoarigatomrburato/primeval";',
           'import { readFile } from "node:fs/promises";',
           source,
         ].join("\n");

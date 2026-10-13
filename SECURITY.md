@@ -20,7 +20,7 @@ Please include as much of the following as you can:
 
 This policy covers:
 
-- the npm package `@aleburato/primeval`
+- the npm package `@domoarigatomrburato/primeval`
 - published native addons and their loading path
 - the bundled CLI
 - the Rust workspace crates in this repository

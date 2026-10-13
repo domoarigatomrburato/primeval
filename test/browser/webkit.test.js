@@ -84,7 +84,7 @@ describe("demo in WebKit, cross-origin isolated by its service worker", { skip }
 
   test("concurrent calls through the package both resolve", async () => {
     const outcomes = await page.evaluate(async () => {
-      const { approximate } = await import("@aleburato/primeval");
+      const { approximate } = await import("@domoarigatomrburato/primeval");
       const input = new Uint8Array(await (await fetch("./samples/monalisa.jpg")).arrayBuffer());
       const run = (seed) =>
         approximate({

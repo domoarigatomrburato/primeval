@@ -119,7 +119,7 @@ test("binding loader reports both local and package load failures with install g
 
   assert.deepEqual(requireCalls, [
     "./primeval-node.linux-x64-gnu.node",
-    "@aleburato/primeval-linux-x64-gnu",
+    "@domoarigatomrburato/primeval-linux-x64-gnu",
   ]);
 });
 

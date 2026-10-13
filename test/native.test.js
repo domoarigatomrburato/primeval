@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
-import { AbortError, approximate, PrimevalError, ValidationError } from "@aleburato/primeval";
+import {
+  AbortError,
+  approximate,
+  PrimevalError,
+  ValidationError,
+} from "@domoarigatomrburato/primeval";
 
 import { rgbPng } from "./helpers/png.js";
 import { assertPreviewsSvg } from "./helpers/svg.js";

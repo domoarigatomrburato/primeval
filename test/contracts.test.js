@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { approximate, ValidationError } from "@aleburato/primeval";
+import { approximate, ValidationError } from "@domoarigatomrburato/primeval";
 
 import { rgbPng } from "./helpers/png.js";
 

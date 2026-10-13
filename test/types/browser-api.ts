@@ -1,7 +1,7 @@
 // Type-level checks of the browser entry's published declarations, through
 // the package's own name under the `browser` condition. Type-checked by
 // test/types.test.js with tsconfig.browser.json.
-import * as entry from "@aleburato/primeval";
+import * as entry from "@domoarigatomrburato/primeval";
 import {
   AbortError,
   type ApproximateResult,
@@ -19,7 +19,7 @@ import {
   type SvgResult,
   toDataUri,
   ValidationError,
-} from "@aleburato/primeval";
+} from "@domoarigatomrburato/primeval";
 
 declare const input: Uint8Array;
 declare const format: "svg" | "png";

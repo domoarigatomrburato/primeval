@@ -11,12 +11,12 @@ import {
   PrimevalError,
   toDataUri,
   ValidationError,
-} from "@aleburato/primeval";
+} from "@domoarigatomrburato/primeval";
 
 import { mapNativeError } from "../dist/errors.js";
 
 test("package root import resolves", async () => {
-  const mod = await import("@aleburato/primeval");
+  const mod = await import("@domoarigatomrburato/primeval");
   assert.equal(typeof mod.approximate, "function");
   assert.equal(typeof mod.toDataUri, "function");
   assert.equal(typeof mod.ValidationError, "function");

@@ -1,7 +1,7 @@
 // A minimal app built with Vite against the packed package (see
 // test/browser/vite.test.js, which copies the fixture image next to it). It
 // renders once on load and exposes the outcome as `window.outcome`.
-import { approximate } from "@aleburato/primeval";
+import { approximate } from "@domoarigatomrburato/primeval";
 
 async function render() {
   const response = await fetch(new URL("./monalisa.jpg", import.meta.url));

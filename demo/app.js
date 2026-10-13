@@ -1,7 +1,7 @@
 // The demo app. It uses the package through the import map in index.html, as
 // the README's no-bundler path does, draws each step's shape as a live
 // preview, and shows the final SVG when it arrives.
-import { approximate, InternalError, ValidationError } from "@aleburato/primeval";
+import { approximate, InternalError, ValidationError } from "@domoarigatomrburato/primeval";
 
 const $ = (selector) => document.querySelector(selector);
 

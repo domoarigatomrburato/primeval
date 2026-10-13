@@ -120,7 +120,7 @@ test("repository cargo crate versions match the npm package version", () => {
   assert.doesNotThrow(() => validateCargoVersions(pkg.version, cargo));
 });
 
-const PACKAGE_NAME = "@aleburato/primeval";
+const PACKAGE_NAME = "@domoarigatomrburato/primeval";
 const PLATFORM_PACKAGE = `${PACKAGE_NAME}-linux-x64-gnu`;
 
 function writeFixtureProject(version) {

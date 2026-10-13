@@ -27,27 +27,31 @@ import {
 const repoRoot = process.cwd();
 
 const PKG = {
-  name: "@aleburato/primeval",
+  name: "@domoarigatomrburato/primeval",
   version: "1.2.3",
   napi: { targets: ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"] },
 };
 
 const PLATFORM_DEPENDENCIES = {
-  "@aleburato/primeval-darwin-arm64": "1.2.3",
-  "@aleburato/primeval-linux-x64-gnu": "1.2.3",
+  "@domoarigatomrburato/primeval-darwin-arm64": "1.2.3",
+  "@domoarigatomrburato/primeval-linux-x64-gnu": "1.2.3",
 };
 
 const PACKAGES = releasePackages(PKG, "/repo/npm", "/repo");
 
 test("release packages list every platform package, then the root package last", () => {
   assert.deepEqual(PACKAGES, [
-    { name: "@aleburato/primeval-darwin-arm64", version: "1.2.3", dir: "/repo/npm/darwin-arm64" },
     {
-      name: "@aleburato/primeval-linux-x64-gnu",
+      name: "@domoarigatomrburato/primeval-darwin-arm64",
+      version: "1.2.3",
+      dir: "/repo/npm/darwin-arm64",
+    },
+    {
+      name: "@domoarigatomrburato/primeval-linux-x64-gnu",
       version: "1.2.3",
       dir: "/repo/npm/linux-x64-gnu",
     },
-    { name: "@aleburato/primeval", version: "1.2.3", dir: "/repo" },
+    { name: "@domoarigatomrburato/primeval", version: "1.2.3", dir: "/repo" },
   ]);
 });
 
@@ -78,7 +82,7 @@ test("npm view output tells published, unpublished and failed lookups apart", ()
 });
 
 test("publishing skips versions that already exist and keeps the root package last", () => {
-  const published = new Set(["@aleburato/primeval-darwin-arm64"]);
+  const published = new Set(["@domoarigatomrburato/primeval-darwin-arm64"]);
   const calls = [];
   const actions = publishPackages(PACKAGES, {
     isPublished: ({ name }) => published.has(name),
@@ -86,13 +90,16 @@ test("publishing skips versions that already exist and keeps the root package la
     log: () => {},
   });
 
-  assert.deepEqual(calls, ["@aleburato/primeval-linux-x64-gnu", "@aleburato/primeval"]);
+  assert.deepEqual(calls, [
+    "@domoarigatomrburato/primeval-linux-x64-gnu",
+    "@domoarigatomrburato/primeval",
+  ]);
   assert.deepEqual(
     actions.map(({ name, action }) => [name, action]),
     [
-      ["@aleburato/primeval-darwin-arm64", "skip"],
-      ["@aleburato/primeval-linux-x64-gnu", "publish"],
-      ["@aleburato/primeval", "publish"],
+      ["@domoarigatomrburato/primeval-darwin-arm64", "skip"],
+      ["@domoarigatomrburato/primeval-linux-x64-gnu", "publish"],
+      ["@domoarigatomrburato/primeval", "publish"],
     ],
   );
 });
@@ -114,8 +121,8 @@ test("a failed platform publish stops before the root package", () => {
     /publish failed/,
   );
   assert.deepEqual(calls, [
-    "@aleburato/primeval-darwin-arm64",
-    "@aleburato/primeval-linux-x64-gnu",
+    "@domoarigatomrburato/primeval-darwin-arm64",
+    "@domoarigatomrburato/primeval-linux-x64-gnu",
   ]);
 });
 
@@ -155,7 +162,7 @@ test("post-publish verification fails and names every missing package", async ()
       delayMs: 10,
       log: () => {},
     }),
-    /not on the registry: @aleburato\/primeval-linux-x64-gnu@1\.2\.3, @aleburato\/primeval@1\.2\.3/,
+    /not on the registry: @domoarigatomrburato\/primeval-linux-x64-gnu@1\.2\.3, @domoarigatomrburato\/primeval@1\.2\.3/,
   );
   assert.deepEqual(sleeps, [10, 10]);
 });
@@ -167,8 +174,8 @@ test("withPlatformDependencies adds every platform package at the version, in na
   const published = withPlatformDependencies(PKG);
   assert.deepEqual(published, { ...PKG, optionalDependencies: PLATFORM_DEPENDENCIES });
   assert.deepEqual(Object.keys(published.optionalDependencies), [
-    "@aleburato/primeval-darwin-arm64",
-    "@aleburato/primeval-linux-x64-gnu",
+    "@domoarigatomrburato/primeval-darwin-arm64",
+    "@domoarigatomrburato/primeval-linux-x64-gnu",
   ]);
   assert.deepEqual(PKG, before, "the input is not modified");
 });
@@ -183,15 +190,15 @@ test("withPlatformDependencies refuses a package.json that already lists them", 
 test("platform dependency verification wants exactly the expected map", () => {
   assert.doesNotThrow(() =>
     verifyPlatformDependencies("the packed root package", PLATFORM_DEPENDENCIES, {
-      "@aleburato/primeval-linux-x64-gnu": "1.2.3",
-      "@aleburato/primeval-darwin-arm64": "1.2.3",
+      "@domoarigatomrburato/primeval-linux-x64-gnu": "1.2.3",
+      "@domoarigatomrburato/primeval-darwin-arm64": "1.2.3",
     }),
   );
   for (const actual of [
     undefined,
     {},
-    { "@aleburato/primeval-darwin-arm64": "1.2.3" },
-    { ...PLATFORM_DEPENDENCIES, "@aleburato/primeval-darwin-arm64": "1.2.2" },
+    { "@domoarigatomrburato/primeval-darwin-arm64": "1.2.3" },
+    { ...PLATFORM_DEPENDENCIES, "@domoarigatomrburato/primeval-darwin-arm64": "1.2.2" },
     { ...PLATFORM_DEPENDENCIES, extra: "1.0.0" },
   ]) {
     assert.throws(
@@ -255,16 +262,16 @@ test("publish adds the platform packages before it checks and publishes anything
     assert.deepEqual(events, [
       ["verifyRoot", PLATFORM_DEPENDENCIES],
       ["packedManifest"],
-      ["publish", "@aleburato/primeval-darwin-arm64", undefined],
-      ["publish", "@aleburato/primeval-linux-x64-gnu", undefined],
-      ["publish", "@aleburato/primeval", PLATFORM_DEPENDENCIES],
+      ["publish", "@domoarigatomrburato/primeval-darwin-arm64", undefined],
+      ["publish", "@domoarigatomrburato/primeval-linux-x64-gnu", undefined],
+      ["publish", "@domoarigatomrburato/primeval", PLATFORM_DEPENDENCIES],
     ]);
     assert.deepEqual(
       actions.map(({ name, dir }) => [name, dir]),
       [
-        ["@aleburato/primeval-darwin-arm64", "/repo/npm/darwin-arm64"],
-        ["@aleburato/primeval-linux-x64-gnu", "/repo/npm/linux-x64-gnu"],
-        ["@aleburato/primeval", rootDir],
+        ["@domoarigatomrburato/primeval-darwin-arm64", "/repo/npm/darwin-arm64"],
+        ["@domoarigatomrburato/primeval-linux-x64-gnu", "/repo/npm/linux-x64-gnu"],
+        ["@domoarigatomrburato/primeval", rootDir],
       ],
     );
     // The committed package.json is back, so later steps validate it as committed.
@@ -346,7 +353,7 @@ test("release verification also checks the root package's published optionalDepe
     log: () => {},
   };
   await verifyRelease(PKG, "v1.2.3", tools);
-  assert.deepEqual(views, ["@aleburato/primeval@1.2.3"]);
+  assert.deepEqual(views, ["@domoarigatomrburato/primeval@1.2.3"]);
 
   await assert.rejects(
     verifyRelease(PKG, "v1.2.3", { ...tools, rootDependencies: () => ({}) }),

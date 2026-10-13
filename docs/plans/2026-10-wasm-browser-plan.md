@@ -4,7 +4,7 @@ Status: W0–W5 done (2026-10-02, PR #10); Pages is enabled, so the demo goes li
 
 ## Goal
 
-`@aleburato/primeval` runs in the browser with the same `approximate()` API as on Node, multithreaded from the first release, and a demo app on GitHub Pages shows it off. The image never leaves the browser.
+`@domoarigatomrburato/primeval` runs in the browser with the same `approximate()` API as on Node, multithreaded from the first release, and a demo app on GitHub Pages shows it off. The image never leaves the browser.
 
 ## Constraints
 

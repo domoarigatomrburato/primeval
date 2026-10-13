@@ -139,7 +139,13 @@ test("packed package can be installed and render in a consumer project", {
     run(npmCommand(), ["install", path.join(tempDir, platformFilename)], { cwd: tempDir });
     run(npmCommand(), ["install", tarballPath], { cwd: tempDir });
 
-    const installedDist = path.join(tempDir, "node_modules", "@aleburato", "primeval", "dist");
+    const installedDist = path.join(
+      tempDir,
+      "node_modules",
+      "@domoarigatomrburato",
+      "primeval",
+      "dist",
+    );
     const shipped = fs.readdirSync(installedDist);
     assert.ok(!shipped.includes("cli.d.ts"), "dist/cli.d.ts must not ship");
     assert.ok(!shipped.includes("native-binding.d.ts"), "dist/native-binding.d.ts must not ship");
@@ -156,7 +162,7 @@ test("packed package can be installed and render in a consumer project", {
     // The browser entry under the `browser` condition, the Node entry without
     // it, and nothing internal (the browser runtime's test-only export) under
     // either.
-    const installedRoot = path.join(tempDir, "node_modules", "@aleburato", "primeval");
+    const installedRoot = path.join(tempDir, "node_modules", "@domoarigatomrburato", "primeval");
     const resolve = (specifier, conditions) => {
       const result = spawnSync(
         process.execPath,
@@ -171,16 +177,16 @@ test("packed package can be installed and render in a consumer project", {
       return result.status === 0 ? fileURLToPath(result.stdout) : { stderr: result.stderr };
     };
     assert.equal(
-      resolve("@aleburato/primeval", ["browser"]),
+      resolve("@domoarigatomrburato/primeval", ["browser"]),
       fs.realpathSync(path.join(installedRoot, "dist", "browser.js")),
     );
     assert.equal(
-      resolve("@aleburato/primeval", []),
+      resolve("@domoarigatomrburato/primeval", []),
       fs.realpathSync(path.join(installedRoot, "dist", "index.js")),
     );
     for (const conditions of [["browser"], []]) {
       assert.match(
-        resolve("@aleburato/primeval/dist/browser-runtime.js", conditions).stderr ?? "",
+        resolve("@domoarigatomrburato/primeval/dist/browser-runtime.js", conditions).stderr ?? "",
         /ERR_PACKAGE_PATH_NOT_EXPORTED/,
       );
     }
@@ -207,7 +213,7 @@ test("packed package can be installed and render in a consumer project", {
     const fixturePath = path.join(repoRoot, "docs", "readme", "originals", "monalisa.jpg");
     const smokeScript = [
       'import { readFile } from "node:fs/promises";',
-      'import { approximate } from "@aleburato/primeval";',
+      'import { approximate } from "@domoarigatomrburato/primeval";',
       `const input = await readFile(${JSON.stringify(fixturePath)});`,
       "const render = { count: 4, resizeInput: 8, outputSize: 16, seed: 7 };",
       'const svg = await approximate({ input, output: "svg", render });',

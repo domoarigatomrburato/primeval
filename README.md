@@ -26,7 +26,7 @@ Give it an input image and it searches for a layered approximation you can expor
   </tr>
 </table>
 
-Inspired by Michael Fogleman's original [`primitive`](https://github.com/fogleman/primitive), this repository is an **independent Rust implementation** with a reusable core library (`primeval-core`) and an ESM-only Node package (`@aleburato/primeval`) that includes both a programmatic API and a Node CLI, and runs the same API in the browser.
+Inspired by Michael Fogleman's original [`primitive`](https://github.com/fogleman/primitive), this repository is an **independent Rust implementation** with a reusable core library (`primeval-core`) and an ESM-only Node package (`@domoarigatomrburato/primeval`) that includes both a programmatic API and a Node CLI, and runs the same API in the browser.
 
 ## Progression Gallery
 
@@ -45,7 +45,7 @@ Browse the full example gallery in [`docs/gallery.md`](docs/gallery.md). The sam
 ### Node package
 
 ```bash
-npm install @aleburato/primeval
+npm install @domoarigatomrburato/primeval
 ```
 
 Prebuilt native addons are provided for macOS (arm64, x64), Linux GNU libc (arm64, x64; glibc 2.17 or newer), and Windows (x64). Node 22.12+ is required.
@@ -65,19 +65,19 @@ Accepted input formats: **JPEG, PNG, and WebP**. Output can be SVG or PNG.
 Run the package CLI (no Rust build required):
 
 ```bash
-npx @aleburato/primeval photo.jpg --count 100
+npx @domoarigatomrburato/primeval photo.jpg --count 100
 ```
 
 This writes `photo.svg` next to the input file. Use `--output` to choose a different path; the output format comes from its extension (`.svg` or `.png`):
 
 ```bash
-npx @aleburato/primeval photo.jpg --output output/result.svg --count 100
+npx @domoarigatomrburato/primeval photo.jpg --output output/result.svg --count 100
 ```
 
 Or install globally to call `primeval` directly:
 
 ```bash
-npm install -g @aleburato/primeval
+npm install -g @domoarigatomrburato/primeval
 primeval photo.jpg --count 100
 ```
 
@@ -129,7 +129,7 @@ The npm package is **ESM-only** and targets **Node 22.12+**.
 The examples below read `photo.jpg` from the current directory; replace it with the path to your own JPEG, PNG, or WebP image.
 
 ```js
-import { approximate } from "@aleburato/primeval";
+import { approximate } from "@domoarigatomrburato/primeval";
 import { readFile } from "node:fs/promises";
 
 const input = await readFile("photo.jpg");
@@ -190,7 +190,7 @@ Execution options:
 Convert results to a data URI:
 
 ```js
-import { approximate, toDataUri } from "@aleburato/primeval";
+import { approximate, toDataUri } from "@domoarigatomrburato/primeval";
 import { readFile } from "node:fs/promises";
 
 const input = await readFile("photo.jpg");
@@ -216,7 +216,7 @@ Handle errors by catching typed error classes. `approximate()` never throws sync
 Branch on `instanceof` or `code`, not on the message text. When an `INVALID_OPTION` error is about `output` or a `render` option, `error.option` names it (for example `"resizeInput"`) and `error.requirement` says what it accepts (for example `"must be an integer from 2 to 2048"`); the message is `` `${option} ${requirement}` ``.
 
 ```js
-import { approximate, ValidationError } from "@aleburato/primeval";
+import { approximate, ValidationError } from "@domoarigatomrburato/primeval";
 import { readFile } from "node:fs/promises";
 
 try {
@@ -236,7 +236,7 @@ try {
 Abort long renders with `AbortSignal`:
 
 ```js
-import { AbortError, approximate } from "@aleburato/primeval";
+import { AbortError, approximate } from "@domoarigatomrburato/primeval";
 import { readFile } from "node:fs/promises";
 
 const controller = new AbortController();
@@ -282,15 +282,15 @@ Package notes:
 
 The [demo](https://domoarigatomrburato.github.io/primeval/) is this package's browser build on a static page ([`demo/`](demo/)).
 
-The same package runs in the browser through WebAssembly, with the same `approximate()` and `toDataUri()`, the same options, defaults, error classes and codes, `onProgress`, and `AbortSignal`. Import it from `@aleburato/primeval` as on Node: the browser entry is the `browser` condition of the package's `exports`, which bundlers use when they build for the browser. The package's tests run it unbundled and in a Vite 8 build, which needs no Vite config: Vite bundles the workers and emits both `.wasm` files as assets, and the page still downloads only one. Other bundlers are not tested. Without a bundler, serve the package's files from the page's own origin (browsers start module workers only from the same origin) and map the name to `dist/browser.js` with an import map:
+The same package runs in the browser through WebAssembly, with the same `approximate()` and `toDataUri()`, the same options, defaults, error classes and codes, `onProgress`, and `AbortSignal`. Import it from `@domoarigatomrburato/primeval` as on Node: the browser entry is the `browser` condition of the package's `exports`, which bundlers use when they build for the browser. The package's tests run it unbundled and in a Vite 8 build, which needs no Vite config: Vite bundles the workers and emits both `.wasm` files as assets, and the page still downloads only one. Other bundlers are not tested. Without a bundler, serve the package's files from the page's own origin (browsers start module workers only from the same origin) and map the name to `dist/browser.js` with an import map:
 
 ```html
 <script type="importmap">
-  { "imports": { "@aleburato/primeval": "/node_modules/@aleburato/primeval/dist/browser.js" } }
+  { "imports": { "@domoarigatomrburato/primeval": "/node_modules/@domoarigatomrburato/primeval/dist/browser.js" } }
 </script>
 <input type="file" accept="image/jpeg,image/png,image/webp" />
 <script type="module">
-  import { approximate } from "@aleburato/primeval";
+  import { approximate } from "@domoarigatomrburato/primeval";
 
   document.querySelector("input").addEventListener("change", async (event) => {
     const input = new Uint8Array(await event.target.files[0].arrayBuffer());

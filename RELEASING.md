@@ -66,10 +66,10 @@ When a `v*` tag is pushed, [.github/workflows/napi-prebuilds.yml](.github/workfl
 
 npm trusted publishing (OIDC) can only be set up for a package that already exists, so the first release of every package publishes with a token:
 
-1. On npmjs.com, create a granular access token with read and write access to the `@aleburato` scope and a short expiry, for example 7 days.
+1. On npmjs.com, create a granular access token with read and write access to the `@domoarigatomrburato` scope and a short expiry, for example 7 days.
 2. Add it to the repository as the Actions secret `NPM_TOKEN`. The publish step passes it to npm as `NODE_AUTH_TOKEN`.
 3. Release as described above.
-4. On npmjs.com, add a trusted publisher to each of the six packages (`@aleburato/primeval` and the five platform packages, one per `package.json` `napi.targets` entry): repository `domoarigatomrburato/primeval`, workflow `napi-prebuilds.yml`.
+4. On npmjs.com, add a trusted publisher to each of the six packages (`@domoarigatomrburato/primeval` and the five platform packages, one per `package.json` `napi.targets` entry): repository `domoarigatomrburato/primeval`, workflow `napi-prebuilds.yml`.
 5. Delete the `NPM_TOKEN` secret and revoke the token. Later releases publish through OIDC, which needs npm 11.5.1 or newer on the runner.
 
 ## Re-running A Failed Release

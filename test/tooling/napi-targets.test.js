@@ -59,7 +59,7 @@ test("lockedVersion reads the repository's wasm-bindgen", () => {
 
 test("optional dependencies are derived from napi targets", () => {
   assert.deepEqual(
-    optionalDependencyNamesForTargets("@aleburato/primeval", [
+    optionalDependencyNamesForTargets("@domoarigatomrburato/primeval", [
       "aarch64-apple-darwin",
       "x86_64-apple-darwin",
       "aarch64-unknown-linux-gnu",
@@ -67,11 +67,11 @@ test("optional dependencies are derived from napi targets", () => {
       "x86_64-pc-windows-msvc",
     ]),
     [
-      "@aleburato/primeval-darwin-arm64",
-      "@aleburato/primeval-darwin-x64",
-      "@aleburato/primeval-linux-arm64-gnu",
-      "@aleburato/primeval-linux-x64-gnu",
-      "@aleburato/primeval-win32-x64-msvc",
+      "@domoarigatomrburato/primeval-darwin-arm64",
+      "@domoarigatomrburato/primeval-darwin-x64",
+      "@domoarigatomrburato/primeval-linux-arm64-gnu",
+      "@domoarigatomrburato/primeval-linux-x64-gnu",
+      "@domoarigatomrburato/primeval-win32-x64-msvc",
     ],
   );
 });
@@ -168,27 +168,27 @@ test("rust checks install cargo-machete, pinned, before verify:rust", () => {
 });
 
 const TWO_TARGETS = {
-  name: "@aleburato/primeval",
+  name: "@domoarigatomrburato/primeval",
   version: "0.1.1",
   napi: {
     targets: ["aarch64-apple-darwin", "x86_64-apple-darwin"],
   },
 };
 
-const LOCK_ROOT = { name: "@aleburato/primeval", version: "0.1.1" };
+const LOCK_ROOT = { name: "@domoarigatomrburato/primeval", version: "0.1.1" };
 
 function lockWith(packages) {
-  return { name: "@aleburato/primeval", version: "0.1.1", packages };
+  return { name: "@domoarigatomrburato/primeval", version: "0.1.1", packages };
 }
 
 test("package metadata without optional dependencies validates", () => {
   assert.deepEqual(validatePackageMetadata(TWO_TARGETS), {
-    packageName: "@aleburato/primeval",
+    packageName: "@domoarigatomrburato/primeval",
     targets: ["aarch64-apple-darwin", "x86_64-apple-darwin"],
     version: "0.1.1",
     expectedOptionalDependencies: [
-      "@aleburato/primeval-darwin-arm64",
-      "@aleburato/primeval-darwin-x64",
+      "@domoarigatomrburato/primeval-darwin-arm64",
+      "@domoarigatomrburato/primeval-darwin-x64",
     ],
   });
 });
@@ -197,13 +197,13 @@ test("package metadata validation rejects committed platform optional dependenci
   for (const optionalDependencies of [
     // All of them, at the package version: still added at publish time only.
     {
-      "@aleburato/primeval-darwin-arm64": "0.1.1",
-      "@aleburato/primeval-darwin-x64": "0.1.1",
+      "@domoarigatomrburato/primeval-darwin-arm64": "0.1.1",
+      "@domoarigatomrburato/primeval-darwin-x64": "0.1.1",
     },
     // A drifted subset.
-    { "@aleburato/primeval-darwin-arm64": "0.1.1" },
+    { "@domoarigatomrburato/primeval-darwin-arm64": "0.1.1" },
     // A platform package of a target that napi.targets no longer lists.
-    { "@aleburato/primeval-linux-x64-gnu": "0.1.0" },
+    { "@domoarigatomrburato/primeval-linux-x64-gnu": "0.1.0" },
   ]) {
     assert.throws(
       () => validatePackageMetadata({ ...TWO_TARGETS, optionalDependencies }),
@@ -236,11 +236,11 @@ test("package-lock validation rejects platform packages in the lockfile", () => 
         lockWith({
           "": {
             ...LOCK_ROOT,
-            optionalDependencies: { "@aleburato/primeval-darwin-arm64": "0.1.1" },
+            optionalDependencies: { "@domoarigatomrburato/primeval-darwin-arm64": "0.1.1" },
           },
         }),
       ),
-    /package-lock\.json root optionalDependencies must not list @aleburato\/primeval-darwin-arm64/,
+    /package-lock\.json root optionalDependencies must not list @domoarigatomrburato\/primeval-darwin-arm64/,
   );
   assert.throws(
     () =>
@@ -248,10 +248,13 @@ test("package-lock validation rejects platform packages in the lockfile", () => 
         TWO_TARGETS,
         lockWith({
           "": LOCK_ROOT,
-          "node_modules/@aleburato/primeval-darwin-x64": { version: "0.1.1", optional: true },
+          "node_modules/@domoarigatomrburato/primeval-darwin-x64": {
+            version: "0.1.1",
+            optional: true,
+          },
         }),
       ),
-    /package-lock\.json must not contain node_modules\/@aleburato\/primeval-darwin-x64/,
+    /package-lock\.json must not contain node_modules\/@domoarigatomrburato\/primeval-darwin-x64/,
   );
 });
 
@@ -268,7 +271,7 @@ test("package-lock validation rejects a stale lockfile version", () => {
 
 test("package version updates change only the version", () => {
   const before = {
-    name: "@aleburato/primeval",
+    name: "@domoarigatomrburato/primeval",
     version: "0.1.0",
     napi: {
       targets: [
@@ -301,7 +304,7 @@ test("binding loader only references the platform packages of napi targets", () 
   const bindingSource = fs.readFileSync(path.join(process.cwd(), "binding.js"), "utf8");
   const referencedPackages = [
     ...new Set(
-      [...bindingSource.matchAll(/require\('(@aleburato\/primeval[^']+)'\)/g)].map(
+      [...bindingSource.matchAll(/require\('(@domoarigatomrburato\/primeval[^']+)'\)/g)].map(
         ([, packageName]) => packageName,
       ),
     ),
@@ -478,12 +481,15 @@ test("artifact verification accepts matching native payloads", () => {
   const artifactsDir = fs.mkdtempSync(path.join(os.tmpdir(), "primeval-artifacts-"));
   try {
     fs.writeFileSync(
-      path.join(artifactsDir, "aleburato-primeval-linux-x64-gnu.primeval-node.linux-x64-gnu.node"),
+      path.join(
+        artifactsDir,
+        "domoarigatomrburato-primeval-linux-x64-gnu.primeval-node.linux-x64-gnu.node",
+      ),
       Buffer.alloc(0),
     );
 
     verifyArtifacts(artifactsDir, {
-      name: "@aleburato/primeval",
+      name: "@domoarigatomrburato/primeval",
       version: "0.1.0",
       napi: {
         targets: ["x86_64-unknown-linux-gnu"],
@@ -498,14 +504,14 @@ test("artifact verification rejects missing native payloads", () => {
   const artifactsDir = fs.mkdtempSync(path.join(os.tmpdir(), "primeval-artifacts-"));
   try {
     fs.writeFileSync(
-      path.join(artifactsDir, "aleburato-primeval-linux-x64-gnu.txt"),
+      path.join(artifactsDir, "domoarigatomrburato-primeval-linux-x64-gnu.txt"),
       "placeholder",
     );
 
     assert.throws(
       () =>
         verifyArtifacts(artifactsDir, {
-          name: "@aleburato/primeval",
+          name: "@domoarigatomrburato/primeval",
           version: "0.1.0",
           napi: {
             targets: ["x86_64-unknown-linux-gnu"],
@@ -527,14 +533,14 @@ test("artifact verification accepts napi package directories", () => {
     fs.writeFileSync(
       path.join(packageDir, "package.json"),
       JSON.stringify({
-        name: "@aleburato/primeval-linux-x64-gnu",
+        name: "@domoarigatomrburato/primeval-linux-x64-gnu",
         version: "0.1.0",
       }),
     );
     fs.writeFileSync(path.join(packageDir, "primeval-node.linux-x64-gnu.node"), Buffer.alloc(0));
 
     verifyArtifacts(artifactsDir, {
-      name: "@aleburato/primeval",
+      name: "@domoarigatomrburato/primeval",
       version: "0.1.0",
       napi: {
         targets: ["x86_64-unknown-linux-gnu"],
@@ -554,7 +560,7 @@ test("artifact verification rejects wrong target payloads", () => {
     fs.writeFileSync(
       path.join(packageDir, "package.json"),
       JSON.stringify({
-        name: "@aleburato/primeval-linux-x64-gnu",
+        name: "@domoarigatomrburato/primeval-linux-x64-gnu",
         version: "0.1.0",
       }),
     );
@@ -563,7 +569,7 @@ test("artifact verification rejects wrong target payloads", () => {
     assert.throws(
       () =>
         verifyArtifacts(artifactsDir, {
-          name: "@aleburato/primeval",
+          name: "@domoarigatomrburato/primeval",
           version: "0.1.0",
           napi: {
             targets: ["x86_64-unknown-linux-gnu"],
