@@ -229,6 +229,20 @@ test("post-publish verification retries until every package is visible", async (
   assert.deepEqual(sleeps, [10, 10]);
 });
 
+test("the default wait accepts a package that becomes visible on poll 15", async () => {
+  // npm completes trusted-publishing publishes asynchronously: about two minutes.
+  const sleeps = [];
+  await verifyPublished(PACKAGES, {
+    isPublished: () => sleeps.length >= 14,
+    sleep: async (ms) => {
+      sleeps.push(ms);
+    },
+    log: () => {},
+  });
+  assert.equal(sleeps.length, 14);
+  assert.ok(sleeps.every((ms) => ms === 10_000));
+});
+
 test("post-publish verification fails and names every missing package", async () => {
   const sleeps = [];
   await assert.rejects(
