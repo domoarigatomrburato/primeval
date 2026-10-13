@@ -37,18 +37,10 @@
 //! layers above it; the bound is pinned by
 //! `layer_model_matches_the_exact_composite`. `A` and `B` are `f32` planes,
 //! the canvas below stays the exact u8 canvas, and the sums are `f64`.
-//! After clipping, pixel `j` of each line goes to slot `j mod 4`, including
-//! hidden pixels; each line restarts at slot 0. Six planes of four `f64`
-//! accumulators persist across lines, starting at `+0.0`: weights, three
-//! channel numerators, errors and removed energy. Each pixel's RGB squares
-//! add as `(R + G) + B` before its slot addition. Hidden pixels and missing
-//! tail slots add nothing, equivalent to adding `+0.0`. Each total folds
-//! `(((+0.0 + s0) + s1) + s2) + s3` ([`Sums`]). Groups use explicit NEON on
-//! aarch64, baseline SSE2 on x86_64 and simd128 on wasm32 with that feature;
-//! tails use fixed-lane updates and other targets use scalar code. All
-//! are bit for bit equal to
-//! the scalar reference, with the same per-pixel `f32` operand order and
-//! lane-wise IEEE operations, without fused operations or reassociation.
+//! The target-independent accumulation order is specified by [`Sums`].
+//! Groups use NEON on aarch64, baseline SSE2 on x86_64 and simd128 on
+//! wasm32; other targets use scalar code. All keep the same per-pixel
+//! `f32` operand order, without fused operations or reassociation.
 //!
 //! # A pass
 //!
@@ -278,17 +270,37 @@ pub(crate) struct Layer<'a> {
     pub(crate) above: &'a Above,
 }
 
+/// Per-pixel f32 residuals, with the model's fixed operand order.
+#[inline(always)]
+fn residuals(
+    t: [u8; 3],
+    d: [u8; 3],
+    b: [f32; 3],
+    a: f32,
+    blend: Blend,
+) -> (f32, [f32; 3], [f32; 3]) {
+    let mut q = [0.0; 3];
+    let mut r = [0.0; 3];
+    for c in 0..3 {
+        let rest = f32::from(t[c]) - b[c];
+        let d = f32::from(d[c]);
+        q[c] = rest - a * blend.keep * d;
+        r[c] = rest - a * d;
+    }
+    (a * blend.paint, q, r)
+}
+
 impl Layer<'_> {
-    /// Calls `visit(p, g, q, r)` for every pixel `p` of `lines` that the
+    /// Calls `visit(p, j, g, q, r)` for every pixel `p` of `lines` that the
     /// shape at `alpha` influences, a pixel once per line that covers it,
-    /// with `g = A w`, and `q` and `r` per channel; see the module doc.
-    #[cfg(test)]
+    /// with `j` counting all clipped pixels, hidden ones included, `g = A w`,
+    /// and `q` and `r` per channel; see the module doc.
     #[inline]
     fn visit(
         &self,
         lines: &[Scanline],
         alpha: u8,
-        mut visit: impl FnMut(usize, f32, [f32; 3], [f32; 3]),
+        mut visit: impl FnMut(usize, usize, f32, [f32; 3], [f32; 3]),
     ) {
         let above = self.above;
         let (t, d) = (self.target.pixels(), self.below.pixels());
@@ -313,27 +325,14 @@ impl Layer<'_> {
                 if a == 0.0 {
                     continue;
                 }
-                let mut q = [0.0; 3];
-                let mut r = [0.0; 3];
-                for c in 0..3 {
-                    let rest = f32::from(t[c]) - b[c];
-                    let d = f32::from(d[c]);
-                    q[c] = rest - a * blend.keep * d;
-                    r[c] = rest - a * d;
-                }
-                visit(start + j, a * blend.paint, q, r);
+                let (g, q, r) = residuals(*t, *d, *b, a, blend);
+                visit(start + j, j, g, q, r);
             }
         }
     }
 
     /// The model's sums over the pixels of `lines` drawn at `alpha`, in
     /// the target-independent four-slot order specified by [`Sums`].
-    /// After clipping, hidden pixels retain their slots; every line starts
-    /// at slot 0, and the accumulators persist across lines. Four-pixel
-    /// groups use the target's SIMD kernel; the remaining 0..3 pixels use
-    /// fixed-lane scalar or SIMD updates, equal to a zero-padded group.
-    /// The target loop carries its vector accumulators across every line
-    /// and writes the slot planes only for the final ordered fold.
     pub(crate) fn sums(&self, lines: &[Scanline], alpha: u8) -> Sums {
         sums::sums(self, lines, alpha)
     }
@@ -769,7 +768,7 @@ mod tests {
     /// largest.
     const TOP_ENERGY_ERROR: f64 = 42.0;
 
-    fn noise(rng: &mut ChaCha8Rng, width: u32, height: u32) -> Buffer {
+    pub(super) fn noise(rng: &mut ChaCha8Rng, width: u32, height: u32) -> Buffer {
         let mut pixels = vec![0_u8; (width * height * 3) as usize];
         rng.fill(&mut pixels[..]);
         Buffer::from_rgb(width, height, pixels).expect("valid length")
@@ -832,7 +831,7 @@ mod tests {
                 .collect();
             if let Some((lines, color)) = candidate {
                 let s = [color.r, color.g, color.b].map(f32::from);
-                self.visit(lines, color.a, |p, g, q, _| {
+                self.visit(lines, color.a, |p, _, g, q, _| {
                     for c in 0..3 {
                         image[3 * p + c] = f32::from(t[3 * p + c]) - q[c] + g * s[c];
                     }
@@ -1390,80 +1389,30 @@ mod tests {
 }
 
 /// Thread-free refit-sums tests, also selected by the WASI kernel runner.
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(
+        target_arch = "aarch64",
+        target_arch = "x86_64",
+        all(target_arch = "wasm32", target_feature = "simd128")
+    )
+))]
 mod simd_parity {
+    use super::tests::noise;
     use super::*;
     use crate::rng::create_rng;
     use rand::RngExt;
-    use rand_chacha::ChaCha8Rng;
-
-    fn noise(rng: &mut ChaCha8Rng, width: u32, height: u32) -> Buffer {
-        let mut pixels = vec![0_u8; (width * height * 3) as usize];
-        rng.fill(&mut pixels[..]);
-        Buffer::from_rgb(width, height, pixels).expect("valid length")
-    }
-
-    /// Scalar specification of the fixed slots, independent of the block loop.
-    fn slot_sums(layer: &Layer<'_>, lines: &[Scanline], alpha: u8) -> Sums {
-        let mut weights = [0.0; 4];
-        let mut numerators = [[0.0; 4]; 3];
-        let mut errors = [0.0; 4];
-        let mut removed = [0.0; 4];
-        for line in lines {
-            let Some((x1, x2)) = clamp_line(line, layer.above.width, layer.above.height) else {
-                continue;
-            };
-            let Some(blend) = Blend::new(alpha, line.alpha) else {
-                continue;
-            };
-            let row = line.y as usize * layer.above.width as usize;
-            for (j, p) in (row + x1 as usize..=row + x2 as usize).enumerate() {
-                let slot = j % 4;
-                let a = layer.above.transmittance[p];
-                if a == 0.0 {
-                    weights[slot] += 0.0;
-                    for numerator in &mut numerators {
-                        numerator[slot] += 0.0;
-                    }
-                    errors[slot] += 0.0;
-                    removed[slot] += 0.0;
-                    continue;
-                }
-                let g = f64::from(a * blend.paint);
-                weights[slot] += g * g;
-                let mut q2 = [0.0; 3];
-                let mut r2 = [0.0; 3];
-                for c in 0..3 {
-                    let i = 3 * p + c;
-                    let rest = f32::from(layer.target.pixels()[i]) - layer.above.offset[i];
-                    let d = f32::from(layer.below.pixels()[i]);
-                    let q = f64::from(rest - a * blend.keep * d);
-                    let r = f64::from(rest - a * d);
-                    numerators[c][slot] += g * q;
-                    q2[c] = q * q;
-                    r2[c] = r * r;
-                }
-                errors[slot] += (q2[0] + q2[1]) + q2[2];
-                removed[slot] += (r2[0] + r2[1]) + r2[2];
-            }
-        }
-        let sum = |slots: [f64; 4]| slots.into_iter().fold(0.0, |sum, slot| sum + slot);
-        Sums {
-            weights: sum(weights),
-            numerators: numerators.map(sum),
-            errors: sum(errors),
-            removed: sum(removed),
-        }
-    }
 
     fn sum_bits(sums: Sums) -> [u64; 6] {
         let [r, g, b] = sums.numerators;
         [r, g, b, sums.weights, sums.errors, sums.removed].map(f64::to_bits)
     }
 
-    /// Random folded layers, all short lengths and tails, long lines,
-    /// clipping, overlap, coverage/alpha extremes and hidden pixels.
-    fn check_sums(reference: impl Fn(&Layer<'_>, &[Scanline], u8) -> Sums) {
+    /// The sums against the scalar reference on random folded layers, all
+    /// short lengths and tails, long lines, clipping, overlap, coverage/alpha
+    /// extremes and hidden pixels.
+    #[test]
+    fn sums_match_fixed_slot_order() {
         let mut rng = create_rng(0x5a45);
         for width in [2, 17, 257] {
             let height = 5;
@@ -1513,7 +1462,7 @@ mod simd_parity {
                             for alpha in [0, 1, 128, 255] {
                                 assert_eq!(
                                     sum_bits(layer.sums(&[line], alpha)),
-                                    sum_bits(reference(&layer, &[line], alpha)),
+                                    sum_bits(sums::scalar_sums(&layer, &[line], alpha)),
                                     "width {width}, {line:?}, alpha {alpha}"
                                 );
                             }
@@ -1532,7 +1481,7 @@ mod simd_parity {
                 let alpha = rng.random();
                 assert_eq!(
                     sum_bits(layer.sums(&[line], alpha)),
-                    sum_bits(reference(&layer, &[line], alpha)),
+                    sum_bits(sums::scalar_sums(&layer, &[line], alpha)),
                     "random {line:?}, alpha {alpha}"
                 );
                 lines.push(line);
@@ -1540,47 +1489,11 @@ mod simd_parity {
             for alpha in [0, 1, 128, 255] {
                 assert_eq!(
                     sum_bits(layer.sums(&lines, alpha)),
-                    sum_bits(reference(&layer, &lines, alpha)),
+                    sum_bits(sums::scalar_sums(&layer, &lines, alpha)),
                     "width {width}, overlapping lines, alpha {alpha}"
                 );
             }
         }
-    }
-
-    #[test]
-    fn sums_match_fixed_slot_order() {
-        check_sums(slot_sums);
-    }
-
-    /// Independent scalar update, also checking the un-folded accumulator
-    /// lanes after every group; a final fold alone can hide a lane swap.
-    fn slot_update(
-        sums: &mut sums::SlotSums,
-        slot: usize,
-        t: [u8; 3],
-        d: [u8; 3],
-        b: [f32; 3],
-        a: f32,
-        blend: Blend,
-    ) {
-        if a == 0.0 {
-            return;
-        }
-        let g = f64::from(a * blend.paint);
-        sums.weights[slot] += g * g;
-        let mut q2 = [0.0; 3];
-        let mut r2 = [0.0; 3];
-        for c in 0..3 {
-            let rest = f32::from(t[c]) - b[c];
-            let d = f32::from(d[c]);
-            let q = f64::from(rest - (a * blend.keep) * d);
-            let r = f64::from(rest - a * d);
-            sums.numerators[c][slot] += g * q;
-            q2[c] = q * q;
-            r2[c] = r * r;
-        }
-        sums.errors[slot] += (q2[0] + q2[1]) + q2[2];
-        sums.removed[slot] += (r2[0] + r2[1]) + r2[2];
     }
 
     fn slot_bits(sums: &sums::SlotSums) -> [[u64; 4]; 6] {
@@ -1600,16 +1513,16 @@ mod simd_parity {
         let mut rng = create_rng(0x51_07);
         let mut expected = sums::SlotSums::default();
         let mut actual = sums::SlotSums::default();
-        // Cover every integer blend weight k (and thus every real keep/paint)
-        // using full alpha and coverage k. Also cover each shape alpha with
-        // coverage extremes, so the blend's integer rounding is exercised.
-        for (alpha, coverage) in
-            (1..=score::M)
-                .map(|k| (255, k))
-                .chain((1..=255).flat_map(|alpha| {
-                    [0, 1, 255, 256, 32768, score::M - 1, score::M]
-                        .map(|coverage| (alpha, coverage))
-                }))
+        // A strided blend sample plus the extremes catches arithmetic/lane
+        // mistakes; the kernel and reference receive the same Blend. Cover
+        // each shape alpha's coverage extremes to exercise integer rounding.
+        for (alpha, coverage) in (1..=score::M)
+            .step_by(251)
+            .chain([2, score::M - 1, score::M])
+            .map(|k| (255, k))
+            .chain((1..=255).flat_map(|alpha| {
+                [0, 1, 255, 256, 32768, score::M - 1, score::M].map(|coverage| (alpha, coverage))
+            }))
         {
             let Some(blend) = Blend::new(alpha, coverage) else {
                 continue;
@@ -1627,15 +1540,10 @@ mod simd_parity {
                 std::array::from_fn(|_| rng.random_range(0.0..=255.0 * (1.0 - a[slot])))
             });
             for slot in 0..4 {
-                slot_update(
-                    &mut expected,
-                    slot,
-                    t[slot],
-                    d[slot],
-                    b[slot],
-                    a[slot],
-                    blend,
-                );
+                if a[slot] != 0.0 {
+                    let (g, q, r) = residuals(t[slot], d[slot], b[slot], a[slot], blend);
+                    expected.add(slot, sums::terms(g, q, r));
+                }
             }
             sums::group(&mut actual, &t, &d, &b, &a, blend);
             assert_eq!(
@@ -1653,15 +1561,10 @@ mod simd_parity {
             let b = std::array::from_fn(|slot| [255.0 * (1.0 - a[slot]); 3]);
             let blend = Blend::new(255, score::M).unwrap();
             for slot in 0..4 {
-                slot_update(
-                    &mut expected,
-                    slot,
-                    t[slot],
-                    d[slot],
-                    b[slot],
-                    a[slot],
-                    blend,
-                );
+                if a[slot] != 0.0 {
+                    let (g, q, r) = residuals(t[slot], d[slot], b[slot], a[slot], blend);
+                    expected.add(slot, sums::terms(g, q, r));
+                }
             }
             sums::group(&mut actual, &t, &d, &b, &a, blend);
             assert_eq!(

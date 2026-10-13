@@ -22,10 +22,6 @@ jobs:
       matrix:
         # macos-15 is arm64: the NEON code paths only compile and run on aarch64.
         runner: [ubuntu-24.04, macos-15]
-    env:
-      # ubuntu-24.04 is x86_64: fail the AVX2 parity tests there instead of skipping them.
-      PRIMEVAL_REQUIRE_AVX2: ${{ matrix.runner == 'ubuntu-24.04' && '1' || '' }}
-
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -38,6 +34,9 @@ jobs:
           shared-key: rust-checks-${{ matrix.runner }}
 
       - run: npm run verify:rust
+        env:
+          # Require AVX2 on every x64 runner so parity tests cannot silently skip.
+          PRIMEVAL_REQUIRE_AVX2: ${{ runner.arch == 'X64' && '1' || '' }}
 
   package-checks:
     runs-on: ubuntu-24.04

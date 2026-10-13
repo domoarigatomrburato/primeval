@@ -345,7 +345,7 @@ test("the kernel tests run the score and refit-sums tests on wasm32-wasip1 with 
     `target.wasm32-wasip1.runner=${JSON.stringify(runner)}`,
     "--",
     "score::",
-    "refine::simd_parity::",
+    "simd_parity::",
     "--nocapture",
   ]);
   assert.deepEqual(command.env, { RUSTFLAGS: "-C target-feature=+simd128" });

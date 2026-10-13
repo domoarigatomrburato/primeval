@@ -161,10 +161,10 @@ export function cargoClippyCommand() {
 }
 
 /**
- * The tests of `primeval-core`'s `score` module and `refine::simd_parity`,
- * its scoring and refit-sums kernels, on wasm32-wasip1 with SIMD: the
- * simd128 kernels against the scalar ones, and a test that fails without
- * the flag. Cargo runs the test binary with
+ * The scoring and refit-sums tests of `primeval-core` on wasm32-wasip1 with
+ * SIMD: the simd128 kernels against the scalar ones, and a test that fails
+ * without the flag. The filters match by substring: `score::` and every
+ * thread-free `simd_parity::` module. Cargo runs the test binary with
  * `wasi-runner.mjs` under this Node. The rest of the suite needs threads,
  * which WASI preview 1 lacks.
  */
@@ -187,7 +187,7 @@ export function cargoKernelTestCommand() {
       `target.${TEST_TARGET}.runner=${JSON.stringify(runner)}`,
       "--",
       "score::",
-      "refine::simd_parity::",
+      "simd_parity::",
       // A failing test aborts the run (panic = "abort"), so print its
       // message as it happens.
       "--nocapture",

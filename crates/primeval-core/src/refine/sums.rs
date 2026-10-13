@@ -1,15 +1,12 @@
 //! Four-slot refit accumulators and four-pixel group kernels.
 //!
-//! NEON, baseline SSE2 and simd128 all implement the scalar slot order
-//! bit for bit. One generic loop owns six pairs of vector accumulators
-//! for the whole call; only the final fold writes the scalar slot planes. Tails
-//! update fixed slots: one pixel uses RGB SIMD on NEON/SSE2 (scalar RGB on
-//! wasm), two use the low vector half, and a third uses the first high lane.
-//! Missing lanes add +0.0 without affecting the other accumulator lanes.
-//! Other targets use the scalar slot update.
+//! One generic loop owns six pairs of vector accumulators for the whole
+//! call; only the final fold writes scalar slot planes. Tails use RGB SIMD
+//! on NEON/SSE2 (scalar RGB on wasm) for one pixel, the low vector half for
+//! two, and the first high lane for a third. Missing lanes add +0.0.
 use super::{Blend, Layer, Scanline, Sums, clamp_line};
 
-/// Six persistent planes, starting at +0.0, with one lane per slot.
+/// Six planes with one lane per slot; see [`Sums`] for the accumulation order.
 /// An accumulator is never -0.0: finite additions from +0.0 cannot produce
 /// it (exact cancellation gives +0.0, and these products cannot underflow
 /// f64). Skipping hidden pixels and missing tail slots is thus identical
@@ -23,26 +20,9 @@ pub(super) struct SlotSums {
 }
 
 impl SlotSums {
-    /// Scalar per-slot update on non-SIMD targets.
-    #[cfg(not(any(
-        target_arch = "aarch64",
-        target_arch = "x86_64",
-        all(target_arch = "wasm32", target_feature = "simd128")
-    )))]
     #[inline]
-    pub(super) fn pixel(
-        &mut self,
-        slot: usize,
-        t: [u8; 3],
-        d: [u8; 3],
-        b: [f32; 3],
-        a: f32,
-        blend: Blend,
-    ) {
-        if a == 0.0 {
-            return;
-        }
-        let [weights, nr, ng, nb, errors, removed] = contributions(t, d, b, a, blend);
+    pub(super) fn add(&mut self, slot: usize, terms: [f64; 6]) {
+        let [weights, nr, ng, nb, errors, removed] = terms;
         self.weights[slot] += weights;
         for (plane, term) in self.numerators.iter_mut().zip([nr, ng, nb]) {
             plane[slot] += term;
@@ -51,7 +31,7 @@ impl SlotSums {
         self.removed[slot] += removed;
     }
 
-    /// Fold each plane as (((+0.0 + s0) + s1) + s2) + s3.
+    /// Fold each plane in the order specified by [`Sums`].
     pub(super) fn finish(self) -> Sums {
         let sum = |slots: [f64; 4]| slots.into_iter().fold(0.0, |sum, slot| sum + slot);
         Sums {
@@ -63,68 +43,29 @@ impl SlotSums {
     }
 }
 
-#[cfg(not(any(
-    target_arch = "aarch64",
-    target_arch = "x86_64",
-    all(target_arch = "wasm32", target_feature = "simd128")
-)))]
-pub(super) fn sums(layer: &Layer<'_>, lines: &[Scanline], alpha: u8) -> Sums {
-    let mut slots = SlotSums::default();
-    for line in lines {
-        let Some((x1, x2)) = clamp_line(line, layer.above.width, layer.above.height) else {
-            continue;
-        };
-        let Some(blend) = Blend::new(alpha, line.alpha) else {
-            continue;
-        };
-        let row = line.y as usize * layer.above.width as usize;
-        for (j, p) in (row + x1 as usize..=row + x2 as usize).enumerate() {
-            let i = 3 * p;
-            slots.pixel(
-                j % 4,
-                layer.target.pixels()[i..i + 3].try_into().unwrap(),
-                layer.below.pixels()[i..i + 3].try_into().unwrap(),
-                layer.above.offset[i..i + 3].try_into().unwrap(),
-                layer.above.transmittance[p],
-                blend,
-            );
-        }
-    }
-    slots.finish()
-}
-#[cfg(all(
-    test,
-    not(any(
+/// Scalar reference on every target and fallback on non-SIMD targets.
+#[cfg_attr(
+    any(
         target_arch = "aarch64",
         target_arch = "x86_64",
         all(target_arch = "wasm32", target_feature = "simd128")
-    ))
-))]
-pub(super) fn group(
-    sums: &mut SlotSums,
-    t: &[[u8; 3]; 4],
-    d: &[[u8; 3]; 4],
-    b: &[[f32; 3]; 4],
-    a: &[f32; 4],
-    blend: Blend,
-) {
-    for slot in 0..4 {
-        sums.pixel(slot, t[slot], d[slot], b[slot], a[slot], blend);
-    }
+    ),
+    allow(dead_code)
+)]
+pub(super) fn scalar_sums(layer: &Layer<'_>, lines: &[Scanline], alpha: u8) -> Sums {
+    let mut slots = SlotSums::default();
+    layer.visit(lines, alpha, |_, j, g, q, r| {
+        slots.add(j % 4, terms(g, q, r))
+    });
+    slots.finish()
 }
 
-#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+/// Six terms after exact f32-to-f64 conversion, in the order of [`Sums`].
 #[inline(always)]
-fn contributions(t: [u8; 3], d: [u8; 3], b: [f32; 3], a: f32, blend: Blend) -> [f64; 6] {
-    let g = f64::from(a * blend.paint);
-    let mut q = [0.0; 3];
-    let mut r = [0.0; 3];
-    for c in 0..3 {
-        let rest = f32::from(t[c]) - b[c];
-        let d = f32::from(d[c]);
-        q[c] = f64::from(rest - (a * blend.keep) * d);
-        r[c] = f64::from(rest - a * d);
-    }
+pub(super) fn terms(g: f32, q: [f32; 3], r: [f32; 3]) -> [f64; 6] {
+    let g = f64::from(g);
+    let q = q.map(f64::from);
+    let r = r.map(f64::from);
     [
         g * g,
         g * q[0],
@@ -133,6 +74,25 @@ fn contributions(t: [u8; 3], d: [u8; 3], b: [f32; 3], a: f32, blend: Blend) -> [
         (q[0] * q[0] + q[1] * q[1]) + q[2] * q[2],
         (r[0] * r[0] + r[1] * r[1]) + r[2] * r[2],
     ]
+}
+
+pub(super) fn sums(layer: &Layer<'_>, lines: &[Scanline], alpha: u8) -> Sums {
+    #[cfg(any(
+        target_arch = "aarch64",
+        target_arch = "x86_64",
+        all(target_arch = "wasm32", target_feature = "simd128")
+    ))]
+    {
+        vector::sums(layer, lines, alpha)
+    }
+    #[cfg(not(any(
+        target_arch = "aarch64",
+        target_arch = "x86_64",
+        all(target_arch = "wasm32", target_feature = "simd128")
+    )))]
+    {
+        scalar_sums(layer, lines, alpha)
+    }
 }
 
 #[cfg(all(
@@ -149,13 +109,6 @@ pub(super) use vector::group;
     target_arch = "x86_64",
     all(target_arch = "wasm32", target_feature = "simd128")
 ))]
-pub(super) use vector::sums;
-
-#[cfg(any(
-    target_arch = "aarch64",
-    target_arch = "x86_64",
-    all(target_arch = "wasm32", target_feature = "simd128")
-))]
 mod vector {
     use super::{Blend, Layer, Scanline, SlotSums, Sums, clamp_line};
     #[cfg(target_arch = "aarch64")]
@@ -167,9 +120,8 @@ mod vector {
 
     /// Only baseline, lane-wise IEEE operations; no FMA or reassociation.
     /// All register operations are safe on the module's configured target.
-    /// Typed loads/stores stay in their arrays: A/lanes=4, B=12, pair
-    /// B/A=6/2, slots=4. B loads at 0/4/8 each read four floats; slot
-    /// loads/stores at 0/2 each access two doubles. All lanes are fixed.
+    /// Typed loads stay in their arrays: A/lanes=4, B=12, pair B/A=6/2.
+    /// B loads at 0/4/8 each read four floats. All lanes are fixed.
     trait Simd {
         type F32: Copy;
         type F64: Copy;
@@ -195,14 +147,26 @@ mod vector {
         fn has_visible(a: &[f32; 4]) -> bool;
         fn load_a(a: &[f32; 4]) -> Self::F32;
         fn load_b(b: &[[f32; 3]; 4]) -> [Self::F32; 3];
-        fn pair_b(b: [[f32; 3]; 2]) -> [Self::F32; 3];
-        fn pair_a(a: [f32; 2]) -> Self::F32;
+        #[inline(always)]
+        fn pair_b(b: [[f32; 3]; 2]) -> [Self::F32; 3] {
+            [0, 1, 2].map(|c| Self::lanes32([b[0][c], b[1][c], 0.0, 0.0]))
+        }
+        #[inline(always)]
+        fn pair_a(a: [f32; 2]) -> Self::F32 {
+            Self::lanes32([a[0], a[1], 0.0, 0.0])
+        }
         /// # Safety
         /// `pixels` exposes 16 readable bytes; unaligned loads are allowed.
         unsafe fn bytes16(pixels: *const u8, tables: Self::Tables) -> [Self::F32; 3];
-        fn store(halves: [Self::F64; 2]) -> [f64; 4];
-        #[cfg(test)]
-        fn load(slots: [f64; 4]) -> [Self::F64; 2];
+        #[inline(always)]
+        fn store(halves: [Self::F64; 2]) -> [f64; 4] {
+            [
+                Self::lane64::<0>(halves[0]),
+                Self::lane64::<1>(halves[0]),
+                Self::lane64::<0>(halves[1]),
+                Self::lane64::<1>(halves[1]),
+            ]
+        }
         #[inline(always)]
         fn pixel_rgb(rgb: [u8; 3]) -> Self::F32 {
             Self::lanes32([f32::from(rgb[0]), f32::from(rgb[1]), f32::from(rgb[2]), 0.0])
@@ -261,21 +225,6 @@ mod vector {
                 planes: [[S::splat64(0.0); 2]; 6],
             }
         }
-        #[cfg(test)]
-        #[inline(always)]
-        fn load(slots: &SlotSums) -> Self {
-            Self {
-                planes: [
-                    slots.weights,
-                    slots.numerators[0],
-                    slots.numerators[1],
-                    slots.numerators[2],
-                    slots.errors,
-                    slots.removed,
-                ]
-                .map(S::load),
-            }
-        }
         /// Materialize the six scalar planes only after all lines.
         #[inline(always)]
         fn slots(self) -> SlotSums {
@@ -300,9 +249,8 @@ mod vector {
         }
         /// u8 -> f32 and f32 -> f64 conversions are exact; products of
         /// converted f32s in f64 are exact (at most 48 significant bits).
-        /// The f32 operand order is fixed, RGB energies add as (R + G) + B,
-        /// and each contribution is added to its own persistent slot.
-        /// Masking hidden lanes gives +0.0. Missing/hidden additions cannot
+        /// Each lane holds its slot's contribution (see [`Sums`]). Masking
+        /// hidden lanes gives +0.0. Missing/hidden additions cannot
         /// alter another lane, and no accumulator is -0.0 (see SlotSums).
         #[inline(always)]
         fn update<const HALVES: usize>(
@@ -425,35 +373,34 @@ mod vector {
             let (a, aa) = above.transmittance[start..end].as_chunks::<4>();
             let offset = 3 * x1 as usize;
             let available = above.width as usize - x1 as usize;
-            // SAFETY: clipping proves 0 <= x1 <= x2 < width. Each of the
-            // four planes was sliced once to a valid row/span. Group j
-            // has 4*j+4 <= end-start pixels, hence 12*j+12 <= B's length
-            // and 12 readable RGB bytes. `wide` proves six row pixels
-            // remain, i.e. 18 bytes >= 16, so wide loads stay in the row.
-            // A pair is read only when aa.len() >= 2, proving six RGB/B
-            // values and two A values. Tail slot 0 or 2 is less than
-            // aa.len() <= 3, proving its three RGB/B values and A value.
-            unsafe {
-                let tp = t.as_ptr().add(offset);
-                let dp = d.as_ptr().add(offset);
-                let bp = b.as_ptr();
-                for (j, a) in a.iter().enumerate() {
-                    // Entirely hidden groups contribute only +0.0; skip
-                    // RGB loads/math while retaining their slot numbering.
-                    if !S::has_visible(a) {
-                        continue;
-                    }
-                    let i = 12 * j;
-                    let wide = available - 4 * j >= 6;
-                    vectors = vectors.group(
+            // SAFETY: clipping proves offset is within both sliced RGB rows.
+            let (tp, dp) = unsafe { (t.as_ptr().add(offset), d.as_ptr().add(offset)) };
+            let bp = b.as_ptr();
+            for (j, a) in a.iter().enumerate() {
+                // Hidden groups retain their slots while skipping RGB math.
+                if !S::has_visible(a) {
+                    continue;
+                }
+                let i = 12 * j;
+                let wide = available - 4 * j >= 6;
+                // SAFETY: group j has four clipped pixels: 12 RGB bytes and
+                // 12 aligned B floats. `wide` proves six row pixels remain,
+                // giving >=16 readable RGB bytes without crossing the row.
+                let (t, d, b) = unsafe {
+                    (
                         bytes::<S>(tp.add(i), wide, tables),
                         bytes::<S>(dp.add(i), wide, tables),
                         &*bp.add(i).cast::<[[f32; 3]; 4]>(),
-                        a,
-                        blend,
-                    );
-                }
-                let i = 12 * a.len();
+                    )
+                };
+                vectors = vectors.group(t, d, b, a, blend);
+            }
+            let i = 12 * a.len();
+            // SAFETY: clipping and the sliced planes give aa.len() tail
+            // pixels, with three RGB/B values each. The branches prove
+            // two pixels for a pair, one for slot 0, or three for slot 2.
+            // Raw tail reads avoid redundant bounds checks across planes.
+            unsafe {
                 if aa.len() >= 2 {
                     vectors = vectors.pair(
                         *tp.add(i).cast::<[[u8; 3]; 2]>(),
@@ -497,10 +444,9 @@ mod vector {
         blend: Blend,
     ) {
         let tables = Native::tables();
-        // SAFETY: each RGB input is exactly 12 bytes; narrow loads pad
-        // locally. B and A are typed arrays of exactly 12 and four f32s.
-        *slots = unsafe {
-            Vectors::<Native>::load(slots)
+        // SAFETY: each RGB input has 12 bytes; narrow loads pad locally.
+        let group = unsafe {
+            Vectors::<Native>::zero()
                 .group(
                     bytes::<Native>(t.as_ptr().cast(), false, tables),
                     bytes::<Native>(d.as_ptr().cast(), false, tables),
@@ -510,6 +456,22 @@ mod vector {
                 )
                 .slots()
         };
+        // 0 + m differs from m only for m = -0.0; x + (+/-0.0) = x
+        // unless x = -0.0, which no accumulator can be (see SlotSums).
+        // Merging a zero-based group's lanes equals the vector update.
+        for slot in 0..4 {
+            slots.add(
+                slot,
+                [
+                    group.weights[slot],
+                    group.numerators[0][slot],
+                    group.numerators[1][slot],
+                    group.numerators[2][slot],
+                    group.errors[slot],
+                    group.removed[slot],
+                ],
+            );
+        }
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -639,15 +601,6 @@ mod vector {
                 unsafe { vcombine_f32(vld1_f32(a.as_ptr()), vdup_n_f32(0.0)) }
             }
             #[inline(always)]
-            fn store(h: [Self::F64; 2]) -> [f64; 4] {
-                let mut slots = [0.0; 4];
-                unsafe {
-                    vst1q_f64(slots.as_mut_ptr(), h[0]);
-                    vst1q_f64(slots.as_mut_ptr().add(2), h[1]);
-                }
-                slots
-            }
-            #[inline(always)]
             fn pixel_rgb(rgb: [u8; 3]) -> Self::F32 {
                 let bytes = [rgb[0], rgb[1], rgb[2], 0, 0, 0, 0, 0];
                 unsafe { vcvtq_f32_u32(vmovl_u16(vget_low_u16(vmovl_u8(vld1_u8(bytes.as_ptr()))))) }
@@ -660,11 +613,6 @@ mod vector {
                     let rgb = vld1q_u8(p);
                     tables.map(|i| vcvtq_f32_u32(vreinterpretq_u32_u8(vqtbl1q_u8(rgb, i))))
                 }
-            }
-            #[cfg(test)]
-            #[inline(always)]
-            fn load(s: [f64; 4]) -> [Self::F64; 2] {
-                unsafe { [vld1q_f64(s.as_ptr()), vld1q_f64(s.as_ptr().add(2))] }
             }
         }
     }
@@ -783,23 +731,6 @@ mod vector {
                 }
             }
             #[inline(always)]
-            fn pair_b(b: [[f32; 3]; 2]) -> [Self::F32; 3] {
-                [0, 1, 2].map(|c| Self::lanes32([b[0][c], b[1][c], 0.0, 0.0]))
-            }
-            #[inline(always)]
-            fn pair_a(a: [f32; 2]) -> Self::F32 {
-                Self::lanes32([a[0], a[1], 0.0, 0.0])
-            }
-            #[inline(always)]
-            fn store(h: [Self::F64; 2]) -> [f64; 4] {
-                let mut s = [0.0; 4];
-                unsafe {
-                    _mm_storeu_pd(s.as_mut_ptr(), h[0]);
-                    _mm_storeu_pd(s.as_mut_ptr().add(2), h[1]);
-                }
-                s
-            }
-            #[inline(always)]
             fn pixel_rgb(rgb: [u8; 3]) -> Self::F32 {
                 let p = i32::from(rgb[0]) | (i32::from(rgb[1]) << 8) | (i32::from(rgb[2]) << 16);
                 unsafe {
@@ -826,17 +757,13 @@ mod vector {
                     )
                 }
             }
-            #[cfg(test)]
-            #[inline(always)]
-            fn load(s: [f64; 4]) -> [Self::F64; 2] {
-                unsafe { [_mm_loadu_pd(s.as_ptr()), _mm_loadu_pd(s.as_ptr().add(2))] }
-            }
         }
     }
 
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     mod simd128 {
         use super::{Blend, Simd};
+        use crate::refine::{residuals, sums::terms};
         use core::arch::wasm32::*;
         pub(super) struct Simd128;
         // SAFETY: simd128 is enabled by cfg; unaligned typed accesses
@@ -951,26 +878,10 @@ mod vector {
                 }
             }
             #[inline(always)]
-            fn pair_b(b: [[f32; 3]; 2]) -> [Self::F32; 3] {
-                [0, 1, 2].map(|c| f32x4(b[0][c], b[1][c], 0.0, 0.0))
-            }
-            #[inline(always)]
-            fn pair_a(a: [f32; 2]) -> Self::F32 {
-                f32x4(a[0], a[1], 0.0, 0.0)
-            }
-            #[inline(always)]
-            fn store(h: [Self::F64; 2]) -> [f64; 4] {
-                let mut s = [0.0_f64; 4];
-                unsafe {
-                    v128_store(s.as_mut_ptr().cast(), h[0]);
-                    v128_store(s.as_mut_ptr().add(2).cast(), h[1]);
-                }
-                s
-            }
-            #[inline(always)]
             fn pixel_terms(t: [u8; 3], d: [u8; 3], b: [f32; 3], a: f32, blend: Blend) -> [f64; 6] {
                 // Preserve the measured faster scalar RGB singleton on wasm.
-                super::super::contributions(t, d, b, a, blend)
+                let (g, q, r) = residuals(t, d, b, a, blend);
+                terms(g, q, r)
             }
             #[inline(always)]
             unsafe fn bytes16(p: *const u8, tables: Self::Tables) -> [Self::F32; 3] {
@@ -983,16 +894,6 @@ mod vector {
                             u8x16_swizzle(rgb, i),
                         )))
                     })
-                }
-            }
-            #[cfg(test)]
-            #[inline(always)]
-            fn load(s: [f64; 4]) -> [Self::F64; 2] {
-                unsafe {
-                    [
-                        v128_load(s.as_ptr().cast()),
-                        v128_load(s.as_ptr().add(2).cast()),
-                    ]
                 }
             }
         }

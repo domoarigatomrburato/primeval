@@ -90,12 +90,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target"
+          mkdir -p bin
           for side in base head; do
             (
               cd "$side"
               rustup toolchain install
               cargo build --release --locked -p primeval-render --features lab --example engine
             )
+            cp "$CARGO_TARGET_DIR/release/examples/engine" "bin/engine-$side"
           done
 
       - name: Record the machine
@@ -132,7 +135,7 @@ jobs:
             for side in base head; do
               echo "$(date -u +%T) $LEG $side $i/$REPEATS"
               out="results/$LEG-$side-$i"
-              RAYON_NUM_THREADS="$THREADS" "$side/target/release/examples/engine" "${args[@]}" > "$out.md" 2> "$out.err"
+              RAYON_NUM_THREADS="$THREADS" "bin/engine-$side" "${args[@]}" > "$out.md" 2> "$out.err"
             done
           done
 
