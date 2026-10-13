@@ -1249,11 +1249,7 @@ mod simd128 {
 ///
 /// A block is processed in six halves of 16 bytes, half `h` holding the
 /// block's bytes `16h..16h + 16`, each zero-extended to sixteen 16-bit lanes
-/// in byte order: lane `e` of half `h` holds byte `16h + e`. Short tails
-/// of 3..=16 pixels use only the first three halves (48 bytes), with the
-/// same channel terms; longer tails of 17..=31 use all six. Both mask bytes
-/// past the line and require readable bytes through their block's end;
-/// smaller tails and tails too close to the buffers' ends stay scalar.
+/// in byte order: lane `e` of half `h` holds byte `16h + e`.
 ///
 /// Every operation is exact integer arithmetic; each accumulator's bound is
 /// proved where it is declared. Every function here is compiled with AVX2
@@ -1304,36 +1300,18 @@ mod avx2 {
         ]
     }
 
-    /// Loads H halves of 16 bytes, each zero-extended to sixteen 16-bit
-    /// lanes. Half h holds bytes 16h..16h + 16 in byte order, just as in
-    /// a full block. The half-block tail uses H = 3.
-    ///
-    /// # Safety
-    ///
-    /// `ptr` must be valid for reads of `16 * H` bytes. `_mm_loadu_si128`
-    /// has no alignment requirement.
-    #[target_feature(enable = "avx2")]
-    #[inline]
-    unsafe fn load_halves<const H: usize>(ptr: *const u8) -> [__m256i; H] {
-        std::array::from_fn(|half| {
-            // SAFETY: half h reads ptr + 16h..ptr + 16h + 16, within
-            // the 16 * H readable bytes established by the caller.
-            unsafe { _mm256_cvtepu8_epi16(_mm_loadu_si128(ptr.add(16 * half).cast())) }
-        })
-    }
-
-    /// All ones in the 16-bit lanes of H halves whose byte is below
+    /// All ones in the 16-bit lanes of the six halves whose byte is below
     /// `bytes`, zero in the others: lane `e` of half `h` holds byte
     /// `16h + e`.
     #[target_feature(enable = "avx2")]
     #[inline]
-    fn block_mask<const H: usize>(bytes: usize) -> [__m256i; H] {
-        debug_assert!(bytes <= 16 * H, "the tail fits in its block");
+    fn block_mask(bytes: usize) -> [__m256i; 6] {
+        debug_assert!(bytes < BLOCK_BYTES, "a tail is shorter than a block");
         // Byte offsets and `bytes` are below 96, so the signed 16-bit
         // comparison is exact.
         let limit = _mm256_set1_epi16(bytes as i16);
         let offsets = _mm256_setr_epi16(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-        let mut mask = [_mm256_setzero_si256(); H];
+        let mut mask = [_mm256_setzero_si256(); 6];
         for (half, lanes) in mask.iter_mut().enumerate() {
             let first = _mm256_set1_epi16(16 * half as i16);
             *lanes = _mm256_cmpgt_epi16(limit, _mm256_add_epi16(offsets, first));
@@ -1477,16 +1455,15 @@ mod avx2 {
     /// [`block_after`] adds six `_mm256_madd_epi16` results, each the sum of
     /// two squares, to the same eight lanes, so each block adds the squares
     /// of 12 channel values, at most `12 · 255² = 780_300`, to every lane.
-    /// A masked full tail adds one block to the last flush; a half-block
-    /// tail adds only six squares per lane. A flush thus holds at most
-    /// 4096 full blocks: `4096 · 780_300 = 3_196_108_800 < 2^32`. (The
+    /// The masked tail adds one block to the last flush, so a flush holds at
+    /// most 4096 blocks: `4096 · 780_300 = 3_196_108_800 < 2^32`. (The
     /// bound is 5504 blocks: `5504 · 780_300 < 2^32 < 5505 · 780_300`.)
     const AFTER_BLOCKS_PER_FLUSH: usize = 4096;
 
-    /// The squared differences between the `16 * H` target bytes `t` and
-    /// canvas bytes `c`, already widened, blended with `keep` and `terms`.
-    /// Each 32-bit lane is at most `2 * H · 255²`: twelve squares for a
-    /// full block, six for a half block. Bytes outside `mask` add nothing.
+    /// The squared differences between the 96 target bytes `t` and the 96
+    /// canvas bytes `c` blended with `keep` and `terms`, in 32-bit lanes of
+    /// at most `12 · 255²`; bytes outside `mask`, when there is one, add
+    /// nothing.
     ///
     /// The terms follow the products of [`blend_u16x16`]: in half `h`, the
     /// low products hold lanes 0–3 and 8–11, whose bytes `16h + e` have
@@ -1497,15 +1474,16 @@ mod avx2 {
     /// further on (`4 % 3 = 1`), so they take `terms[(h + 1) % 3]`.
     #[target_feature(enable = "avx2")]
     #[inline]
-    fn block_after<const H: usize>(
-        t: [__m256i; H],
-        c: [__m256i; H],
+    fn block_after(
+        t: [__m256i; 3],
+        c: [__m256i; 3],
         keep: __m256i,
         terms: &[__m256i; 3],
-        mask: Option<&[__m256i; H]>,
+        mask: Option<&[__m256i; 6]>,
     ) -> __m256i {
+        let (t, c) = (widen_block(t), widen_block(c));
         let mut lanes = _mm256_setzero_si256();
-        for half in 0..H {
+        for half in 0..6 {
             let after = blend_u16x16(c[half], keep, terms[half % 3], terms[(half + 1) % 3]);
             // Both operands are in `0..=255`, so the 16-bit difference is
             // exact, and `_mm256_madd_epi16` sums the squares of two of them
@@ -1520,10 +1498,7 @@ mod avx2 {
     }
 
     /// The squared channel differences between the target and the canvas
-    /// blended with `blend`; matches [`scalar::line_after`]. Full blocks
-    /// cover 32 pixels. Tails of 3..=16 pixels use a masked 48-byte half
-    /// block, and tails of 17..=31 a masked 96-byte full block, when that
-    /// many bytes remain in both buffers. All other tails use scalar code.
+    /// blended with `blend`; matches [`scalar::line_after`].
     ///
     /// # Safety
     ///
@@ -1569,10 +1544,7 @@ mod avx2 {
                     load_block(c_pix.as_ptr().add(byte_index)),
                 )
             };
-            lanes = _mm256_add_epi32(
-                lanes,
-                block_after(widen_block(t), widen_block(c), keep, &block_terms, None),
-            );
+            lanes = _mm256_add_epi32(lanes, block_after(t, c, keep, &block_terms, None));
             byte_index += BLOCK_BYTES;
             blocks += 1;
             if blocks == AFTER_BLOCKS_PER_FLUSH {
@@ -1582,25 +1554,13 @@ mod avx2 {
             }
         }
 
-        // Short tails use the first three halves; longer tails use six.
-        // Both mask bytes past the line, provided the buffers extend to
-        // the block's end. Smaller or unreadable tails stay scalar.
+        // Three or more tail pixels take one block with the bytes past the
+        // line masked out, when the buffers extend that far; shorter tails,
+        // and tails too close to the end of the buffers, take scalar code.
         let tail = pixels % 32;
-        let readable = t_pix.len().min(c_pix.len());
-        if (3..=16).contains(&tail) && byte_index + BLOCK_BYTES / 2 <= readable {
-            let mask = block_mask::<3>(tail * BYTES_PER_PIXEL);
-            // SAFETY: the half block is 48 bytes from byte_index; the
-            // check above establishes byte_index + 48 <= both lengths.
-            let (t, c) = unsafe {
-                (
-                    load_halves::<3>(t_pix.as_ptr().add(byte_index)),
-                    load_halves::<3>(c_pix.as_ptr().add(byte_index)),
-                )
-            };
-            lanes = _mm256_add_epi32(lanes, block_after(t, c, keep, &block_terms, Some(&mask)));
-        } else if tail > 16 && byte_index + BLOCK_BYTES <= readable {
-            let mask = block_mask::<6>(tail * BYTES_PER_PIXEL);
-            // SAFETY: the full block is 96 bytes from byte_index, within
+        if tail > 2 && byte_index + BLOCK_BYTES <= t_pix.len().min(c_pix.len()) {
+            let mask = block_mask(tail * BYTES_PER_PIXEL);
+            // SAFETY: the block is the 96 bytes from `byte_index`, within
             // both slices by the check above.
             let (t, c) = unsafe {
                 (
@@ -1608,16 +1568,7 @@ mod avx2 {
                     load_block(c_pix.as_ptr().add(byte_index)),
                 )
             };
-            lanes = _mm256_add_epi32(
-                lanes,
-                block_after(
-                    widen_block(t),
-                    widen_block(c),
-                    keep,
-                    &block_terms,
-                    Some(&mask),
-                ),
-            );
+            lanes = _mm256_add_epi32(lanes, block_after(t, c, keep, &block_terms, Some(&mask)));
         } else {
             total += scalar::line_after(t_pix, c_pix, byte_index, tail, blend);
         }
