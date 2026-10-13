@@ -107,12 +107,14 @@ function compiledModule(variant: WasmVariant): Promise<WebAssembly.Module> {
 let startGate: Promise<void> = Promise.resolve();
 
 /**
- * Queues a fresh worker at the start gate: `turn` resolves when it may start,
- * and `release`, once it has started or been terminated (or acquisition was
- * aborted), lets the next fresh worker start. So the package never has two
- * workers loading at once, which WebKit fails on a page isolated by a service
- * worker (https://bugs.webkit.org/show_bug.cgi?id=261734). A call released before its
- * turn, by an abort, still holds the next call until its own turn comes.
+ * Queues an acquisition of a fresh worker (`acquire`) at the start gate:
+ * `turn` resolves when it may start, and `release`, once the worker has
+ * started or been terminated (or acquisition was aborted), lets the next
+ * fresh worker start. So the package never has two workers loading at once,
+ * which WebKit fails on a page isolated by a service worker
+ * (https://bugs.webkit.org/show_bug.cgi?id=261734). An acquisition released
+ * before its turn, by an abort, still holds the next acquisition until its
+ * own turn comes. Calls served by the idle worker bypass the gate.
  */
 function queueStart(): { turn: Promise<void>; release: () => void } {
   const turn = startGate;

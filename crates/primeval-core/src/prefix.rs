@@ -107,6 +107,14 @@ fn update_current_row(entries: &mut [Entry], target: &[[u8; 3]], current: &[[u8;
     }
 }
 
+fn assert_canvas_size(width: u32, height: u32) {
+    let max_pixels = i64::MAX as u64 / (3 * 255 * 255);
+    assert!(
+        u64::from(width) * u64::from(height) <= max_pixels,
+        "prefix sums canvas maximum RGB error must fit in i64 (at most {max_pixels} pixels)"
+    );
+}
+
 impl PrefixSums {
     /// Rebuilds the sums from `target` and `current`, which must have the
     /// same dimensions.
@@ -116,7 +124,7 @@ impl PrefixSums {
             "prefix sums need buffers of the same size"
         );
         let (width, height) = (target.width(), target.height());
-        debug_assert!(u64::from(width) * u64::from(height) <= i64::MAX as u64 / (3 * 255 * 255));
+        assert_canvas_size(width, height);
         self.width = width;
         self.height = height;
         self.entries.clear();
@@ -264,6 +272,12 @@ mod tests {
     use super::*;
     use rand::{RngExt, SeedableRng};
     use rand_chacha::ChaCha8Rng;
+
+    #[test]
+    #[should_panic(expected = "maximum RGB error must fit in i64")]
+    fn canvas_size_rejects_error_above_i64_limit() {
+        assert_canvas_size(u32::MAX, u32::MAX);
+    }
 
     #[test]
     fn rectangle_error_matches_rows_on_fresh_tables() {

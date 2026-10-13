@@ -1050,18 +1050,14 @@ for (const isolated of [true, false]) {
       const observed = watchWorkers(page);
       await trackTermination(page);
       try {
-        const threads = await page.evaluate(async () => {
+        const outcome = await page.evaluate(async () => {
           window.runtime.setIdleMsForTests(200);
           await window.smallSvg();
-          return navigator.hardwareConcurrency;
+          return { threads: navigator.hardwareConcurrency, terminated: window.terminated };
         });
-        const group = workerCount(threads);
+        const group = workerCount(outcome.threads);
         assert.equal(observed.workers.length, group);
-        assert.equal(
-          await page.evaluate(() => window.terminated),
-          0,
-          "success keeps the worker idle",
-        );
+        assert.equal(outcome.terminated, 0, "success keeps the worker idle");
         await observed.waitClosed(group);
         assert.equal(await page.evaluate(() => window.terminated), 1);
         const starts = await page.evaluate(async () => {
