@@ -515,3 +515,38 @@ The maintainer's machine cannot time x86 code, so GitHub-hosted runners (4 vCPU)
 The baselines' ratio stayed within 0.989–1.009. No SSE4.1 path was built: almost every x86_64 CPU since 2013 has AVX2.
 
 Still open from the review, all exact: SIMD in the refit's pixel loop, prepared-geometry reuse in the joint optimisation, cheaper rejection before the colour fit, and worker reuse in the browser. Caching the second Gaussian variate would change the random streams, so it needs a quality measurement first.
+
+## 25. The refit's sums: exact slicing, then SIMD in a fixed order (2026-10-13)
+
+Every move of a refit climb scores its candidate through `Layer::sums`, one pass over the covered pixels that sums `Σ g²`, `Σ g · q` per channel, `Σ q²` and `Σ r²` in `f64`. A Divan bench, `refine_sums`, now times it on the bench fixture's 256 shapes per kind.
+
+**Exact slicing.** The loop indexed the target, the canvas below and the composite above per channel, with a bounds check each. It now slices the four planes once per line and keeps every addition in its serial order; a test checks it against the original loop bit for bit, and no output changed. Time, new over base, on the engine runner's corpus (10 threads on the M2 Pro; GitHub's 4-vCPU x86 runners on all cores) and on the paintings at one thread:
+
+| Kind | aarch64, 10 threads | aarch64, 1 thread | x86_64, all cores |
+|---|---|---|---|
+| rectangle | 0.888–0.891 | 0.913–0.921 | 0.929–0.933 |
+| circle | 0.896–0.904 | 0.931–0.943 | 0.945–0.947 |
+| ellipse | 0.916 | 0.946–0.950 | 0.953–0.955 |
+| rotated rectangle, rotated ellipse | 0.919–0.937 | 0.953–0.965 | 0.959–0.973 |
+| any, polygon | 0.938–0.952 | 0.961–0.971 | 0.962–0.972 |
+| quadratic, triangle | 0.987–0.990 | 0.988–0.993 | 0.995–1.002 |
+| all | 0.953 | 0.972 | 0.976 (0.990 at 1 thread) |
+
+**SIMD in a fixed four-slot order.** The serial order made the sums one long chain of dependent additions, and vectorising them exactly is impossible, so the maintainer approved a new order, the same on every target: after clipping, pixel `j` of a line goes to slot `j mod 4`, each line restarting at slot 0; six planes of four `f64` slots persist across lines; each pixel's RGB energies add as `(R + G) + B`; hidden pixels and missing tail slots add `+0.0`, which is exact since a slot never holds `−0.0`; every total folds `(((0 + s0) + s1) + s2) + s3`. The per-pixel `f32` formulas are unchanged, and the conversions and products are exact in `f64`, so only the additions moved. Written as portable Rust the order did not vectorise, so `refine/sums.rs` implements it with NEON, baseline SSE2 (no run-time detection) and simd128 behind one generic loop over a small per-target trait of primitives, and the scalar slot code elsewhere. Parity tests check every target against a scalar reference of the order bit for bit, `node scripts/build-wasm.mjs test-kernels` runs them for simd128, and a deliberate lane mistake failed them. No pinned digest moved.
+
+On the corpus the new order changed 10 of the 90 rows, all on `synthetic-shapes`, by at most 0.27 levels out of 255 in either direction; the paintings are unchanged, and the aarch64 and x86_64 outputs are identical on every row. Time, new over the exact slicing:
+
+| Kind | aarch64, 10 threads | aarch64, 1 thread | x86_64, all cores |
+|---|---|---|---|
+| rectangle | 0.861–0.866 | 0.901–0.911 | 0.846–0.858 |
+| circle | 0.882–0.893 | 0.921–0.928 | 0.880–0.892 |
+| ellipse | 0.890–0.899 | 0.938–0.944 | 0.897–0.904 |
+| rotated rectangle, rotated ellipse | 0.917–0.945 | 0.948–0.963 | 0.931–0.965 |
+| any, polygon | 0.945–0.964 | 0.957–0.974 | 0.951–0.970 |
+| triangle | 0.983–0.984 | 0.989–0.990 | 0.991–0.994 |
+| quadratic | 0.999–1.004 | 0.994–0.995 | 1.004–1.007 |
+| all | 0.958 | 0.975 | 0.969 (0.977 at 1 thread) |
+
+Quadratics and polygons gain least: 83% and 79% of their lines are one pixel long, where four-pixel groups cannot help. The measured variant was then reduced from 1917 to 1000 lines without losing speed (the bench was 0–3% faster per kind).
+
+Still open from the review, all exact: prepared-geometry reuse in the joint optimisation, cheaper rejection before the colour fit, and worker reuse in the browser. Caching the second Gaussian variate would change the random streams, so it needs a quality measurement first.
