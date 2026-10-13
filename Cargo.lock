@@ -531,7 +531,7 @@ dependencies = [
 
 [[package]]
 name = "primeval-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "divan",
  "getrandom",
@@ -544,14 +544,14 @@ dependencies = [
 
 [[package]]
 name = "primeval-js"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "primeval-render",
 ]
 
 [[package]]
 name = "primeval-node"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "napi",
  "napi-build",
@@ -562,7 +562,7 @@ dependencies = [
 
 [[package]]
 name = "primeval-render"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "divan",
  "image",
@@ -575,7 +575,7 @@ dependencies = [
 
 [[package]]
 name = "primeval-wasm"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "crossbeam-channel",
  "js-sys",
