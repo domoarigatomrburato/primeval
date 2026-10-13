@@ -125,6 +125,7 @@ async function nativeRejection(request) {
 for (const isolated of [true, false]) {
   const variant = isolated ? "threaded" : "single";
   const other = isolated ? "single" : "threaded";
+  const workerCount = (threads) => (isolated ? 1 + threads : 1);
 
   describe(`browser approximate, ${isolated ? "cross-origin isolated" : "not isolated"} (${variant} build)`, () => {
     let server;
@@ -140,6 +141,19 @@ for (const isolated of [true, false]) {
       const page = await context.newPage();
       await page.goto(`${origin}/test/browser/page.html`);
       await page.waitForFunction(() => window.ready === true, undefined, { timeout: 10000 });
+      await page.evaluate(
+        async ({ name, render }) => {
+          const input = await window.fixture(name);
+          window.smallSvg = (overrides = {}) =>
+            window.primeval.approximate({
+              input,
+              output: "svg",
+              render,
+              ...overrides,
+            });
+        },
+        { name: FIXTURE, render: SMALL },
+      );
       return { context, page, requests };
     }
 
@@ -590,7 +604,7 @@ for (const isolated of [true, false]) {
         assert.deepEqual(formats, ["svg", "svg"]);
         const spans = proxy.spans.slice(loadedPage);
         const workers = spans.filter((span) => isWorkerScript(`${proxy.origin}${span.pathname}`));
-        assert.equal(workers.length, 2 * (isolated ? 1 + threads : 1));
+        assert.equal(workers.length, 2 * workerCount(threads));
         for (const [k, worker] of workers.entries()) {
           if (k === 0) {
             continue;
@@ -686,7 +700,7 @@ for (const isolated of [true, false]) {
         assert.ok(outcome.rejectedMs < 100, `rejected after ${outcome.rejectedMs} ms`);
         assert.deepEqual(outcome.formats, ["svg", "svg"]);
         // The first and third calls' workers only.
-        assert.equal(workers.length, 2 * (isolated ? 1 + outcome.threads : 1));
+        assert.equal(workers.length, 2 * workerCount(outcome.threads));
       } finally {
         await context.close();
       }
@@ -790,7 +804,7 @@ for (const isolated of [true, false]) {
         assert.deepEqual(
           workers,
           Array.from(
-            { length: isolated ? 1 + threads : 1 },
+            { length: workerCount(threads) },
             () => `${server.origin}/dist/worker-${variant}.js`,
           ),
         );
@@ -832,46 +846,18 @@ for (const isolated of [true, false]) {
       };
     }
 
-    test("worker reuse: sequential calls start one worker and match a fresh SVG", async () => {
+    test("worker reuse: mixed requests match fresh outputs and isolate progress", async () => {
       const { context, page } = await openPage();
       const observed = watchWorkers(page);
       try {
         const outcome = await page.evaluate(
-          async ({ name, render }) => {
-            const input = await window.fixture(name);
-            const run = () => window.primeval.approximate({ input, output: "svg", render });
-            const first = await run();
-            const second = await run();
-            const reusedStarts = window.runtime.workersStartedForTests();
-            window.runtime.setIdleMsForTests(0);
-            const fresh = await run();
-            return {
-              first: first.data,
-              second: second.data,
-              fresh: fresh.data,
-              reusedStarts,
-              starts: window.runtime.workersStartedForTests(),
-              threads: navigator.hardwareConcurrency,
-            };
-          },
-          { name: FIXTURE, render: SMALL },
-        );
-        assert.equal(outcome.reusedStarts, 1);
-        assert.equal(outcome.starts, 2);
-        assert.equal(outcome.second, outcome.fresh);
-        assert.equal(outcome.first, outcome.second);
-        assert.equal(observed.workers.length, 2 * (isolated ? 1 + outcome.threads : 1));
-        await observed.waitClosed(observed.workers.length);
-      } finally {
-        await context.close();
-      }
-    });
-
-    test("worker reuse: mixed requests match fresh outputs and isolate progress", async () => {
-      const { context, page } = await openPage();
-      try {
-        const outcome = await page.evaluate(
           async ({ name, render, shapes }) => {
+            const messages = [];
+            const postMessage = Worker.prototype.postMessage;
+            Worker.prototype.postMessage = function (message, ...args) {
+              messages.push({ type: message.type, keys: Object.keys(message).sort() });
+              return postMessage.call(this, message, ...args);
+            };
             const input = await window.fixture(name);
             const requests = shapes.map((shape, i) => ({
               output: i % 2 ? "png" : "svg",
@@ -907,14 +893,41 @@ for (const isolated of [true, false]) {
               return { outputs, progress };
             };
             const reused = await sequence();
+            const repeated = await sequence();
             const starts = window.runtime.workersStartedForTests();
             window.runtime.setIdleMsForTests(0);
             const fresh = await sequence();
-            return { reused, fresh, starts };
+            return {
+              reused,
+              repeated,
+              fresh,
+              starts,
+              messages,
+              totalStarts: window.runtime.workersStartedForTests(),
+              threads: navigator.hardwareConcurrency,
+            };
           },
           { name: FIXTURE, render: { ...SMALL, resizeInput: 32 }, shapes: SHAPES },
         );
         assert.equal(outcome.starts, 1);
+        assert.equal(outcome.totalStarts, 1 + SHAPES.length);
+        assert.equal(observed.workers.length, outcome.totalStarts * workerCount(outcome.threads));
+        await observed.waitClosed(observed.workers.length);
+        assert.deepEqual(
+          outcome.messages.filter((message) => message.type === "init"),
+          Array.from({ length: outcome.totalStarts }, () => ({
+            type: "init",
+            keys: ["channel", "module", "type"],
+          })),
+        );
+        assert.deepEqual(
+          outcome.messages.filter((message) => message.type === "run"),
+          Array.from({ length: 3 * SHAPES.length }, () => ({
+            type: "run",
+            keys: ["progress", "task", "type"],
+          })),
+        );
+        assert.deepEqual(outcome.repeated, outcome.reused);
         assert.deepEqual(outcome.reused, outcome.fresh);
         for (const [i, events] of outcome.reused.progress.entries()) {
           assert.equal(events.length, i % 2 ? 0 : 20);
@@ -928,43 +941,44 @@ for (const isolated of [true, false]) {
       }
     });
 
-    for (const failure of [
-      "abort",
-      "progress",
-      "invalid",
-      "caller",
-      ...(isolated ? ["pool"] : []),
-    ]) {
+    const failureErrors = {
+      abort: { constructorName: "AbortError", code: "ABORTED" },
+      progress: { constructorName: "Error", code: undefined },
+      invalid: { constructorName: "ValidationError", code: "INVALID_OPTION" },
+      caller: { constructorName: "InternalError", code: "INTERNAL" },
+      ...(isolated ? { pool: { constructorName: "InternalError", code: "INTERNAL" } } : {}),
+    };
+    for (const [failure, expected] of Object.entries(failureErrors)) {
       test(`worker reuse: ${failure} terminates immediately and the next call recovers`, async () => {
         const { context, page } = await openPage();
         const observed = watchWorkers(page);
         await trackTermination(page);
         try {
           const outcome = await page.evaluate(
-            async ({ name, render, longRender, failure }) => {
-              const input = await window.fixture(name);
-              await window.primeval.approximate({ input, output: "svg", render });
+            async ({ longRender, failure }) => {
+              await window.smallSvg();
               let error;
               try {
                 if (failure === "caller" || failure === "pool") {
                   await window.runtime.panicForTests(failure);
                 } else {
                   const controller = new AbortController();
-                  await window.primeval.approximate({
-                    input,
-                    output: "svg",
+                  await window.smallSvg({
                     render: failure === "invalid" ? { count: 0 } : longRender,
                     execution: {
                       signal: controller.signal,
                       onProgress() {
-                        if (failure === "abort") controller.abort();
-                        else throw new Error("reuse progress failure");
+                        if (failure === "abort") {
+                          controller.abort();
+                        } else {
+                          throw new Error("reuse progress failure");
+                        }
                       },
                     },
                   });
                 }
               } catch (caught) {
-                error = { name: caught.constructor.name, message: caught.message };
+                error = window.describeError(caught);
               }
               return {
                 error,
@@ -972,7 +986,7 @@ for (const isolated of [true, false]) {
                 terminated: window.terminated,
               };
             },
-            { name: FIXTURE, render: SMALL, longRender: LONG_RENDER, failure },
+            { longRender: LONG_RENDER, failure },
           );
           assert.equal(outcome.starts, 1, "the failure ran in the warm worker");
           assert.equal(
@@ -980,30 +994,15 @@ for (const isolated of [true, false]) {
             1,
             "termination happened before rejection was delivered",
           );
-          assert.equal(
-            outcome.error?.name,
-            failure === "abort"
-              ? "AbortError"
-              : failure === "progress"
-                ? "Error"
-                : failure === "invalid"
-                  ? "ValidationError"
-                  : "InternalError",
-          );
+          assert.equal(outcome.error?.constructorName, expected.constructorName);
+          assert.equal(outcome.error.code, expected.code);
           // Default idle time is 10 s: these closures must happen without
           // waiting for idle expiry (including every pool worker).
           await observed.waitClosed(observed.workers.length);
-          const next = await page.evaluate(
-            async ({ name, render }) => {
-              const result = await window.primeval.approximate({
-                input: await window.fixture(name),
-                output: "svg",
-                render,
-              });
-              return { format: result.format, starts: window.runtime.workersStartedForTests() };
-            },
-            { name: FIXTURE, render: SMALL },
-          );
+          const next = await page.evaluate(async () => {
+            const result = await window.smallSvg();
+            return { format: result.format, starts: window.runtime.workersStartedForTests() };
+          });
           assert.deepEqual(next, { format: "svg", starts: 2 });
         } finally {
           await context.close();
@@ -1036,7 +1035,7 @@ for (const isolated of [true, false]) {
         );
         assert.deepEqual(outcome.concurrent, outcome.sequential);
         assert.equal(outcome.starts, 3);
-        const group = isolated ? 1 + outcome.threads : 1;
+        const group = workerCount(outcome.threads);
         assert.equal(observed.workers.length, 3 * group);
         await observed.waitClosed(2 * group);
         await page.evaluate(() => window.runtime.setIdleMsForTests(0));
@@ -1051,47 +1050,34 @@ for (const isolated of [true, false]) {
       const observed = watchWorkers(page);
       await trackTermination(page);
       try {
-        const threads = await page.evaluate(
-          async ({ name, render }) => {
-            window.runtime.setIdleMsForTests(200);
-            await window.primeval.approximate({
-              input: await window.fixture(name),
-              output: "svg",
-              render,
-            });
-            return navigator.hardwareConcurrency;
-          },
-          { name: FIXTURE, render: SMALL },
-        );
-        const group = isolated ? 1 + threads : 1;
+        const threads = await page.evaluate(async () => {
+          window.runtime.setIdleMsForTests(200);
+          await window.smallSvg();
+          return navigator.hardwareConcurrency;
+        });
+        const group = workerCount(threads);
         assert.equal(observed.workers.length, group);
         assert.equal(
           await page.evaluate(() => window.terminated),
           0,
           "success keeps the worker idle",
         );
-        assert.equal(observed.closed.size, 0, "success keeps the worker idle");
         await observed.waitClosed(group);
-        const starts = await page.evaluate(
-          async ({ name, render }) => {
-            await window.primeval.approximate({
-              input: await window.fixture(name),
-              output: "svg",
-              render,
-            });
-            return window.runtime.workersStartedForTests();
-          },
-          { name: FIXTURE, render: SMALL },
-        );
+        assert.equal(await page.evaluate(() => window.terminated), 1);
+        const starts = await page.evaluate(async () => {
+          await window.smallSvg();
+          return window.runtime.workersStartedForTests();
+        });
         assert.equal(starts, 2);
         assert.equal(observed.workers.length, 2 * group);
         await observed.waitClosed(2 * group);
+        assert.equal(await page.evaluate(() => window.terminated), 2);
       } finally {
         await context.close();
       }
     });
 
-    test("terminates failures at settle and successful workers after idle expiry", async () => {
+    test("worker reuse: concurrent failures terminate every worker at settle", async () => {
       const { context, page } = await openPage();
       const observed = watchWorkers(page);
       await trackTermination(page);
@@ -1135,21 +1121,6 @@ for (const isolated of [true, false]) {
         assert.equal(terminations, isolated ? 5 : 4);
         const failedWorkers = observed.workers.length;
         await observed.waitClosed(failedWorkers);
-        await page.evaluate(
-          async ({ name, render }) => {
-            window.runtime.setIdleMsForTests(200);
-            await window.primeval.approximate({
-              input: await window.fixture(name),
-              output: "svg",
-              render,
-            });
-          },
-          { name: FIXTURE, render: SMALL },
-        );
-        assert.equal(await page.evaluate(() => window.terminated), terminations);
-        assert.equal(observed.closed.size, failedWorkers);
-        await observed.waitClosed(observed.workers.length);
-        assert.equal(await page.evaluate(() => window.terminated), terminations + 1);
       } finally {
         await context.close();
       }
@@ -1162,15 +1133,10 @@ for (const isolated of [true, false]) {
         releaseScript = resolve;
       });
       try {
-        await page.evaluate(
-          async ({ name, render }) => {
-            window.input = await window.fixture(name);
-            window.run = () =>
-              window.primeval.approximate({ input: window.input, output: "svg", render });
-            await window.run();
-          },
-          { name: FIXTURE, render: SMALL },
-        );
+        await page.evaluate(async () => {
+          window.run = window.smallSvg;
+          await window.run();
+        });
         await context.route(isWorkerScript, async (route) => {
           await held;
           await route.continue();
@@ -1207,36 +1173,31 @@ for (const isolated of [true, false]) {
         const observed = watchWorkers(page);
         await trackTermination(page);
         try {
-          await page.evaluate(
-            async ({ name, render }) => {
-              const OriginalWorker = Worker;
-              window.Worker = class extends OriginalWorker {
-                constructor(...args) {
-                  super(...args);
-                  window.callingWorker = this;
-                }
-              };
-              const OriginalChannel = BroadcastChannel;
-              window.panicChannels = [];
-              window.channelsClosed = 0;
-              window.BroadcastChannel = class extends OriginalChannel {
-                constructor(...args) {
-                  super(...args);
-                  window.panicChannels.push(this);
-                }
-                close() {
-                  window.channelsClosed += 1;
-                  super.close();
-                }
-              };
-              window.input = await window.fixture(name);
-              window.run = () =>
-                window.primeval.approximate({ input: window.input, output: "svg", render });
-              await window.run();
-              await window.run();
-            },
-            { name: FIXTURE, render: SMALL },
-          );
+          await page.evaluate(async () => {
+            const OriginalWorker = Worker;
+            window.Worker = class extends OriginalWorker {
+              constructor(...args) {
+                super(...args);
+                window.callingWorker = this;
+              }
+            };
+            const OriginalChannel = BroadcastChannel;
+            window.panicChannels = [];
+            window.channelsClosed = 0;
+            window.BroadcastChannel = class extends OriginalChannel {
+              constructor(...args) {
+                super(...args);
+                window.panicChannels.push(this);
+              }
+              close() {
+                window.channelsClosed += 1;
+                super.close();
+              }
+            };
+            window.run = window.smallSvg;
+            await window.run();
+            await window.run();
+          });
           assert.equal(
             await page.evaluate(() => window.panicChannels.length),
             1,
@@ -1254,25 +1215,26 @@ for (const isolated of [true, false]) {
             const error = await page.evaluate(
               async ({ failure, longRender }) => {
                 try {
-                  await window.primeval.approximate({
-                    input: window.input,
-                    output: "svg",
+                  await window.smallSvg({
                     render: longRender,
                     execution: {
                       onProgress() {
-                        if (failure === "error")
+                        if (failure === "error") {
                           window.callingWorker.onerror({ preventDefault() {} });
-                        else window.callingWorker.onmessageerror();
+                        } else {
+                          window.callingWorker.onmessageerror();
+                        }
                       },
                     },
                   });
                 } catch (error) {
-                  return error.constructor.name;
+                  return window.describeError(error);
                 }
               },
               { failure, longRender: LONG_RENDER },
             );
-            assert.equal(error, "InternalError");
+            assert.equal(error?.constructorName, "InternalError");
+            assert.equal(error.code, "INTERNAL");
             assert.equal(await page.evaluate(() => window.terminated), 1);
             assert.equal(await page.evaluate(() => window.channelsClosed), 1);
           }

@@ -15,14 +15,14 @@ export type WorkerTask =
 /** Where the internal test panic happens. */
 export type PanicSite = "caller" | "pool";
 
-/** A task sent to an already initialized calling worker. */
+/** Every task sent to a calling worker, including its first. */
 interface WorkerRun {
   type: "run";
   progress: boolean;
   task: WorkerTask;
 }
 
-/** The first task also initializes the instance, panic hook and thread pool. */
+/** Initializes the instance, panic hook and thread pool once, then runs tasks. */
 export type WorkerRequest =
   | WorkerRun
   | {
@@ -30,8 +30,6 @@ export type WorkerRequest =
       module: WebAssembly.Module;
       /** The page's worker-lifetime `BroadcastChannel` for pool panics. */
       channel: string;
-      progress: boolean;
-      task: WorkerTask;
     };
 
 /**

@@ -101,15 +101,16 @@ async function runPoolWorker({ module, memory, receiver }: PoolWorkerInit): Prom
 const run = requestRunner(glue, startPool);
 
 scope.onmessage = ({ data }: MessageEvent<WorkerRequest | PoolWorkerInit>) => {
-  if (data.type === "pool") {
-    // A pool worker keeps this role and blocks in its rayon thread.
-    scope.onmessage = null;
-    void runPoolWorker(data);
-  } else {
-    scope.onmessage = ({ data }: MessageEvent<WorkerRequest>) => {
+  switch (data.type) {
+    case "pool":
+      // A pool worker keeps this role and blocks in its rayon thread.
+      scope.onmessage = null;
+      void runPoolWorker(data);
+      break;
+    case "init":
+    case "run":
       void run(data);
-    };
-    void run(data);
+      break;
   }
 };
 

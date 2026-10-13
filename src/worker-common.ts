@@ -69,21 +69,23 @@ export function requestRunner(
   startPool?: (module: WebAssembly.Module) => Promise<void>,
 ): (request: WorkerRequest) => Promise<void> {
   let ready: Promise<void> | undefined;
+  // Only lifetime data is captured by the panic reporter, never a task's input.
+  const initialize = async (module: WebAssembly.Module, channel: string): Promise<void> => {
+    await glue.default({ module_or_path: module });
+    // Before the pool starts, so the hook covers every thread.
+    glue.setPanicReporter(channel, (message) =>
+      post({ type: "error", error: { code: "INTERNAL", message } }),
+    );
+    await startPool?.(module);
+  };
   return async (request) => {
+    if (request.type === "init") {
+      ready = initialize(request.module, request.channel);
+      // The following run reports initialization failures after awaiting it.
+      ready.catch(() => undefined);
+      return;
+    }
     try {
-      if (ready === undefined) {
-        if (request.type !== "init") {
-          throw new Error("the worker has not been initialized");
-        }
-        ready = (async () => {
-          await glue.default({ module_or_path: request.module });
-          // Before the pool starts, so the hook covers every thread.
-          glue.setPanicReporter(request.channel, (message) =>
-            post({ type: "error", error: { code: "INTERNAL", message } }),
-          );
-          await startPool?.(request.module);
-        })();
-      }
       await ready;
     } catch (error) {
       post({
