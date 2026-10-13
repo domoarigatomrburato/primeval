@@ -3015,7 +3015,8 @@ mod simd_parity {
         }
     }
 
-    /// Every line kernel on every start and length of a few buffers. One
+    /// Every line kernel on every start and length of a few buffers (only
+    /// `line_after` on x86_64, where the other kernels are scalar). One
     /// 70-pixel row covers every tail after one and two 32-pixel blocks,
     /// including tails at the buffer end that fall back to scalar code.
     #[test]
@@ -3039,11 +3040,13 @@ mod simd_parity {
                     // the length of both buffers, and `simd_available`
                     // returned true.
                     unsafe {
+                        #[cfg(not(target_arch = "x86_64"))]
                         assert_eq!(
                             Simd::line_sums(t_pix, c_pix, start, pixels),
                             Scalar::line_sums(t_pix, c_pix, start, pixels),
                             "{first} {pixels}"
                         );
+                        #[cfg(not(target_arch = "x86_64"))]
                         assert_eq!(
                             Simd::line_error(t_pix, c_pix, start, pixels),
                             Scalar::line_error(t_pix, c_pix, start, pixels),

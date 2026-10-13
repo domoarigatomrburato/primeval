@@ -5,19 +5,20 @@ name: Engine benchmark
 # cores and once on one thread. It compares nothing; the Markdown tables are
 # uploaded as artifacts for an offline comparison. Start it with
 #   gh workflow run engine-bench.yml -f head=<ref>   (optionally -f base=<ref>)
-# and fetch the tables with `gh run download <run id>`. The ratio between the
+# Both refs accept a branch, tag or full 40-character commit SHA.
+# Fetch the tables with `gh run download <run id>`. The ratio between the
 # two baselines is the noise.
 
 on:
   workflow_dispatch:
     inputs:
       base:
-        description: Baseline ref (branch, tag or commit)
+        description: Baseline ref (branch, tag or full 40-character commit SHA)
         type: string
         required: true
         default: main
       head:
-        description: Ref to time against the baseline
+        description: Ref to time against the baseline (branch, tag or full 40-character commit SHA)
         type: string
         required: true
       repeats:
@@ -58,6 +59,30 @@ jobs:
             extra: --no-synthetic
 
     steps:
+      - name: Validate inputs
+        shell: bash
+        env:
+          BASE: ${{ inputs.base }}
+          HEAD: ${{ inputs.head }}
+          REPEATS: ${{ inputs.repeats }}
+          SHAPES: ${{ inputs.shapes }}
+        run: |
+          set -euo pipefail
+          for ref in "$BASE" "$HEAD"; do
+            if [[ "$ref" =~ ^[0-9a-f]{7,39}$ ]]; then
+              echo "use the full 40-character commit SHA" >&2
+              exit 1
+            fi
+          done
+          if [[ ! "$REPEATS" =~ ^[1-9][0-9]?$ ]]; then
+            echo "repeats must be a number from 1 to 99" >&2
+            exit 1
+          fi
+          if [[ ! "$SHAPES" =~ ^[a-z_,-]*$ ]]; then
+            echo "shapes must be comma-separated lowercase shape kinds" >&2
+            exit 1
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.base }}
@@ -69,22 +94,6 @@ jobs:
           ref: ${{ inputs.head }}
           path: head
           persist-credentials: false
-
-      - name: Validate inputs
-        shell: bash
-        env:
-          REPEATS: ${{ inputs.repeats }}
-          SHAPES: ${{ inputs.shapes }}
-        run: |
-          set -euo pipefail
-          if [[ ! "$REPEATS" =~ ^[1-9][0-9]?$ ]]; then
-            echo "repeats must be a number from 1 to 99" >&2
-            exit 1
-          fi
-          if [[ ! "$SHAPES" =~ ^[a-z_,-]*$ ]]; then
-            echo "shapes must be comma-separated lowercase shape kinds" >&2
-            exit 1
-          fi
 
       - name: Build both runners
         shell: bash

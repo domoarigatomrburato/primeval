@@ -1408,13 +1408,13 @@ mod simd_parity {
         [r, g, b, sums.weights, sums.errors, sums.removed].map(f64::to_bits)
     }
 
-    /// The sums against the scalar reference on random folded layers, all
-    /// short lengths and tails, long lines, clipping, overlap, coverage/alpha
-    /// extremes and hidden pixels.
-    #[test]
-    fn sums_match_fixed_slot_order() {
+    const SUMS_WIDTHS: [u32; 3] = [2, 17, 257];
+
+    /// Visit single lines at each alpha, random lines, then the overlapping
+    /// set at each alpha, preserving the random stream across widths.
+    fn for_each_sums_case(mut check: impl FnMut(u32, &Layer<'_>, &[Scanline], u8)) {
         let mut rng = create_rng(0x5a45);
-        for width in [2, 17, 257] {
+        for width in SUMS_WIDTHS {
             let height = 5;
             let target = noise(&mut rng, width, height);
             let below = noise(&mut rng, width, height);
@@ -1460,11 +1460,7 @@ mod simd_parity {
                                 alpha: coverage,
                             };
                             for alpha in [0, 1, 128, 255] {
-                                assert_eq!(
-                                    sum_bits(layer.sums(&[line], alpha)),
-                                    sum_bits(sums::scalar_sums(&layer, &[line], alpha)),
-                                    "width {width}, {line:?}, alpha {alpha}"
-                                );
+                                check(width, &layer, &[line], alpha);
                             }
                             lines.push(line);
                         }
@@ -1479,21 +1475,50 @@ mod simd_parity {
                     alpha: rng.random_range(0..=score::M),
                 };
                 let alpha = rng.random();
-                assert_eq!(
-                    sum_bits(layer.sums(&[line], alpha)),
-                    sum_bits(sums::scalar_sums(&layer, &[line], alpha)),
-                    "random {line:?}, alpha {alpha}"
-                );
+                check(width, &layer, &[line], alpha);
                 lines.push(line);
             }
             for alpha in [0, 1, 128, 255] {
-                assert_eq!(
-                    sum_bits(layer.sums(&lines, alpha)),
-                    sum_bits(sums::scalar_sums(&layer, &lines, alpha)),
-                    "width {width}, overlapping lines, alpha {alpha}"
-                );
+                check(width, &layer, &lines, alpha);
             }
         }
+    }
+
+    /// The SIMD sums equal the scalar sums on random folded layers, all
+    /// short lengths and tails, long lines, clipping, overlap, coverage/alpha
+    /// extremes and hidden pixels.
+    #[test]
+    fn simd_sums_match_scalar_sums() {
+        for_each_sums_case(|width, layer, lines, alpha| {
+            assert_eq!(
+                sum_bits(layer.sums(lines, alpha)),
+                sum_bits(sums::scalar_sums(layer, lines, alpha)),
+                "width {width}, {} lines, first {:?}, alpha {alpha}",
+                lines.len(),
+                lines.first(),
+            );
+        });
+    }
+
+    /// Pin the normative order of [`Sums`] across targets. A moved digest
+    /// means the refit's output changed; treat it like the model pins.
+    #[test]
+    fn sums_are_pinned() {
+        let mut bytes: [Vec<u8>; 3] = std::array::from_fn(|_| Vec::new());
+        for_each_sums_case(|width, layer, lines, alpha| {
+            let index = SUMS_WIDTHS.iter().position(|&w| w == width).unwrap();
+            bytes[index].extend(
+                sum_bits(layer.sums(lines, alpha))
+                    .into_iter()
+                    .flat_map(u64::to_le_bytes),
+            );
+        });
+        let digests = bytes.map(crate::test_util::fnv1a);
+        assert_eq!(
+            digests,
+            [0x83c3afcdb649359f, 0x51b5242c2230da0b, 0xfc67125b9380be68],
+            "widths {SUMS_WIDTHS:?}"
+        );
     }
 
     fn slot_bits(sums: &sums::SlotSums) -> [[u64; 4]; 6] {
