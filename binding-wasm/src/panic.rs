@@ -7,7 +7,7 @@
 //! - on the calling thread, through the `report` function the worker passed to
 //!   [`set_panic_reporter`]; it posts on the worker's own port, ahead of
 //!   anything the worker posts after the trap;
-//! - on any other thread (a pool worker), on the per-call `BroadcastChannel`
+//! - on any other thread (a pool worker), on the worker-lifetime `BroadcastChannel`
 //!   the page opened before it started the worker, because the calling thread
 //!   is blocked in rayon and cannot post.
 

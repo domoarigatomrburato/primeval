@@ -799,25 +799,310 @@ for (const isolated of [true, false]) {
       }
     });
 
-    test("terminates each call's worker when the call settles, whatever the outcome", async () => {
+    async function trackTermination(page) {
+      await page.evaluate(() => {
+        window.terminated = 0;
+        const terminate = Worker.prototype.terminate;
+        Worker.prototype.terminate = function () {
+          window.terminated += 1;
+          return terminate.call(this);
+        };
+      });
+    }
+
+    // Chromium reports nested worker closure late (especially after a pool
+    // panic). Observe every close event, allowing for that reporting delay.
+    function watchWorkers(page) {
+      const workers = [];
+      const closed = new Set();
+      page.on("worker", (worker) => {
+        workers.push(worker);
+        worker.once("close", () => closed.add(worker));
+      });
+      return {
+        workers,
+        closed,
+        async waitClosed(expected) {
+          const deadline = Date.now() + 15000;
+          while (closed.size < expected && Date.now() < deadline) {
+            await delay(20);
+          }
+          assert.equal(closed.size, expected);
+        },
+      };
+    }
+
+    test("worker reuse: sequential calls start one worker and match a fresh SVG", async () => {
+      const { context, page } = await openPage();
+      const observed = watchWorkers(page);
+      try {
+        const outcome = await page.evaluate(
+          async ({ name, render }) => {
+            const input = await window.fixture(name);
+            const run = () => window.primeval.approximate({ input, output: "svg", render });
+            const first = await run();
+            const second = await run();
+            const reusedStarts = window.runtime.workersStartedForTests();
+            window.runtime.setIdleMsForTests(0);
+            const fresh = await run();
+            return {
+              first: first.data,
+              second: second.data,
+              fresh: fresh.data,
+              reusedStarts,
+              starts: window.runtime.workersStartedForTests(),
+              threads: navigator.hardwareConcurrency,
+            };
+          },
+          { name: FIXTURE, render: SMALL },
+        );
+        assert.equal(outcome.reusedStarts, 1);
+        assert.equal(outcome.starts, 2);
+        assert.equal(outcome.second, outcome.fresh);
+        assert.equal(outcome.first, outcome.second);
+        assert.equal(observed.workers.length, 2 * (isolated ? 1 + outcome.threads : 1));
+        await observed.waitClosed(observed.workers.length);
+      } finally {
+        await context.close();
+      }
+    });
+
+    test("worker reuse: mixed requests match fresh outputs and isolate progress", async () => {
       const { context, page } = await openPage();
       try {
-        const closed = [];
-        page.on("worker", (worker) => {
-          closed.push(new Promise((resolve) => worker.once("close", resolve)));
-        });
-        await page.evaluate(
-          async ({ name, render, longRender, pool }) => {
+        const outcome = await page.evaluate(
+          async ({ name, render, shapes }) => {
+            const input = await window.fixture(name);
+            const requests = shapes.map((shape, i) => ({
+              output: i % 2 ? "png" : "svg",
+              render: {
+                ...render,
+                count: 20,
+                shape,
+                seed: i + 1,
+                alpha: i % 2 ? 128 : "auto",
+                outputSize: i % 2 ? 48 : 32,
+                background: i % 2 ? "#112233" : "auto",
+              },
+            }));
+            const sequence = async () => {
+              const progress = requests.map(() => []);
+              const outputs = [];
+              for (const [i, request] of requests.entries()) {
+                const result = await window.primeval.approximate({
+                  input,
+                  ...request,
+                  execution:
+                    i % 2
+                      ? undefined
+                      : {
+                          onProgress: (info) => progress[i].push(info),
+                        },
+                });
+                outputs.push({
+                  ...result,
+                  data: result.format === "svg" ? result.data : Array.from(result.data),
+                });
+              }
+              return { outputs, progress };
+            };
+            const reused = await sequence();
+            const starts = window.runtime.workersStartedForTests();
+            window.runtime.setIdleMsForTests(0);
+            const fresh = await sequence();
+            return { reused, fresh, starts };
+          },
+          { name: FIXTURE, render: { ...SMALL, resizeInput: 32 }, shapes: SHAPES },
+        );
+        assert.equal(outcome.starts, 1);
+        assert.deepEqual(outcome.reused, outcome.fresh);
+        for (const [i, events] of outcome.reused.progress.entries()) {
+          assert.equal(events.length, i % 2 ? 0 : 20);
+          assert.deepEqual(
+            events.map((info) => info.step),
+            i % 2 ? [] : Array.from({ length: 20 }, (_, k) => k + 1),
+          );
+        }
+      } finally {
+        await context.close();
+      }
+    });
+
+    for (const failure of [
+      "abort",
+      "progress",
+      "invalid",
+      "caller",
+      ...(isolated ? ["pool"] : []),
+    ]) {
+      test(`worker reuse: ${failure} terminates immediately and the next call recovers`, async () => {
+        const { context, page } = await openPage();
+        const observed = watchWorkers(page);
+        await trackTermination(page);
+        try {
+          const outcome = await page.evaluate(
+            async ({ name, render, longRender, failure }) => {
+              const input = await window.fixture(name);
+              await window.primeval.approximate({ input, output: "svg", render });
+              let error;
+              try {
+                if (failure === "caller" || failure === "pool") {
+                  await window.runtime.panicForTests(failure);
+                } else {
+                  const controller = new AbortController();
+                  await window.primeval.approximate({
+                    input,
+                    output: "svg",
+                    render: failure === "invalid" ? { count: 0 } : longRender,
+                    execution: {
+                      signal: controller.signal,
+                      onProgress() {
+                        if (failure === "abort") controller.abort();
+                        else throw new Error("reuse progress failure");
+                      },
+                    },
+                  });
+                }
+              } catch (caught) {
+                error = { name: caught.constructor.name, message: caught.message };
+              }
+              return {
+                error,
+                starts: window.runtime.workersStartedForTests(),
+                terminated: window.terminated,
+              };
+            },
+            { name: FIXTURE, render: SMALL, longRender: LONG_RENDER, failure },
+          );
+          assert.equal(outcome.starts, 1, "the failure ran in the warm worker");
+          assert.equal(
+            outcome.terminated,
+            1,
+            "termination happened before rejection was delivered",
+          );
+          assert.equal(
+            outcome.error?.name,
+            failure === "abort"
+              ? "AbortError"
+              : failure === "progress"
+                ? "Error"
+                : failure === "invalid"
+                  ? "ValidationError"
+                  : "InternalError",
+          );
+          // Default idle time is 10 s: these closures must happen without
+          // waiting for idle expiry (including every pool worker).
+          await observed.waitClosed(observed.workers.length);
+          const next = await page.evaluate(
+            async ({ name, render }) => {
+              const result = await window.primeval.approximate({
+                input: await window.fixture(name),
+                output: "svg",
+                render,
+              });
+              return { format: result.format, starts: window.runtime.workersStartedForTests() };
+            },
+            { name: FIXTURE, render: SMALL },
+          );
+          assert.deepEqual(next, { format: "svg", starts: 2 });
+        } finally {
+          await context.close();
+        }
+      });
+    }
+
+    test("worker reuse: concurrent calls retain at most one idle worker", async () => {
+      const { context, page } = await openPage();
+      const observed = watchWorkers(page);
+      try {
+        const outcome = await page.evaluate(
+          async ({ name, render }) => {
+            const input = await window.fixture(name);
+            const run = (seed) =>
+              window.primeval
+                .approximate({ input, output: "svg", render: { ...render, seed } })
+                .then((result) => result.data);
+            const sequential = [];
+            for (const seed of [1, 2, 3]) sequential.push(await run(seed));
+            const concurrent = await Promise.all([1, 2, 3].map(run));
+            return {
+              sequential,
+              concurrent,
+              starts: window.runtime.workersStartedForTests(),
+              threads: navigator.hardwareConcurrency,
+            };
+          },
+          { name: FIXTURE, render: SMALL },
+        );
+        assert.deepEqual(outcome.concurrent, outcome.sequential);
+        assert.equal(outcome.starts, 3);
+        const group = isolated ? 1 + outcome.threads : 1;
+        assert.equal(observed.workers.length, 3 * group);
+        await observed.waitClosed(2 * group);
+        await page.evaluate(() => window.runtime.setIdleMsForTests(0));
+        await observed.waitClosed(3 * group);
+      } finally {
+        await context.close();
+      }
+    });
+
+    test("worker reuse: idle expiry closes the worker and its pool", async () => {
+      const { context, page } = await openPage();
+      const observed = watchWorkers(page);
+      await trackTermination(page);
+      try {
+        const threads = await page.evaluate(
+          async ({ name, render }) => {
+            window.runtime.setIdleMsForTests(200);
+            await window.primeval.approximate({
+              input: await window.fixture(name),
+              output: "svg",
+              render,
+            });
+            return navigator.hardwareConcurrency;
+          },
+          { name: FIXTURE, render: SMALL },
+        );
+        const group = isolated ? 1 + threads : 1;
+        assert.equal(observed.workers.length, group);
+        assert.equal(
+          await page.evaluate(() => window.terminated),
+          0,
+          "success keeps the worker idle",
+        );
+        assert.equal(observed.closed.size, 0, "success keeps the worker idle");
+        await observed.waitClosed(group);
+        const starts = await page.evaluate(
+          async ({ name, render }) => {
+            await window.primeval.approximate({
+              input: await window.fixture(name),
+              output: "svg",
+              render,
+            });
+            return window.runtime.workersStartedForTests();
+          },
+          { name: FIXTURE, render: SMALL },
+        );
+        assert.equal(starts, 2);
+        assert.equal(observed.workers.length, 2 * group);
+        await observed.waitClosed(2 * group);
+      } finally {
+        await context.close();
+      }
+    });
+
+    test("terminates failures at settle and successful workers after idle expiry", async () => {
+      const { context, page } = await openPage();
+      const observed = watchWorkers(page);
+      await trackTermination(page);
+      try {
+        const terminations = await page.evaluate(
+          async ({ name, longRender, pool }) => {
             const input = await window.fixture(name);
             const { approximate } = window.primeval;
-            const settle = (promise) =>
-              promise.then(
-                () => undefined,
-                () => undefined,
-              );
+            const settle = (promise) => promise.catch(() => undefined);
             const controller = new AbortController();
             await Promise.all([
-              settle(approximate({ input, output: "svg", render })),
               settle(approximate({ input, output: "svg", render: { count: 0 } })),
               settle(
                 approximate({
@@ -836,35 +1121,169 @@ for (const isolated of [true, false]) {
                   input,
                   output: "svg",
                   render: longRender,
-                  execution: {
-                    signal: controller.signal,
-                    onProgress: () => controller.abort(),
-                  },
+                  execution: { signal: controller.signal, onProgress: () => controller.abort() },
                 }),
               ),
               settle(window.runtime.panicForTests("caller")),
               // A pool panic leaves the calling thread blocked in rayon.
               ...(pool ? [settle(window.runtime.panicForTests("pool"))] : []),
             ]);
+            return window.terminated;
           },
-          { name: FIXTURE, render: SMALL, longRender: LONG_RENDER, pool: isolated },
+          { name: FIXTURE, longRender: LONG_RENDER, pool: isolated },
         );
-
-        let timer;
-        const timeout = new Promise((resolve) => {
-          // Generous: on isolated pages Chromium reports the pool workers'
-          // close events about 2 s after termination, 4 s after a pool panic.
-          timer = setTimeout(() => resolve("timeout"), 15000);
-        });
-        const outcome = await Promise.race([Promise.all(closed).then(() => "closed"), timeout]);
-        clearTimeout(timer);
-
-        assert.ok(closed.length >= (isolated ? 6 : 5), `saw ${closed.length} workers`);
-        assert.equal(outcome, "closed");
+        assert.equal(terminations, isolated ? 5 : 4);
+        const failedWorkers = observed.workers.length;
+        await observed.waitClosed(failedWorkers);
+        await page.evaluate(
+          async ({ name, render }) => {
+            window.runtime.setIdleMsForTests(200);
+            await window.primeval.approximate({
+              input: await window.fixture(name),
+              output: "svg",
+              render,
+            });
+          },
+          { name: FIXTURE, render: SMALL },
+        );
+        assert.equal(await page.evaluate(() => window.terminated), terminations);
+        assert.equal(observed.closed.size, failedWorkers);
+        await observed.waitClosed(observed.workers.length);
+        assert.equal(await page.evaluate(() => window.terminated), terminations + 1);
       } finally {
         await context.close();
       }
     });
+
+    test("worker reuse: an idle worker bypasses a held fresh-worker start gate", async () => {
+      const { context, page } = await openPage();
+      let releaseScript;
+      const held = new Promise((resolve) => {
+        releaseScript = resolve;
+      });
+      try {
+        await page.evaluate(
+          async ({ name, render }) => {
+            window.input = await window.fixture(name);
+            window.run = () =>
+              window.primeval.approximate({ input: window.input, output: "svg", render });
+            await window.run();
+          },
+          { name: FIXTURE, render: SMALL },
+        );
+        await context.route(isWorkerScript, async (route) => {
+          await held;
+          await route.continue();
+        });
+        const requested = context.waitForEvent("request", {
+          predicate: (request) => isWorkerScript(request.url()),
+        });
+        await page.evaluate(async () => {
+          const warm = window.run();
+          window.fresh = window.run();
+          await warm;
+        });
+        await requested;
+        await page.evaluate(() => {
+          window.run().then(() => {
+            window.reusedComplete = true;
+          });
+        });
+        await page.waitForFunction(() => window.reusedComplete === true, undefined, {
+          timeout: 3000,
+        });
+        releaseScript();
+        assert.equal(await page.evaluate(async () => (await window.fresh).format), "svg");
+        assert.equal(await page.evaluate(() => window.runtime.workersStartedForTests()), 2);
+      } finally {
+        releaseScript();
+        await context.close();
+      }
+    });
+
+    for (const failure of ["error", "messageerror", "idle panic"]) {
+      test(`worker reuse: worker-lifetime ${failure} closes the channel and recovers`, async () => {
+        const { context, page } = await openPage();
+        const observed = watchWorkers(page);
+        await trackTermination(page);
+        try {
+          await page.evaluate(
+            async ({ name, render }) => {
+              const OriginalWorker = Worker;
+              window.Worker = class extends OriginalWorker {
+                constructor(...args) {
+                  super(...args);
+                  window.callingWorker = this;
+                }
+              };
+              const OriginalChannel = BroadcastChannel;
+              window.panicChannels = [];
+              window.channelsClosed = 0;
+              window.BroadcastChannel = class extends OriginalChannel {
+                constructor(...args) {
+                  super(...args);
+                  window.panicChannels.push(this);
+                }
+                close() {
+                  window.channelsClosed += 1;
+                  super.close();
+                }
+              };
+              window.input = await window.fixture(name);
+              window.run = () =>
+                window.primeval.approximate({ input: window.input, output: "svg", render });
+              await window.run();
+              await window.run();
+            },
+            { name: FIXTURE, render: SMALL },
+          );
+          assert.equal(
+            await page.evaluate(() => window.panicChannels.length),
+            1,
+            "reuse retains the same channel",
+          );
+          if (failure === "idle panic") {
+            await page.evaluate(() => {
+              const publisher = new BroadcastChannel(window.panicChannels[0].name);
+              publisher.postMessage("render panicked: idle report");
+              publisher.close();
+            });
+            await page.waitForFunction(() => window.terminated === 1);
+            assert.equal(await page.evaluate(() => window.channelsClosed), 2); // publisher and runtime
+          } else {
+            const error = await page.evaluate(
+              async ({ failure, longRender }) => {
+                try {
+                  await window.primeval.approximate({
+                    input: window.input,
+                    output: "svg",
+                    render: longRender,
+                    execution: {
+                      onProgress() {
+                        if (failure === "error")
+                          window.callingWorker.onerror({ preventDefault() {} });
+                        else window.callingWorker.onmessageerror();
+                      },
+                    },
+                  });
+                } catch (error) {
+                  return error.constructor.name;
+                }
+              },
+              { failure, longRender: LONG_RENDER },
+            );
+            assert.equal(error, "InternalError");
+            assert.equal(await page.evaluate(() => window.terminated), 1);
+            assert.equal(await page.evaluate(() => window.channelsClosed), 1);
+          }
+          await observed.waitClosed(observed.workers.length);
+          assert.equal(await page.evaluate(async () => (await window.run()).format), "svg");
+          assert.equal(await page.evaluate(() => window.runtime.workersStartedForTests()), 2);
+        } finally {
+          await context.close();
+        }
+      });
+    }
 
     describe("load failures reject with InternalError, and a later call recovers", () => {
       for (const [what, pattern] of [

@@ -1,7 +1,5 @@
-// The logic both per-call workers share (worker-single.ts, worker-threaded.ts):
-// instantiate the glue the entry imported with the module the page compiled,
-// run one task, and post the outcome. The page terminates the worker when the
-// call settles.
+// Shared calling-worker logic: initialize the instance, panic hook and pool
+// once, then run one task per message. Only successful workers may be reused.
 import { messageOf, optionFields } from "./errors.js";
 import type { ProgressInfo } from "./types.js";
 import type { WorkerError, WorkerMessage, WorkerRequest, WorkerResult } from "./worker-protocol.js";
@@ -65,49 +63,55 @@ function workerError(error: unknown): WorkerError {
   };
 }
 
-/**
- * Runs the page's one request with `glue`. `startPool`, in the threaded
- * build, starts the rayon pool once the instance and its panic hook are ready.
- */
-export async function runRequest(
+/** Initializes once per calling worker, then runs each message's task. */
+export function requestRunner(
   glue: Glue,
-  request: WorkerRequest,
   startPool?: (module: WebAssembly.Module) => Promise<void>,
-): Promise<void> {
-  try {
-    await glue.default({ module_or_path: request.module });
-    // Before the pool starts, so the hook covers every thread.
-    glue.setPanicReporter(request.channel, (message) =>
-      post({ type: "error", error: { code: "INTERNAL", message } }),
-    );
-    await startPool?.(request.module);
-  } catch (error) {
-    post({
-      type: "error",
-      error: {
-        code: "INTERNAL",
-        message: `could not start the WebAssembly module: ${messageOf(error)}`,
-      },
-    });
-    return;
-  }
-
-  const { task } = request;
-  try {
-    if (task.kind === "panic") {
-      glue.__panicForTests(task.site === "pool");
-      throw new Error("the test panic did not panic");
+): (request: WorkerRequest) => Promise<void> {
+  let ready: Promise<void> | undefined;
+  return async (request) => {
+    try {
+      if (ready === undefined) {
+        if (request.type !== "init") {
+          throw new Error("the worker has not been initialized");
+        }
+        ready = (async () => {
+          await glue.default({ module_or_path: request.module });
+          // Before the pool starts, so the hook covers every thread.
+          glue.setPanicReporter(request.channel, (message) =>
+            post({ type: "error", error: { code: "INTERNAL", message } }),
+          );
+          await startPool?.(request.module);
+        })();
+      }
+      await ready;
+    } catch (error) {
+      post({
+        type: "error",
+        error: {
+          code: "INTERNAL",
+          message: `could not start the WebAssembly module: ${messageOf(error)}`,
+        },
+      });
+      return;
     }
-    const result = glue.approximate(
-      task.input,
-      task.output,
-      task.render,
-      request.progress ? (info) => post({ type: "progress", info }) : undefined,
-    );
-    post({ type: "result", result }, [result.data.buffer]);
-  } catch (error) {
-    // After a panic on this thread, the hook's error is already ahead of this
-    // one on the same port, and the page keeps the first.
-    post({ type: "error", error: workerError(error) });
-  }
+
+    const { task } = request;
+    try {
+      if (task.kind === "panic") {
+        glue.__panicForTests(task.site === "pool");
+        throw new Error("the test panic did not panic");
+      }
+      const result = glue.approximate(
+        task.input,
+        task.output,
+        task.render,
+        request.progress ? (info) => post({ type: "progress", info }) : undefined,
+      );
+      post({ type: "result", result }, [result.data.buffer]);
+    } catch (error) {
+      // The panic hook's error precedes this one on the same port.
+      post({ type: "error", error: workerError(error) });
+    }
+  };
 }

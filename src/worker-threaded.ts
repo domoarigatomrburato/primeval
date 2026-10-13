@@ -1,10 +1,10 @@
-// The per-call worker of the threaded build, and also each of its rayon pool
-// workers: the per-call worker starts its pool workers from this same file,
+// The calling worker of the threaded build, and also each of its rayon pool
+// workers: the calling worker starts its pool workers from this same file,
 // and the first message tells the two roles apart. The glue import is static
 // so that bundlers bundle it with its snippets and `.wasm` asset.
 import * as glueModule from "../wasm/threaded/primeval.js";
 import { messageOf } from "./errors.js";
-import { runRequest, scope, type ThreadedGlue } from "./worker-common.js";
+import { requestRunner, scope, type ThreadedGlue } from "./worker-common.js";
 import type {
   LoadedMessage,
   PoolWorkerInit,
@@ -94,17 +94,22 @@ async function runPoolWorker({ module, memory, receiver }: PoolWorkerInit): Prom
   }
   scope.postMessage({ type: "ready" } satisfies PoolWorkerMessage);
   // Blocks for the life of the pool. A panic here reaches the page on the
-  // call's BroadcastChannel: this thread has no reporter of its own.
+  // worker's BroadcastChannel: this thread has no reporter of its own.
   glue.startPoolWorker(receiver);
 }
 
+const run = requestRunner(glue, startPool);
+
 scope.onmessage = ({ data }: MessageEvent<WorkerRequest | PoolWorkerInit>) => {
-  // One task per worker.
-  scope.onmessage = null;
   if (data.type === "pool") {
+    // A pool worker keeps this role and blocks in its rayon thread.
+    scope.onmessage = null;
     void runPoolWorker(data);
   } else {
-    void runRequest(glue, data, startPool);
+    scope.onmessage = ({ data }: MessageEvent<WorkerRequest>) => {
+      void run(data);
+    };
+    void run(data);
   }
 };
 

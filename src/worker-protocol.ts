@@ -1,4 +1,4 @@
-// The messages between the browser runtime (browser-runtime.ts), its per-call
+// The messages between the browser runtime (browser-runtime.ts), its calling
 // worker (worker-single.ts or worker-threaded.ts) and, in the threaded build,
 // that worker's pool workers (worker-threaded.ts again). Types only.
 import type { RequestRenderOptions } from "./request.js";
@@ -15,16 +15,24 @@ export type WorkerTask =
 /** Where the internal test panic happens. */
 export type PanicSite = "caller" | "pool";
 
-/** The one message the page sends a worker. */
-export interface WorkerRequest {
+/** A task sent to an already initialized calling worker. */
+interface WorkerRun {
   type: "run";
-  module: WebAssembly.Module;
-  /** The page's per-call `BroadcastChannel` for panics on pool threads. */
-  channel: string;
-  /** Whether to forward progress. */
   progress: boolean;
   task: WorkerTask;
 }
+
+/** The first task also initializes the instance, panic hook and thread pool. */
+export type WorkerRequest =
+  | WorkerRun
+  | {
+      type: "init";
+      module: WebAssembly.Module;
+      /** The page's worker-lifetime `BroadcastChannel` for pool panics. */
+      channel: string;
+      progress: boolean;
+      task: WorkerTask;
+    };
 
 /**
  * A Rust error as plain data, because structured clone drops an error's own

@@ -1,15 +1,15 @@
-// The per-call worker of the single-threaded build. The glue import is static
+// The calling worker of the single-threaded build. The glue import is static
 // so that bundlers bundle it with its snippets and `.wasm` asset.
 import * as glueModule from "../wasm/single/primeval.js";
-import { type Glue, runRequest, scope } from "./worker-common.js";
+import { type Glue, requestRunner, scope } from "./worker-common.js";
 import type { WorkerMessage, WorkerRequest } from "./worker-protocol.js";
 
 const glue: Glue = glueModule;
 
+const run = requestRunner(glue);
+
 scope.onmessage = ({ data }: MessageEvent<WorkerRequest>) => {
-  // One task per worker.
-  scope.onmessage = null;
-  void runRequest(glue, data);
+  void run(data);
 };
 
 // Its modules are loaded and it starts no other worker: the page can start the

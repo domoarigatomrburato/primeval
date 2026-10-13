@@ -311,7 +311,7 @@ Browser notes:
   ```
 
 - Threads work with these headers from the server and with isolation added by a service worker, as on hosts that cannot set headers. The runtime starts its workers one at a time, because WebKit (Safari) fails module workers started together under a service worker's isolation ([WebKit bug 261734](https://bugs.webkit.org/show_bug.cgi?id=261734)).
-- Each call runs in a Web Worker of its own, which ends when the call settles, so concurrent calls do not share memory and the page's main thread stays free. An `AbortSignal` terminates the worker at once.
+- Calls run in Web Workers, so the page's main thread stays free. Concurrent calls run in separate workers and do not share memory. A worker that finishes successfully is kept idle for 10 s and reused by the next call; memory it grew is held that long. At most one worker is kept idle. An `AbortSignal` still terminates the worker at once.
 - A page downloads one of two WebAssembly builds, threaded or single-threaded, chosen before the download and compiled once per page: about 360 KB with brotli (about 460 KB with gzip), plus a few KB of JavaScript.
 - Both builds use WebAssembly SIMD, which Chrome 91, Firefox 89, Safari 16.4 and newer versions support. In a browser without it, `approximate()` rejects with an `InternalError` that says so.
 - The same seed and options give the same output. Native and browser output currently match for the same seed, but this is not guaranteed across platforms. The engine and the PNG writer compute rotations with portable arithmetic, and the engine draws its random moves with a pure Rust logarithm, on every target.

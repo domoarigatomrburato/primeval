@@ -1,5 +1,5 @@
 // The browser entry: the same `approximate()` and `toDataUri()` as the Node
-// entry (index.ts), running the WebAssembly builds in a Web Worker per call
+// entry (index.ts), running the WebAssembly builds in reusable Web Workers
 // (browser-runtime.ts). No Node APIs: a PNG result's `data` is a `Uint8Array`.
 import { approximateInWorker } from "./browser-runtime.js";
 import { toDataUriWith } from "./data-uri.js";

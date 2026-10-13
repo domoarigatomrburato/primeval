@@ -1,12 +1,13 @@
 // The browser runtime behind browser.ts. Internal: not a public entry point.
 //
-// Each call runs in a fresh module worker of its build (worker-single.ts or
-// worker-threaded.ts) that is terminated when the call settles, whatever the
-// outcome; a terminated worker takes the instance, its memory and its thread
-// pool (nested workers) with it. The page picks the build (threaded when
-// cross-origin isolated, single-threaded otherwise) before fetching anything,
-// compiles its `.wasm` once, and posts the compiled module to every worker.
-// Calls start their workers one at a time (see `queueStart`).
+// Calls take the page's idle module worker or start one of their build
+// (worker-single.ts or worker-threaded.ts). Only a delivered result keeps its
+// worker idle, for up to 10 seconds; at most one is retained. Every failure
+// terminates the worker, its instance, memory and thread pool immediately.
+// Concurrent calls have separate workers and memory. The page picks the build
+// before fetching anything and compiles its `.wasm` once. Fresh workers load
+// one at a time (see `queueStart`); reused workers bypass that gate and retain
+// their instance, pool and panic channel, receiving only the next task.
 import { InternalError, mapNativeError, messageOf } from "./errors.js";
 import { abortError, normalizeRequest } from "./request.js";
 import type { ProgressInfo } from "./types.js";
@@ -19,6 +20,10 @@ import type {
   WorkerResult,
   WorkerTask,
 } from "./worker-protocol.js";
+
+const IDLE_MS = 10_000;
+let idleMs = IDLE_MS;
+let workersStarted = 0;
 
 const modules = new Map<WasmVariant, Promise<WebAssembly.Module>>();
 
@@ -35,9 +40,12 @@ function wasmUrl(variant: WasmVariant): URL {
 
 // Literal URLs, one per variant, so bundlers can see both workers.
 function startWorker(variant: WasmVariant): Worker {
-  return variant === "threaded"
-    ? new Worker(new URL("./worker-threaded.js", import.meta.url), { type: "module" })
-    : new Worker(new URL("./worker-single.js", import.meta.url), { type: "module" });
+  const worker =
+    variant === "threaded"
+      ? new Worker(new URL("./worker-threaded.js", import.meta.url), { type: "module" })
+      : new Worker(new URL("./worker-single.js", import.meta.url), { type: "module" });
+  workersStarted += 1;
+  return worker;
 }
 
 /**
@@ -116,7 +124,7 @@ function queueStart(): { turn: Promise<void>; release: () => void } {
   return { turn, release };
 }
 
-/** A name no other call or page uses, for the per-call panic channel. */
+/** A name no other worker or page uses, for the worker's panic channel. */
 function channelName(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   return `primeval-panic-${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
@@ -135,10 +143,106 @@ function errorFromWorker({ code, message, option, requirement }: WorkerError): u
   return mapNativeError(cause);
 }
 
+/** A calling worker's lifetime state, shared by its successive calls. */
+interface RuntimeWorker {
+  /** Calling worker that owns the wasm instance and any pool workers. */
+  worker: Worker;
+  /** The page's panic channel, open until this worker is terminated. */
+  channel: BroadcastChannel;
+  /** The wasm build initialized in this worker. */
+  variant: WasmVariant;
+  /** Unique panic-channel name passed to the wasm panic hook. */
+  name: string;
+  /** Active call's message handler; set before posting, cleared at settle or termination. */
+  onMessage?: (message: WorkerMessage) => void;
+  /** Active call's rejection handler; set before posting, cleared at settle or termination. */
+  fail?: (error: unknown) => void;
+}
+
+/** The page's sole successful worker waiting for reuse, or no idle worker. */
+let idle:
+  | {
+      /** Worker whose most recent call delivered a result. */
+      runtime: RuntimeWorker;
+      /** Terminates it after idleMs; cleared on reuse or termination. */
+      timer: ReturnType<typeof setTimeout>;
+    }
+  | undefined;
+
+/** Ends the entire worker lifetime, including its panic channel. */
+function terminate(runtime: RuntimeWorker): void {
+  if (idle?.runtime === runtime) {
+    clearTimeout(idle.timer);
+    idle = undefined;
+  }
+  runtime.onMessage = undefined;
+  runtime.fail = undefined;
+  runtime.worker.terminate();
+  runtime.channel.close();
+}
+
+function retain(runtime: RuntimeWorker): void {
+  if (idle !== undefined || idleMs === 0) {
+    terminate(runtime);
+    return;
+  }
+  idle = { runtime, timer: setTimeout(() => terminate(runtime), idleMs) };
+}
+
+function takeIdle(variant: WasmVariant): RuntimeWorker | undefined {
+  if (idle === undefined) {
+    return undefined;
+  }
+  const { runtime, timer } = idle;
+  clearTimeout(timer);
+  idle = undefined;
+  if (runtime.variant !== variant) {
+    terminate(runtime);
+    return undefined;
+  }
+  return runtime;
+}
+
+/** Open the panic channel before starting the worker; it belongs to its life. */
+function createWorker(variant: WasmVariant): RuntimeWorker {
+  const name = channelName();
+  const channel = new BroadcastChannel(name);
+  let worker: Worker;
+  try {
+    worker = startWorker(variant);
+  } catch (error) {
+    channel.close();
+    throw error;
+  }
+  const runtime: RuntimeWorker = { worker, channel, variant, name };
+  const fail = (error: unknown): void => {
+    if (runtime.fail !== undefined) {
+      runtime.fail(error);
+    } else {
+      terminate(runtime);
+    }
+  };
+  channel.onmessage = (event: MessageEvent<unknown>) =>
+    fail(errorFromWorker({ code: "INTERNAL", message: String(event.data) }));
+  worker.onmessage = (event: MessageEvent<WorkerMessage>) => {
+    if (runtime.onMessage !== undefined) {
+      runtime.onMessage(event.data);
+    } else if (event.data.type === "error") {
+      fail(errorFromWorker(event.data.error));
+    }
+  };
+  worker.onerror = (event) => {
+    event.preventDefault();
+    fail(new InternalError("the primeval worker failed to load or crashed"));
+  };
+  worker.onmessageerror = () =>
+    fail(new InternalError("a message from the primeval worker could not be read"));
+  return runtime;
+}
+
 /**
- * Runs `task` in a fresh worker, started once the call's turn at the start
- * gate comes. The first reason to stop wins: an abort, a throwing
- * `onProgress`, a panic, a worker failure, or the worker's outcome.
+ * Runs one task in an idle worker or a fresh one through the start gate.
+ * The first reason to stop wins. Only a delivered result permits reuse.
  */
 function runInWorker(
   task: WorkerTask,
@@ -146,21 +250,26 @@ function runInWorker(
   signal: AbortSignal | undefined,
 ): Promise<WorkerResult> {
   const variant = selectVariant();
-  const { turn, release } = queueStart();
+  let runtime = takeIdle(variant);
+  const gate = runtime === undefined ? queueStart() : undefined;
   return new Promise<WorkerResult>((resolve, reject) => {
     let settled = false;
-    let worker: Worker | undefined;
-    let channel: BroadcastChannel | undefined;
-
-    const settle = (finish: () => void): void => {
+    const settle = (finish: () => void, success = false): void => {
       if (settled) {
         return;
       }
       settled = true;
-      worker?.terminate();
-      channel?.close();
+      if (runtime !== undefined) {
+        runtime.onMessage = undefined;
+        runtime.fail = undefined;
+        if (success) {
+          retain(runtime);
+        } else {
+          terminate(runtime);
+        }
+      }
       signal?.removeEventListener("abort", onAbort);
-      release();
+      gate?.release();
       finish();
     };
     const fail = (error: unknown): void => settle(() => reject(error));
@@ -175,7 +284,7 @@ function runInWorker(
         case "loaded":
           break;
         case "started":
-          release();
+          gate?.release();
           break;
         case "progress":
           try {
@@ -189,7 +298,7 @@ function runInWorker(
           if (signal?.aborted) {
             fail(abortError(signal));
           } else {
-            settle(() => resolve(message.result));
+            settle(() => resolve(message.result), true);
           }
           break;
         case "error":
@@ -198,45 +307,43 @@ function runInWorker(
       }
     };
 
-    // The turn never rejects: a failure is the compile's.
-    Promise.all([compiledModule(variant), turn]).then(
-      ([module]) => {
-        if (settled) {
-          return;
-        }
-        try {
-          // Open before the worker starts, so no panic report can be missed.
-          const name = channelName();
-          channel = new BroadcastChannel(name);
-          channel.onmessage = (event: MessageEvent<unknown>) =>
-            fail(errorFromWorker({ code: "INTERNAL", message: String(event.data) }));
-          worker = startWorker(variant);
-          worker.onmessage = (event: MessageEvent<WorkerMessage>) => onMessage(event.data);
-          worker.onerror = (event) => {
-            event.preventDefault();
-            fail(new InternalError("the primeval worker failed to load or crashed"));
-          };
-          worker.onmessageerror = () =>
-            fail(new InternalError("a message from the primeval worker could not be read"));
-          const request: WorkerRequest = {
-            type: "run",
-            module,
-            channel: name,
-            progress: onProgress !== undefined,
-            task,
-          };
-          const transfer = task.kind === "approximate" ? [task.input.buffer as ArrayBuffer] : [];
-          worker.postMessage(request, transfer);
-        } catch (error) {
-          fail(
-            new InternalError(`could not start the primeval worker: ${messageOf(error)}`, {
-              cause: error,
-            }),
-          );
-        }
-      },
-      (error: unknown) => fail(loadError(error)),
-    );
+    const send = (module?: WebAssembly.Module): void => {
+      if (settled) {
+        return;
+      }
+      try {
+        runtime ??= createWorker(variant);
+        runtime.onMessage = onMessage;
+        runtime.fail = fail;
+        const request: WorkerRequest =
+          module === undefined
+            ? { type: "run", progress: onProgress !== undefined, task }
+            : {
+                type: "init",
+                module,
+                channel: runtime.name,
+                progress: onProgress !== undefined,
+                task,
+              };
+        const transfer = task.kind === "approximate" ? [task.input.buffer as ArrayBuffer] : [];
+        runtime.worker.postMessage(request, transfer);
+      } catch (error) {
+        fail(
+          new InternalError(`could not start the primeval worker: ${messageOf(error)}`, {
+            cause: error,
+          }),
+        );
+      }
+    };
+    if (runtime !== undefined) {
+      send();
+    } else {
+      // The turn never rejects: a failure is the compile's.
+      Promise.all([compiledModule(variant), gate?.turn]).then(
+        ([module]) => send(module),
+        (error: unknown) => fail(loadError(error)),
+      );
+    }
   });
 }
 
@@ -253,7 +360,7 @@ export async function approximateInWorker(request: unknown): Promise<WorkerResul
 }
 
 /**
- * Internal, for the browser tests only: panics in a fresh worker, on the
+ * Internal, for the browser tests only: panics in a calling worker, on the
  * calling thread or in a rayon pool task, through binding-wasm's hidden
  * `__panicForTests`. Rejects with the `InternalError` a render panic gives.
  *
@@ -262,4 +369,24 @@ export async function approximateInWorker(request: unknown): Promise<WorkerResul
 export async function panicForTests(site: PanicSite): Promise<never> {
   await runInWorker({ kind: "panic", site }, undefined, undefined);
   throw new InternalError("the test panic did not reject");
+}
+
+/**
+ * Clears the idle slot and sets its lifetime; omitted restores the default.
+ * Zero terminates successful workers at settle, disabling reuse.
+ * @testonly
+ */
+export function setIdleMsForTests(ms: number = IDLE_MS): void {
+  if (idle !== undefined) {
+    terminate(idle.runtime);
+  }
+  idleMs = ms;
+}
+
+/**
+ * Number of calling workers started by this page runtime (not pool workers).
+ * @testonly
+ */
+export function workersStartedForTests(): number {
+  return workersStarted;
 }

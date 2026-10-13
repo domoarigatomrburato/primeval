@@ -27,7 +27,7 @@ let outDir;
 /** Per variant, the emitted worker script and the `.wasm` it loads, as URL paths. */
 const assets = {};
 
-/** The emitted per-call worker of `variant` and the `.wasm` asset it references. */
+/** The emitted calling worker of `variant` and the `.wasm` asset it references. */
 function variantAssets(variant) {
   const names = fs.readdirSync(path.join(outDir, "assets"));
   const workers = names.filter((name) => name.startsWith(`worker-${variant}-`));

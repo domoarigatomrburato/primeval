@@ -63,14 +63,9 @@ Before the stroke arithmetic change, wasm was 1.5–1.9× slower than native per
 
 - **Rust:** a new crate `binding-wasm` (`primeval-wasm`, `publish = false`) over `primeval-render`, so decoding, validation, defaults, errors and the SVG/PNG writers are the same code as on Node. Rust stays the only owner of defaults and vocabularies; JS request parsing shared with the napi binding lives in `crates/primeval-js`. Built with opt-level 3, fat LTO, `panic = "abort"`, and the name section stripped.
 - **JS API:** the same `approximate(request)` with the same options, result types, error classes and codes, `onProgress` and `AbortSignal`.
-- **One worker per call.** Each `approximate()` call runs in a fresh module Web Worker that the package starts (`worker-single.js` or `worker-threaded.js`, each a literal `new Worker(new URL(…, import.meta.url), { type: "module" })` so bundlers can follow it) and terminates when the call settles. Startup is a few tens of milliseconds against renders of seconds, and it solves four problems at once:
-  - memory that never shrinks;
-  - recovery from a panic, since an aborted instance is never reused;
-  - cancellation, since `AbortSignal` terminates the worker in both builds;
-  - isolation between concurrent calls.
-  The compiled `WebAssembly.Module` is cached on the page and posted to each worker, so it is fetched and compiled once.
+- **Reusable calling workers.** Each call takes the page's idle worker or starts a fresh module worker. A delivered result retains at most one idle worker for 10 s, including its grown memory and rayon pool; any other outcome terminates it immediately. Concurrent calls use separate workers and memory. Fresh workers load one at a time for WebKit; reuse bypasses the start gate. The compiled module is cached per page and sent only with a fresh worker's first task.
 - **Build selection:** `globalThis.crossOriginIsolated === true` selects the threaded build, with a pool of `navigator.hardwareConcurrency` threads in the worker; otherwise the single-threaded build. Selection happens before any download.
-- **Panics:** a panic hook in every thread (pool workers included) reports the message to the page on a per-call `BroadcastChannel`; the page then terminates the worker and rejects with the same error class Node uses for an internal failure. This also covers the hanging rayon task.
+- **Panics:** a panic hook in every thread (pool workers included) reports the message to the page on a worker-lifetime `BroadcastChannel`; the page then terminates the worker and rejects with the same error class Node uses for an internal failure. This also covers the hanging rayon task.
 - **Input/output:** input `Uint8Array` (and `ArrayBuffer`); PNG output is a `Uint8Array` in the browser (a `Buffer` on Node). Decode limits and option bounds are the Rust ones.
 - **Packaging:** conditional exports in the one root package: `"node"` → the native addon as today, `"browser"` → the wasm entry. The wasm files ship in the root package. Size budget enforced in CI: each `.wasm` at most 512 KiB gzip. wasm-bindgen-rayon was dropped in W3a: its `no-bundler` variant needs `blob:` workers (CSP `worker-src blob:`) and its bundler variant breaks without a bundler, so the pool is in-repo and works both ways.
 
