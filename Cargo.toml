@@ -10,7 +10,7 @@ members = [
 
 [workspace.package]
 # Always equal to the npm package version; `npm run bump:version` updates both.
-version = "0.1.1"
+version = "0.2.0"
 repository = "https://github.com/domoarigatomrburato/primeval"
 license = "MIT"
 rust-version = "1.99"
