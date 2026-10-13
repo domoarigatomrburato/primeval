@@ -9,8 +9,10 @@
 // `optionalDependencies` (the committed file must not list them: npm cannot
 // lock a version that is not on the registry yet), checks that the root
 // package is complete (`verify-root`) and that its tarball lists them, then
-// skips every package whose version is already on the registry and publishes
-// the root package last, so a failed run can simply be re-run. It restores the
+// skips every package whose version is already on the registry, publishes the
+// platform packages, waits until each of them is visible on the registry (npm
+// can leave a new version in staging while `npm publish` exits 0), and only
+// then publishes the root package, so a failed run can simply be re-run. It restores the
 // committed package.json when it is done, and publishes without lifecycle
 // scripts: `npm run prepare:package` must have run.
 // `verify` fails unless every package is on the registry at the tag version
@@ -204,19 +206,41 @@ export function parseNpmView(version, { status, stdout, stderr }) {
   return true;
 }
 
-/** Publishes, in order, every package that is not on the registry yet. */
-export function publishPackages(packages, { isPublished, publish, log }) {
+/**
+ * Publishes, in order, every package that is not on the registry yet: the
+ * platform packages, then, once each of them is visible on the registry
+ * (`verifyPublished`, with the same `tools`), the root package last. npm can
+ * leave a new version in staging while `npm publish` exits 0; the root
+ * package, which pins every platform package, must never go out without them.
+ */
+export async function publishPackages(packages, tools) {
+  const { isPublished, publish, log } = tools;
+  const platforms = packages.slice(0, -1);
+  const root = packages.at(-1);
   const actions = [];
-  for (const entry of packages) {
+  const publishMissing = (entry) => {
     if (isPublished(entry)) {
       log(`skip ${entry.name}@${entry.version}: already published`);
       actions.push({ ...entry, action: "skip" });
-      continue;
+      return;
     }
     log(`publish ${entry.name}@${entry.version}`);
     publish(entry);
     actions.push({ ...entry, action: "publish" });
+  };
+  for (const entry of platforms) {
+    publishMissing(entry);
   }
+  try {
+    await verifyPublished(platforms, tools);
+  } catch (error) {
+    throw new Error(
+      `${error.message}; the root package ${root.name}@${root.version} was not published. ` +
+        "A version left in npm staging must be approved (`npm stage approve`) " +
+        "and this command re-run, or the release bumped to a new version.",
+    );
+  }
+  publishMissing(root);
   return actions;
 }
 
@@ -224,10 +248,12 @@ export function publishPackages(packages, { isPublished, publish, log }) {
  * Publishes a release from the root package in `rootDir`: writes the
  * package.json with the platform packages (`withPlatformDependencies`), then,
  * before publishing anything, checks the root package (`verifyRoot`) and that
- * its tarball (`packedManifest`) lists exactly them; then `publishPackages`.
- * The committed package.json is restored in every case.
+ * its tarball (`packedManifest`) lists exactly them; then `publishPackages`,
+ * which publishes the root package only once every platform package is
+ * visible on the registry. The committed package.json is restored in every
+ * case.
  */
-export function publishRelease({ rootDir, npmDir, tag }, tools) {
+export async function publishRelease({ rootDir, npmDir, tag }, tools) {
   const packageJsonPath = path.join(rootDir, "package.json");
   const committedSource = fs.readFileSync(packageJsonPath, "utf8");
   const pkg = JSON.parse(committedSource);
@@ -243,7 +269,7 @@ export function publishRelease({ rootDir, npmDir, tag }, tools) {
       published.optionalDependencies,
       tools.packedManifest(rootDir).optionalDependencies,
     );
-    return publishPackages(packages, tools);
+    return await publishPackages(packages, tools);
   } finally {
     fs.writeFileSync(packageJsonPath, committedSource);
   }
@@ -351,7 +377,7 @@ async function main(argv) {
       if (!firstArg) {
         throw new Error("publish requires the npm packages directory");
       }
-      publishRelease(
+      await publishRelease(
         { rootDir: REPO_ROOT, npmDir: path.resolve(firstArg), tag: secondArg },
         {
           verifyRoot: verifyRepositoryRootPackage,

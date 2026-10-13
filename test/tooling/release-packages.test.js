@@ -81,14 +81,52 @@ test("npm view output tells published, unpublished and failed lookups apart", ()
   );
 });
 
-test("publishing skips versions that already exist and keeps the root package last", () => {
-  const published = new Set(["@domoarigatomrburato/primeval-darwin-arm64"]);
+/** Registry fakes: `publish` makes a package visible after `delays[name]` polls (default 0). */
+function registryFake({ published = [], delays = {}, never = [] } = {}) {
+  const visible = new Set(published);
+  const pending = new Map();
   const calls = [];
-  const actions = publishPackages(PACKAGES, {
-    isPublished: ({ name }) => published.has(name),
-    publish: ({ name }) => calls.push(name),
-    log: () => {},
+  const sleeps = [];
+  return {
+    calls,
+    sleeps,
+    tools: {
+      isPublished: ({ name }) => visible.has(name),
+      publish: ({ name }) => {
+        calls.push(name);
+        if (never.includes(name)) {
+          return;
+        }
+        const polls = delays[name] ?? 0;
+        if (polls === 0) {
+          visible.add(name);
+        } else {
+          pending.set(name, polls);
+        }
+      },
+      sleep: async (ms) => {
+        sleeps.push(ms);
+        for (const [name, polls] of pending) {
+          if (polls <= 1) {
+            pending.delete(name);
+            visible.add(name);
+          } else {
+            pending.set(name, polls - 1);
+          }
+        }
+      },
+      attempts: 3,
+      delayMs: 10,
+      log: () => {},
+    },
+  };
+}
+
+test("publishing skips versions that already exist and keeps the root package last", async () => {
+  const { calls, tools } = registryFake({
+    published: ["@domoarigatomrburato/primeval-darwin-arm64"],
   });
+  const actions = await publishPackages(PACKAGES, tools);
 
   assert.deepEqual(calls, [
     "@domoarigatomrburato/primeval-linux-x64-gnu",
@@ -104,20 +142,19 @@ test("publishing skips versions that already exist and keeps the root package la
   );
 });
 
-test("a failed platform publish stops before the root package", () => {
+test("a failed platform publish stops before the root package", async () => {
   const calls = [];
-  assert.throws(
-    () =>
-      publishPackages(PACKAGES, {
-        isPublished: () => false,
-        publish: ({ name }) => {
-          calls.push(name);
-          if (name.endsWith("linux-x64-gnu")) {
-            throw new Error("publish failed");
-          }
-        },
-        log: () => {},
-      }),
+  await assert.rejects(
+    publishPackages(PACKAGES, {
+      isPublished: () => false,
+      publish: ({ name }) => {
+        calls.push(name);
+        if (name.endsWith("linux-x64-gnu")) {
+          throw new Error("publish failed");
+        }
+      },
+      log: () => {},
+    }),
     /publish failed/,
   );
   assert.deepEqual(calls, [
@@ -126,14 +163,54 @@ test("a failed platform publish stops before the root package", () => {
   ]);
 });
 
-test("a re-run after a full publish publishes nothing", () => {
-  const calls = [];
-  publishPackages(PACKAGES, {
-    isPublished: () => true,
-    publish: ({ name }) => calls.push(name),
-    log: () => {},
-  });
+test("a re-run after a full publish publishes nothing", async () => {
+  const { calls, tools } = registryFake({ published: PACKAGES.map(({ name }) => name) });
+  await publishPackages(PACKAGES, tools);
   assert.deepEqual(calls, []);
+});
+
+test("a platform package that never becomes visible stops before the root package", async () => {
+  // npm can leave a new version in staging while `npm publish` exits 0.
+  const { calls, sleeps, tools } = registryFake({
+    never: ["@domoarigatomrburato/primeval-linux-x64-gnu"],
+  });
+  await assert.rejects(publishPackages(PACKAGES, tools), (error) => {
+    assert.match(error.message, /@domoarigatomrburato\/primeval-linux-x64-gnu@1\.2\.3/);
+    assert.doesNotMatch(error.message, /primeval-darwin-arm64/);
+    assert.match(error.message, /npm stage approve/);
+    assert.match(error.message, /bump/);
+    return true;
+  });
+  assert.deepEqual(calls, [
+    "@domoarigatomrburato/primeval-darwin-arm64",
+    "@domoarigatomrburato/primeval-linux-x64-gnu",
+  ]);
+  assert.deepEqual(sleeps, [10, 10]);
+});
+
+test("the root package waits for a platform package that becomes visible after a few polls", async () => {
+  const { calls, sleeps, tools } = registryFake({
+    delays: { "@domoarigatomrburato/primeval-linux-x64-gnu": 2 },
+  });
+  const actions = await publishPackages(PACKAGES, tools);
+  assert.deepEqual(calls, [
+    "@domoarigatomrburato/primeval-darwin-arm64",
+    "@domoarigatomrburato/primeval-linux-x64-gnu",
+    "@domoarigatomrburato/primeval",
+  ]);
+  assert.deepEqual(sleeps, [10, 10]);
+  assert.equal(actions.at(-1).action, "publish");
+});
+
+test("a re-run publishes the root once a missing platform package has appeared", async () => {
+  const platforms = PACKAGES.slice(0, -1).map(({ name }) => name);
+  const { calls, tools } = registryFake({ published: platforms });
+  const actions = await publishPackages(PACKAGES, tools);
+  assert.deepEqual(calls, ["@domoarigatomrburato/primeval"]);
+  assert.deepEqual(
+    actions.map(({ action }) => action),
+    ["skip", "skip", "publish"],
+  );
 });
 
 test("post-publish verification retries until every package is visible", async () => {
@@ -235,6 +312,7 @@ function releaseFixture(pkg = PKG) {
   fs.writeFileSync(path.join(rootDir, "package.json"), source);
   const readPackage = () => JSON.parse(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"));
   const events = [];
+  const visible = new Set();
   const tools = {
     verifyRoot: (dir) => {
       assert.equal(dir, rootDir);
@@ -245,20 +323,21 @@ function releaseFixture(pkg = PKG) {
       events.push(["packedManifest"]);
       return readPackage();
     },
-    isPublished: () => false,
+    isPublished: ({ name }) => visible.has(name),
     publish: ({ name, dir }) => {
       const onDisk = dir === rootDir ? readPackage().optionalDependencies : undefined;
       events.push(["publish", name, onDisk]);
+      visible.add(name);
     },
     log: () => {},
   };
   return { rootDir, source, events, tools };
 }
 
-test("publish adds the platform packages before it checks and publishes anything", () => {
+test("publish adds the platform packages before it checks and publishes anything", async () => {
   const { rootDir, source, events, tools } = releaseFixture();
   try {
-    const actions = publishRelease({ rootDir, npmDir: "/repo/npm", tag: "v1.2.3" }, tools);
+    const actions = await publishRelease({ rootDir, npmDir: "/repo/npm", tag: "v1.2.3" }, tools);
     assert.deepEqual(events, [
       ["verifyRoot", PLATFORM_DEPENDENCIES],
       ["packedManifest"],
@@ -281,15 +360,14 @@ test("publish adds the platform packages before it checks and publishes anything
   }
 });
 
-test("publish fails before publishing anything when the packed root misses them", () => {
+test("publish fails before publishing anything when the packed root misses them", async () => {
   const { rootDir, source, events, tools } = releaseFixture();
   try {
-    assert.throws(
-      () =>
-        publishRelease(
-          { rootDir, npmDir: "/repo/npm", tag: "v1.2.3" },
-          { ...tools, packedManifest: () => PKG },
-        ),
+    await assert.rejects(
+      publishRelease(
+        { rootDir, npmDir: "/repo/npm", tag: "v1.2.3" },
+        { ...tools, packedManifest: () => PKG },
+      ),
       /the packed root package has optionalDependencies \(none\), expected /,
     );
     assert.deepEqual(
@@ -302,20 +380,19 @@ test("publish fails before publishing anything when the packed root misses them"
   }
 });
 
-test("publish fails before publishing anything when the root package check fails", () => {
+test("publish fails before publishing anything when the root package check fails", async () => {
   const { rootDir, source, events, tools } = releaseFixture();
   try {
-    assert.throws(
-      () =>
-        publishRelease(
-          { rootDir, npmDir: "/repo/npm", tag: "v1.2.3" },
-          {
-            ...tools,
-            verifyRoot: () => {
-              throw new Error("the root package is missing dist/index.js");
-            },
+    await assert.rejects(
+      publishRelease(
+        { rootDir, npmDir: "/repo/npm", tag: "v1.2.3" },
+        {
+          ...tools,
+          verifyRoot: () => {
+            throw new Error("the root package is missing dist/index.js");
           },
-        ),
+        },
+      ),
       /missing dist\/index\.js/,
     );
     assert.deepEqual(events, []);
@@ -325,14 +402,42 @@ test("publish fails before publishing anything when the root package check fails
   }
 });
 
-test("publish refuses a mismatched tag or committed platform packages, leaving package.json alone", () => {
+test("publish restores package.json when a platform package never becomes visible", async () => {
+  const { rootDir, source, events, tools } = releaseFixture();
+  try {
+    await assert.rejects(
+      publishRelease(
+        { rootDir, npmDir: "/repo/npm", tag: "v1.2.3" },
+        {
+          ...tools,
+          // The linux publish "succeeds" but the version stays in staging.
+          isPublished: ({ name }) =>
+            !name.endsWith("linux-x64-gnu") &&
+            events.some(([event, published]) => event === "publish" && published === name),
+          sleep: async () => {},
+          attempts: 2,
+        },
+      ),
+      /primeval-linux-x64-gnu@1\.2\.3.*npm stage approve/s,
+    );
+    assert.deepEqual(
+      events.filter(([event]) => event === "publish").map(([, name]) => name),
+      ["@domoarigatomrburato/primeval-darwin-arm64", "@domoarigatomrburato/primeval-linux-x64-gnu"],
+    );
+    assert.equal(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"), source);
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test("publish refuses a mismatched tag or committed platform packages, leaving package.json alone", async () => {
   for (const [pkg, tag, error] of [
     [PKG, "v1.2.4", /v1\.2\.4/],
     [{ ...PKG, optionalDependencies: PLATFORM_DEPENDENCIES }, "v1.2.3", /added at publish time/],
   ]) {
     const { rootDir, source, events, tools } = releaseFixture(pkg);
     try {
-      assert.throws(() => publishRelease({ rootDir, npmDir: "/repo/npm", tag }, tools), error);
+      await assert.rejects(publishRelease({ rootDir, npmDir: "/repo/npm", tag }, tools), error);
       assert.deepEqual(events, []);
       assert.equal(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"), source);
     } finally {
