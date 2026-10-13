@@ -1,6 +1,6 @@
 # Review of the algorithm leap: what to keep, what to retune, what is left
 
-Date: 2026-10-07. Machine: Apple M2 Pro, 10 logical cores, macOS aarch64, dedicated and idle. Companion to `benchmark-report-2026-10-07.md`, which compares Go `primitive`, primeval before the leap (`b9e24b4`) and after it (`16877bb`). This document goes one level down: it takes the leap apart and measures each piece, so that the trade of time for quality can be decided piece by piece rather than as a whole.
+Date: 2026-10-07. Machine: Apple M2 Pro, 10 logical cores, macOS aarch64, dedicated and idle. Companion to the benchmark report of the same date, which compared Go `primitive`, primeval before the leap (`b9e24b4`) and after it (`16877bb`); the README's Benchmarks section superseded it, and it is in the git history (`docs/benchmark-report-2026-10-07.md`, removed after `dcc0ab4`). This document goes one level down: it takes the leap apart and measures each piece, so that the trade of time for quality can be decided piece by piece rather than as a whole.
 
 ## 1. Method
 

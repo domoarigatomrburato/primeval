@@ -28,6 +28,8 @@ Give it an input image and it searches for a layered approximation you can expor
 
 Inspired by Michael Fogleman's original [`primitive`](https://github.com/fogleman/primitive), this repository is an **independent Rust implementation** with a reusable core library (`primeval-core`) and an ESM-only Node package (`@domoarigatomrburato/primeval`) that includes both a programmatic API and a Node CLI, and runs the same API in the browser.
 
+[`docs/architecture.md`](docs/architecture.md) describes how the engine, the bindings and the package fit together.
+
 ## Progression Gallery
 
 Browse the full example gallery in [`docs/gallery.md`](docs/gallery.md). The sample images are in the public domain; [`docs/readme/originals/SOURCES.md`](docs/readme/originals/SOURCES.md) credits their sources.

@@ -9,6 +9,9 @@
 //! takes ([`Buffer`], [`Color`]), the [`Drawing`] it produces, and the joint
 //! optimisation of its triangles, polygons and rectangles that can follow
 //! it ([`joint`]).
+//!
+//! `docs/architecture.md` in the repository describes the engine's pipeline,
+//! its determinism rules and how the crates fit together.
 
 #![warn(missing_docs)]
 // `clippy.toml` bans the methods whose results differ between platforms.

@@ -8,7 +8,8 @@
 //! rayon pool with (`PoolBuilder`, `startPoolWorker`, `wasmMemory`). A panic
 //! aborts the instance; [`set_panic_reporter`] installs a hook that reports
 //! its message first.
-//! `scripts/build-wasm.mjs` builds both variants.
+//! `scripts/build-wasm.mjs` builds both variants. `docs/architecture.md` in
+//! the repository describes the builds, the pool and the browser runtime.
 #![warn(missing_docs)]
 
 mod panic;

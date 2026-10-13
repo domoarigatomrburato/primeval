@@ -19,6 +19,7 @@ Main components:
 - `demo/`: the browser demo, plain HTML, CSS and ES modules with no build step, deployed to GitHub Pages by `.github/workflows/pages.yml`; `demo/coi-sw.js` is its cross-origin isolation service worker
 - `docs/readme/`: source images (`originals/`, also the test fixtures) and alpha comparisons used by the README
 - `docs/images/` and `docs/gallery.md`: progression gallery and thumbnails
+- `docs/architecture.md`: how the system works and how its pieces fit together (components, the data flow of one call, the engine pipeline, determinism, bindings, browser runtime, build and release). Read it before working on a component you do not know; update it when a change alters what it describes.
 - `docs/plans/`: active planning docs; keep this directory small and current. Plans can be large: read the contents and the sections for the item you are working on, not the whole file.
 
 Generated output (gitignored; never edit by hand):
@@ -37,6 +38,10 @@ Generated output (gitignored; never edit by hand):
 - The final Rust API is the only source of truth for render-option defaults. If a value is omitted, `undefined`, or intentionally left unset, wrapper and binding layers should pass that absence through so Rust can decide the default.
 - TypeScript mirrors the Rust contract; do not introduce cross-language code generation or shared schema systems.
 - Do not add new public render options unless required to make existing behavior consistent across render, binding, and TypeScript.
+- No CLI framework: `src/cli.ts` parses arguments with `node:util`'s `parseArgs`.
+- Tests stay on `node:test`; no Vitest or Jest.
+- Supply-chain tooling stays Dependabot, `cargo-deny` and workflow linting (actionlint, zizmor); no Renovate, Scorecard or extra scanners.
+- No GPU work (Metal, wgpu).
 
 ## Implementation Rules
 
