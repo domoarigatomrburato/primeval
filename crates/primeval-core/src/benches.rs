@@ -119,6 +119,7 @@ impl Fixture {
     /// [`SHAPES`] seeded random shapes of `kind`, sampled as the search does.
     fn shapes(&self, kind: ShapeKind) -> Vec<Shape> {
         let round = SearchRound {
+            half_resolution: false,
             target: &self.target,
             current: &self.current,
             error_grid: &self.grid,

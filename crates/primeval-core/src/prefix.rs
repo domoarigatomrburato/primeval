@@ -18,14 +18,16 @@ pub(crate) const MAX_CHANNEL_SPAN: usize = (u32::MAX / 255) as usize;
 ///
 /// Row `y` holds `width + 1` entries; entry `x` sums the pixels `0..x` of
 /// that row, so a span `x1..=x2` is entry `x2 + 1` minus entry `x1`.
+/// The canvas's maximum RGB error must fit in i64, as the energy kernels
+/// require: at most i64::MAX / (3 * 255²) = 47,281,158,717,697 pixels
+/// (about 4.7 · 10¹³), far beyond any practical buffer.
 #[derive(Clone, Default)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 pub(crate) struct PrefixSums {
     width: u32,
     height: u32,
     entries: Vec<Entry>,
-    /// Summed-area error entries. Disabled on theoretical canvases whose
-    /// maximum RGB error would overflow u64 (the public API has no area cap).
+    /// Summed-area error entries.
     area_error: Vec<u64>,
 }
 
@@ -89,11 +91,6 @@ impl RowChanges {
     }
 }
 
-/// 195075 is the greatest squared RGB error of one pixel.
-fn area_error_fits(width: u32, height: u32) -> bool {
-    u64::from(width) * u64::from(height) <= u64::MAX / (3 * 255 * 255)
-}
-
 fn update_current_row(entries: &mut [Entry], target: &[[u8; 3]], current: &[[u8; 3]]) {
     let mut entry = entries[0];
     for ((t, c), dst) in target.iter().zip(current).zip(&mut entries[1..]) {
@@ -119,6 +116,7 @@ impl PrefixSums {
             "prefix sums need buffers of the same size"
         );
         let (width, height) = (target.width(), target.height());
+        debug_assert!(u64::from(width) * u64::from(height) <= i64::MAX as u64 / (3 * 255 * 255));
         self.width = width;
         self.height = height;
         self.entries.clear();
@@ -149,11 +147,9 @@ impl PrefixSums {
             }
         }
         self.area_error.clear();
-        if area_error_fits(width, height) {
-            self.area_error
-                .resize((width as usize + 1) * (height as usize + 1), 0);
-            self.update_area(0);
-        }
+        self.area_error
+            .resize((width as usize + 1) * (height as usize + 1), 0);
+        self.update_area(0);
     }
 
     /// Recomputes only canvas channels and error on these rows. Target
@@ -192,14 +188,8 @@ impl PrefixSums {
     }
 
     /// Updates cumulative columns from the first changed row down, using
-    /// the row error prefixes. Each entry is the sum of a canvas rectangle:
-    /// at most 3 * 255² per pixel. `area_error_fits` checks the pixel count
-    /// before allocating, so no u64 entry can overflow for any accepted
-    /// canvas; larger canvases retain the original evaluation path.
+    /// the row error prefixes. Each entry sums one canvas rectangle.
     fn update_area(&mut self, first: u32) {
-        if self.area_error.is_empty() {
-            return;
-        }
         let stride = self.width as usize + 1;
         for y in first as usize..self.height as usize {
             for x in 1..stride {
@@ -210,22 +200,18 @@ impl PrefixSums {
     }
 
     /// The old RGB error over an inclusive pixel rectangle, in four
-    /// lookups. Empty rectangles have zero error. None disables pruning
-    /// when the canvas's worst possible error cannot fit u64.
+    /// lookups. Empty rectangles have zero error.
     #[inline]
-    pub(crate) fn rectangle_error(&self, (x1, y1, x2, y2): (i32, i32, i32, i32)) -> Option<u64> {
-        if self.area_error.is_empty() {
-            return None;
-        }
+    pub(crate) fn rectangle_error(&self, (x1, y1, x2, y2): (i32, i32, i32, i32)) -> u64 {
         if x1 > x2 || y1 > y2 {
-            return Some(0);
+            return 0;
         }
         debug_assert!(x1 >= 0 && y1 >= 0 && x2 < self.width as i32 && y2 < self.height as i32);
         let stride = self.width as usize + 1;
         let at = |x: i32, y: i32| self.area_error[y as usize * stride + x as usize];
         // Subtract vertical spans separately so intermediate values cannot
         // underflow or overflow even at the table's maximum total error.
-        Some((at(x2 + 1, y2 + 1) - at(x2 + 1, y1)) - (at(x1, y2 + 1) - at(x1, y1)))
+        (at(x2 + 1, y2 + 1) - at(x2 + 1, y1)) - (at(x1, y2 + 1) - at(x1, y1))
     }
 
     /// Whether the sums were built for a buffer of `width` x `height`.
@@ -280,62 +266,45 @@ mod tests {
     use rand_chacha::ChaCha8Rng;
 
     #[test]
-    fn area_error_capacity_guard_covers_theoretical_large_canvases() {
-        assert!(area_error_fits(2, 2));
-        assert!(area_error_fits(u32::MAX, 2));
-        assert!(!area_error_fits(u32::MAX, u32::MAX));
-        assert!(!area_error_fits(1 << 24, 1 << 24));
-        let sums = PrefixSums::default();
-        assert_eq!(sums.rectangle_error((0, 0, 1, 1)), None);
-    }
-
-    #[test]
-    fn rectangle_error_matches_rows_and_fresh_updates() {
+    fn rectangle_error_matches_rows_on_fresh_tables() {
         let mut rng = ChaCha8Rng::seed_from_u64(0x5a7);
         for (w, h) in [(2, 2), (3, 7), (83, 37)] {
             let target = random_buffer(&mut rng, w, h);
-            let mut current = random_buffer(&mut rng, w, h);
+            let current = random_buffer(&mut rng, w, h);
             let mut sums = PrefixSums::default();
             sums.compute(&target, &current);
             for _ in 0..100 {
-                let start = rng.random_range(0..h);
-                let end = rng.random_range(start..=h);
-                rng.fill(
-                    &mut current.pixels_mut()
-                        [start as usize * w as usize * 3..end as usize * w as usize * 3],
-                );
-                sums.update_rows(&target, &current, start..end);
-                let mut fresh = PrefixSums::default();
-                fresh.compute(&target, &current);
-                assert_eq!(sums, fresh);
-                for _ in 0..100 {
-                    let x1 = rng.random_range(0..w) as i32;
-                    let x2 = rng.random_range(x1..w as i32);
-                    let y1 = rng.random_range(0..h) as i32;
-                    let y2 = rng.random_range(y1..h as i32);
-                    let expected = (y1..=y2).map(|y| sums.error(y, x1, x2)).sum();
-                    assert_eq!(sums.rectangle_error((x1, y1, x2, y2)), Some(expected));
-                }
+                let x1 = rng.random_range(0..w) as i32;
+                let x2 = rng.random_range(x1..w as i32);
+                let y1 = rng.random_range(0..h) as i32;
+                let y2 = rng.random_range(y1..h as i32);
+                let expected = (y1..=y2).map(|y| sums.error(y, x1, x2)).sum();
+                assert_eq!(sums.rectangle_error((x1, y1, x2, y2)), expected);
             }
-            assert_eq!(sums.rectangle_error((1, 1, 0, 0)), Some(0));
+            assert_eq!(sums.rectangle_error((1, 1, 0, 0)), 0);
         }
     }
 
     #[test]
     fn dirty_prefix_rows_match_full_reference() {
         let mut rng = ChaCha8Rng::seed_from_u64(0xd127);
-        let target = random_buffer(&mut rng, 83, 37);
-        let mut current = random_buffer(&mut rng, 83, 37);
-        let mut actual = PrefixSums::default();
-        actual.compute(&target, &current);
-        for _ in 0..300 {
-            let start = rng.random_range(0..37);
-            let end = rng.random_range(start..=37);
-            rng.fill(&mut current.pixels_mut()[start as usize * 83 * 3..end as usize * 83 * 3]);
-            actual.update_rows(&target, &current, start..end);
-            let mut expected = PrefixSums::default();
-            expected.compute(&target, &current);
-            assert_eq!(actual, expected);
+        for (w, h) in [(2, 2), (3, 7), (83, 37)] {
+            let target = random_buffer(&mut rng, w, h);
+            let mut current = random_buffer(&mut rng, w, h);
+            let mut actual = PrefixSums::default();
+            actual.compute(&target, &current);
+            for _ in 0..300 {
+                let start = rng.random_range(0..h);
+                let end = rng.random_range(start..=h);
+                rng.fill(
+                    &mut current.pixels_mut()
+                        [start as usize * w as usize * 3..end as usize * w as usize * 3],
+                );
+                actual.update_rows(&target, &current, start..end);
+                let mut expected = PrefixSums::default();
+                expected.compute(&target, &current);
+                assert_eq!(actual, expected);
+            }
         }
         // Exercise wrapping without allocating a 16-million-pixel row.
         let mut row = [Entry::default(); 3];

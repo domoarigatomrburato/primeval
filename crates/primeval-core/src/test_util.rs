@@ -30,6 +30,7 @@ pub(crate) fn make_test_round(
     grid.compute(target, current);
     let grid = Box::leak(Box::new(grid));
     let round = SearchRound {
+        half_resolution: false,
         target,
         current,
         error_grid: grid,

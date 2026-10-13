@@ -417,6 +417,14 @@ fn fit_with<K: LineKernels>(
     }
 }
 
+/// Whether subtracting `before` already reaches the bounded energy's limit.
+/// For canvas errors that fit in i64, this is monotone in `before`: using
+/// an upper bound on the old error can only make rejection less likely.
+#[inline]
+pub(crate) fn before_reaches_limit(score: u64, before: u64, limit: Option<i64>) -> bool {
+    limit.is_some_and(|limit| (score as i64).wrapping_sub(before as i64) >= limit)
+}
+
 /// The energy of drawing `lines` in `fit.color`: `score` minus
 /// `fit.before` plus the new error of every covered pixel, in the wrapping
 /// arithmetic of [`energy`].
@@ -425,7 +433,7 @@ fn fit_with<K: LineKernels>(
 /// reaches it. Every old error is subtracted first and the new errors are
 /// non-negative, so from then on the total only grows, and stopping means
 /// the energy is at least `limit`. That holds while no partial total
-/// overflows `i64`, which needs a canvas of about `2^43` pixels.
+/// overflows `i64`; see the canvas precondition of [`PrefixSums`].
 fn energy_with<K: LineKernels>(
     target: &Buffer,
     current: &Buffer,
@@ -442,7 +450,7 @@ fn energy_with<K: LineKernels>(
     let reached = |total: i64| limit.is_some_and(|limit| total >= limit);
 
     let mut total = (score as i64).wrapping_sub(fit.before as i64);
-    if reached(total) {
+    if before_reaches_limit(score, fit.before, limit) {
         return None;
     }
     for line in lines {
@@ -1976,6 +1984,26 @@ mod tests {
     use crate::buffer::Buffer;
     use crate::color::Color;
     use crate::scanline::Scanline;
+
+    #[test]
+    fn before_error_rejection_is_monotone_and_matches_first_energy_exit() {
+        for score in [0, 1, 195075, i64::MAX as u64] {
+            for before in [0, score / 2, score] {
+                for upper in [before, before + (score - before) / 2, score] {
+                    for bound in [0, 1, score, i64::MAX as u64, i64::MAX as u64 + 1, u64::MAX] {
+                        let limit = i64::try_from(bound).ok();
+                        let expected = limit.is_some_and(|limit| {
+                            (score as i64).wrapping_sub(before as i64) >= limit
+                        });
+                        assert_eq!(before_reaches_limit(score, before, limit), expected);
+                        if before_reaches_limit(score, upper, limit) {
+                            assert!(before_reaches_limit(score, before, limit));
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn div_by_m_equivalence() {

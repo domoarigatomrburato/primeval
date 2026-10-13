@@ -245,6 +245,15 @@ impl CoverageGrid<'_> {
     }
 }
 
+/// The stroke grid's padding around its flattened points. A covered
+/// centre lies within `half_width + sqrt(2)/2` of a segment; the grid also
+/// allows for its minor-axis projection and one pixel of outward rounding.
+#[inline]
+pub(crate) fn stroke_grid_margin(half_width: f64) -> f64 {
+    let reach = half_width + std::f64::consts::FRAC_1_SQRT_2;
+    reach * std::f64::consts::SQRT_2 + 1.0
+}
+
 /// Strokes the polyline in `scratch.points` with the given half-width into
 /// `lines`, with the specified endpoint caps,
 /// sampling every pixel of a `w`×`h` canvas at its centre.
@@ -275,8 +284,7 @@ fn stroke_polyline(
     // covered centre lies at most `reach · √2` from its segment along the
     // minor axis, and at most `reach + √2 / 2` past its end along the major
     // one.
-    let reach = half_width + std::f64::consts::FRAC_1_SQRT_2;
-    let margin = reach * std::f64::consts::SQRT_2 + 1.0;
+    let margin = stroke_grid_margin(half_width);
     let (x_min, y_min, x_max, y_max) = points.iter().fold(
         (
             f64::INFINITY,
@@ -1051,6 +1059,24 @@ pub(crate) fn fill_polygon_direct(
     }
 }
 
+/// Inclusive grid bounds along one axis of a rotated ellipse, with the
+/// rasterizer's one-pixel sampling margin. `axis_rx` and `axis_ry` are the
+/// projections of the two radius axes (sin/cos for y, cos/sin for x).
+#[inline]
+pub(crate) fn rotated_ellipse_axis_bounds(
+    centre: f64,
+    rx: f64,
+    ry: f64,
+    axis_rx: f64,
+    axis_ry: f64,
+) -> (i32, i32) {
+    let half_extent = ((rx * axis_rx) * (rx * axis_rx) + (ry * axis_ry) * (ry * axis_ry)).sqrt();
+    (
+        (centre - half_extent - 1.0).floor() as i32,
+        (centre + half_extent + 1.0).ceil() as i32,
+    )
+}
+
 /// Fills a rotated ellipse directly into `lines` using 4x vertical antialiasing.
 ///
 /// The ellipse is centered at `(cx, cy)` with radii `rx` and `ry`, rotated by
@@ -1082,9 +1108,9 @@ pub(crate) fn fill_rotated_ellipse_direct(
     let coeff_b = 2.0 * cos_t * sin_t * (inv_rx2 - inv_ry2);
     let coeff_c = sin_t * sin_t * inv_rx2 + cos_t * cos_t * inv_ry2;
 
-    let half_height = ((rx * sin_t) * (rx * sin_t) + (ry * cos_t) * (ry * cos_t)).sqrt();
-    let iy_min = ((cy - half_height - 1.0).floor() as i32).max(0);
-    let iy_max = ((cy + half_height + 1.0).ceil() as i32).min(h - 1);
+    let (iy_min, iy_max) = rotated_ellipse_axis_bounds(cy, rx, ry, sin_t, cos_t);
+    let iy_min = iy_min.max(0);
+    let iy_max = iy_max.min(h - 1);
     let RowScratch { spans, edges, .. } = scratch;
 
     for iy in iy_min..=iy_max {

@@ -98,6 +98,7 @@ impl Coarse {
     pub(crate) fn round(&mut self, current: &Buffer) -> SearchRound<'_> {
         self.sync(current);
         SearchRound {
+            half_resolution: true,
             target: &self.target,
             current: &self.current,
             error_grid: &self.error_grid,
@@ -266,6 +267,7 @@ mod tests {
         let mut grid = ErrorGrid::new(width, height, 4, 4);
         grid.compute(&target, &current);
         let round = SearchRound {
+            half_resolution: false,
             target: &target,
             current: &current,
             error_grid: &grid,

@@ -63,11 +63,7 @@ impl State {
             return energy;
         }
 
-        let energy = worker.energy(
-            round,
-            |ctx| self.shape.rasterize(ctx),
-            i32::from(self.alpha),
-        );
+        let energy = worker.energy(round, &self.shape, i32::from(self.alpha));
         self.cached_energy = Some(energy);
         energy
     }

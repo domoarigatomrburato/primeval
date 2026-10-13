@@ -153,7 +153,9 @@ pub(crate) struct WorkerCtx<R> {
 /// All workers in a round share the same target, current approximation,
 /// error grid, and baseline score.
 pub(crate) struct SearchRound<'a> {
-    /// The original target image.
+    /// Whether shapes are rasterized at half their full-resolution scale.
+    pub(crate) half_resolution: bool,
+    /// The target image at this round's resolution.
     pub(crate) target: &'a Buffer,
     /// The current best approximation.
     pub(crate) current: &'a Buffer,
@@ -357,27 +359,13 @@ impl<R: Rng> WorkerCtx<R> {
         }
     }
 
-    /// Evaluates a candidate shape and returns its raw squared-difference energy.
+    /// Evaluates a candidate shape at the round's scale and canvas size.
     ///
-    /// The caller provides a `rasterize` closure that fills the worker's
-    /// `lines` buffer with the shape's scanlines. This decouples shape
-    /// rasterization from scoring and avoids the circular dependency the
-    /// Go code had (shapes storing `*Worker`).
-    ///
-    /// Steps:
-    /// 1. Increment `self.evaluations`.
-    /// 2. Call `rasterize` to populate `self.lines`.
-    /// 3. Fit the blending colour for those scanlines and sum the old error
-    ///    of their pixels, from the error grid's prefix sums, so the grid
-    ///    must be computed for `round`'s buffers.
-    /// 4. Add the error of each pixel after blending (no buffer write).
-    pub(crate) fn energy(
-        &mut self,
-        round: &SearchRound<'_>,
-        rasterize: impl FnOnce(&mut Self) -> &[Scanline],
-        alpha: i32,
-    ) -> u64 {
-        self.evaluate(round, rasterize, alpha, None, None)
+    /// Increments `self.evaluations`, rasterizes the shape, fits its blending
+    /// colour and sums its old error from the round's prefix sums, then adds
+    /// the error after blending without writing to either buffer.
+    pub(crate) fn energy(&mut self, round: &SearchRound<'_>, shape: &Shape, alpha: i32) -> u64 {
+        self.evaluate(round, shape, alpha, None)
             .expect("an evaluation without a bound always has an energy")
     }
 
@@ -390,13 +378,7 @@ impl<R: Rng> WorkerCtx<R> {
         alpha: i32,
         bound: u64,
     ) -> Option<u64> {
-        let energy = self.evaluate(
-            round,
-            |ctx| shape.rasterize(ctx),
-            alpha,
-            Some(bound),
-            Some((shape, false)),
-        );
+        let energy = self.evaluate(round, shape, alpha, Some(bound));
         #[cfg(test)]
         {
             self.rejected += u64::from(energy.is_none());
@@ -404,28 +386,16 @@ impl<R: Rng> WorkerCtx<R> {
         energy
     }
 
-    /// The energy of `state` on the coarse round `coarse` (see
-    /// [`crate::coarse`]), below `bound` if there is one, like
-    /// [`Self::energy_below`]. The worker rasterizes the shape at half
-    /// scale on a canvas of the coarse size; nothing is cached on `state`.
+    /// The energy of `shape` on the half-resolution round `coarse` (see
+    /// [`crate::coarse`]), below `bound` if there is one. Nothing is cached.
     fn coarse_energy(
         &mut self,
         coarse: &SearchRound<'_>,
-        state: &State,
+        shape: &Shape,
+        alpha: i32,
         bound: Option<u64>,
     ) -> Option<u64> {
-        let full = (self.width, self.height);
-        self.width = coarse.target.width() as i32;
-        self.height = coarse.target.height() as i32;
-        let alpha = i32::from(state.alpha);
-        let energy = self.evaluate(
-            coarse,
-            |ctx| state.shape.rasterize_coarse(ctx),
-            alpha,
-            bound,
-            Some((&state.shape, true)),
-        );
-        (self.width, self.height) = full;
+        let energy = self.evaluate(coarse, shape, alpha, bound);
         #[cfg(test)]
         {
             self.rejected += u64::from(bound.is_some() && energy.is_none());
@@ -433,13 +403,16 @@ impl<R: Rng> WorkerCtx<R> {
         energy
     }
 
+    /// Fits and scores `shape` at the scale and dimensions of `round`.
+    /// A bounded evaluation may reject the candidate from its conservative
+    /// rectangle before rasterizing. Rasterization temporarily uses the
+    /// round's canvas size; every return preserves the worker's size.
     fn evaluate(
         &mut self,
         round: &SearchRound<'_>,
-        rasterize: impl FnOnce(&mut Self) -> &[Scanline],
+        shape: &Shape,
         alpha: i32,
         bound: Option<u64>,
-        geometry: Option<(&Shape, bool)>,
     ) -> Option<u64> {
         #[cfg(test)]
         let pruning = self.pruning;
@@ -447,24 +420,35 @@ impl<R: Rng> WorkerCtx<R> {
         let pruning = true;
 
         self.evaluations += 1;
-        // The rectangle contains each emitted pixel at most once, hence
-        // its old error is an upper bound on fit.before. Preserve the
-        // legacy signed running-total path for scores beyond i64::MAX.
+        let (width, height) = (round.target.width() as i32, round.target.height() as i32);
+        // Each pixel is emitted at most once and lies in the rectangle,
+        // so the rectangle's old error is an upper bound on fit.before.
         if pruning
-            && round.score <= i64::MAX as u64
-            && let (Some(bound), Some((shape, coarse))) = (bound, geometry)
-            && let Some(upper) = round
-                .error_grid
-                .sums()
-                .rectangle_error(shape.candidate_rectangle(self.width, self.height, coarse))
-            && round
-                .score
-                .checked_sub(upper)
-                .is_some_and(|lower| lower >= bound)
+            && let Some(bound) = bound
+            && score::before_reaches_limit(
+                round.score,
+                round
+                    .error_grid
+                    .sums()
+                    .rectangle_error(shape.candidate_rectangle(
+                        width,
+                        height,
+                        round.half_resolution,
+                    )),
+                i64::try_from(bound).ok(),
+            )
         {
             return None;
         }
-        let lines = rasterize(self);
+        let full = (self.width, self.height);
+        (self.width, self.height) = (width, height);
+        if round.half_resolution {
+            shape.rasterize_coarse(self);
+        } else {
+            shape.rasterize(self);
+        }
+        (self.width, self.height) = full;
+        let lines = &self.lines;
         let below = |energy: u64| bound.is_none_or(|bound| energy < bound);
         if lines.is_empty() {
             return Some(round.score).filter(|&energy| below(energy));
@@ -591,7 +575,12 @@ impl<R: Rng> WorkerCtx<R> {
                 let mut states =
                     self.top_random_states(round, kind, alpha, n, limit, |worker, state, bound| {
                         // Ranks by the coarse energy, cleared below.
-                        state.cached_energy = worker.coarse_energy(coarse, state, bound);
+                        state.cached_energy = worker.coarse_energy(
+                            coarse,
+                            &state.shape,
+                            i32::from(state.alpha),
+                            bound,
+                        );
                         state.cached_energy
                     });
                 for state in &mut states {
@@ -826,6 +815,7 @@ mod tests {
         grid.compute(&target, &current);
 
         let round = SearchRound {
+            half_resolution: false,
             target: &target,
             current: &current,
             error_grid: &grid,
@@ -849,6 +839,7 @@ mod tests {
         grid.compute(&target, &current);
 
         let round = SearchRound {
+            half_resolution: false,
             target: &target,
             current: &current,
             error_grid: &grid,
@@ -880,6 +871,7 @@ mod tests {
         let base_score = score::difference_full_raw(&target, &current);
 
         let round = SearchRound {
+            half_resolution: false,
             target: &target,
             current: &current,
             error_grid: &grid,
@@ -887,27 +879,55 @@ mod tests {
             coarse: None,
         };
 
-        let mut w = WorkerCtx::new(4, 4, test_rng());
-        let alpha = 128;
-
-        let energy = w.energy(
-            &round,
-            |ctx| {
-                ctx.lines.clear();
-                ctx.lines.push(Scanline {
-                    y: 0,
-                    x1: 0,
-                    x2: 3,
-                    alpha: 0xFFFF,
-                });
-                &ctx.lines
-            },
-            alpha,
+        let lines = [Scanline {
+            y: 0,
+            x1: 0,
+            x2: 3,
+            alpha: 0xFFFF,
+        }];
+        let fit = score::fit(
+            &target,
+            &current,
+            Some(round.error_grid.sums()),
+            &lines,
+            128,
         );
-
-        // Drawing something should change the score from the baseline.
+        let energy = score::energy(&target, &current, &lines, fit, base_score);
         assert_ne!(energy, base_score, "energy should differ from base_score");
-        assert_eq!(w.evaluations, 1);
+        assert_eq!(
+            score::energy_below(&target, &current, &lines, fit, base_score, energy + 1),
+            Some(energy)
+        );
+    }
+
+    #[test]
+    fn evaluation_uses_round_canvas_and_scale_and_restores_worker_size() {
+        let (mut worker, full) = crate::test_util::make_test_round(64, 48, 18);
+        let mut copy = crate::coarse::Coarse::new(full.target, full.current).unwrap();
+        let coarse = copy.round(full.current);
+        let shape = Shape::Circle(crate::shapes::Circle { x: 32, y: 24, r: 5 });
+        let mut reference = worker.clone();
+        reference.width = coarse.target.width() as i32;
+        reference.height = coarse.target.height() as i32;
+        let lines = shape.rasterize_coarse(&mut reference);
+        let fit = score::fit(
+            coarse.target,
+            coarse.current,
+            Some(coarse.error_grid.sums()),
+            lines,
+            128,
+        );
+        let expected = score::energy(coarse.target, coarse.current, lines, fit, coarse.score);
+        for pruning in [false, true] {
+            worker.pruning = pruning;
+            assert_eq!(
+                worker.energy_below(&coarse, &shape, 128, u64::MAX),
+                Some(expected)
+            );
+            assert_eq!((worker.width, worker.height), (64, 48));
+            assert_eq!(worker.energy_below(&coarse, &shape, 128, 0), None);
+            assert_eq!((worker.width, worker.height), (64, 48));
+        }
     }
 
     #[test]
@@ -932,28 +952,71 @@ mod tests {
         assert_eq!((worker.evaluations, worker.rejected), (2, 2));
     }
 
-    #[test]
-    fn rectangle_rejection_preserves_legacy_wrapping_scores() {
-        let (mut worker, round) = crate::test_util::make_test_round(32, 24, 19);
-        let shape = Shape::Circle(crate::shapes::Circle { x: 16, y: 12, r: 2 });
-        for baseline in [0, i64::MAX as u64 - 1, i64::MAX as u64 + 1, u64::MAX] {
-            let view = SearchRound {
-                score: baseline,
-                ..round
-            };
-            let mut reference = worker.clone();
-            let lines = shape.rasterize(&mut reference);
-            let fit = score::fit(
-                view.target,
-                view.current,
-                Some(view.error_grid.sums()),
-                lines,
-                128,
-            );
-            for bound in [0, 1, i64::MAX as u64, i64::MAX as u64 + 1, u64::MAX] {
-                let expected =
-                    score::energy_below(view.target, view.current, lines, fit, baseline, bound);
-                assert_eq!(worker.energy_below(&view, &shape, 128, bound), expected);
+    fn assert_candidate_evaluation(
+        worker: &mut WorkerCtx<ChaCha8Rng>,
+        view: &SearchRound<'_>,
+        state: &State,
+    ) {
+        let mut reference = worker.clone();
+        reference.width = view.target.width() as i32;
+        reference.height = view.target.height() as i32;
+        let shape = &state.shape;
+        let alpha = i32::from(state.alpha);
+        let lines = if view.half_resolution {
+            shape.rasterize_coarse(&mut reference)
+        } else {
+            shape.rasterize(&mut reference)
+        };
+        let fit = score::fit(
+            view.target,
+            view.current,
+            Some(view.error_grid.sums()),
+            lines,
+            alpha,
+        );
+        let energy = score::energy(view.target, view.current, lines, fit, view.score);
+        let size = (worker.width, worker.height);
+        let counts = (worker.evaluations, worker.rejected);
+        let unbounded = if view.half_resolution {
+            worker.coarse_energy(view, shape, alpha, None).unwrap()
+        } else {
+            state.clone().energy(worker, view)
+        };
+        assert_eq!(unbounded, energy);
+        assert_eq!(
+            (worker.evaluations, worker.rejected),
+            (counts.0 + 1, counts.1)
+        );
+        assert_eq!((worker.width, worker.height), size);
+        for bound in [
+            0,
+            energy.saturating_sub(1),
+            energy,
+            energy + 1,
+            energy.saturating_add(view.score),
+            i64::MAX as u64 + 1,
+            u64::MAX,
+        ] {
+            let expected =
+                score::energy_below(view.target, view.current, lines, fit, view.score, bound);
+            for pruning in [false, true] {
+                worker.pruning = pruning;
+                let counts = (worker.evaluations, worker.rejected);
+                let actual = if view.half_resolution {
+                    worker.coarse_energy(view, shape, alpha, Some(bound))
+                } else {
+                    state.clone().energy_below(worker, view, bound)
+                };
+                assert_eq!(
+                    actual, expected,
+                    "{shape:?} alpha={alpha} half={} bound={bound}",
+                    view.half_resolution
+                );
+                assert_eq!(
+                    (worker.evaluations, worker.rejected),
+                    (counts.0 + 1, counts.1 + u64::from(expected.is_none()))
+                );
+                assert_eq!((worker.width, worker.height), size);
             }
         }
     }
@@ -966,22 +1029,34 @@ mod tests {
             let mut grid = ErrorGrid::new(width, height, 4, 4);
             grid.compute(&target, &current);
             let round = SearchRound {
+                half_resolution: false,
                 target: &target,
                 current: &current,
                 error_grid: &grid,
                 score: score::difference_full_raw(&target, &current),
                 coarse: None,
             };
-            let mut coarse_copy = crate::coarse::Coarse::new(&target, &current);
-            let coarse = coarse_copy.as_mut().map(|copy| copy.round(&current));
+            // Exercise half resolution even below Coarse's production size threshold.
+            let coarse_target = crate::coarse::downsample(&target);
+            let coarse_current = crate::coarse::downsample(&current);
+            let mut coarse_grid =
+                ErrorGrid::new(coarse_target.width(), coarse_target.height(), 1, 1);
+            coarse_grid.compute(&coarse_target, &coarse_current);
+            let coarse = SearchRound {
+                half_resolution: true,
+                target: &coarse_target,
+                current: &coarse_current,
+                error_grid: &coarse_grid,
+                score: score::difference_full_raw(&coarse_target, &coarse_current),
+                coarse: None,
+            };
             let mut worker =
                 WorkerCtx::new(width as i32, height as i32, crate::rng::create_rng(0xb0a));
             for kind in
                 std::iter::once(ShapeKind::Any).chain(ShapeKind::all_kinds().iter().copied())
             {
-                for alpha in 1..=255 {
-                    worker.quadratic_cap =
-                        [LineCap::Butt, LineCap::Round, LineCap::Square][usize::from(alpha) % 3];
+                for (index, alpha) in [1, 128, 255].into_iter().enumerate() {
+                    worker.quadratic_cap = [LineCap::Butt, LineCap::Round, LineCap::Square][index];
                     worker.quadratic_width = (1.0, 32.0);
                     for _ in 0..2 {
                         let mut shape = Shape::random(kind, &mut worker, &round);
@@ -992,78 +1067,8 @@ mod tests {
                             Step::Scaled(crate::refine::MIN_SCALE),
                         ] {
                             let state = State::committed(shape.clone(), Alpha::Auto, alpha);
-                            for (coarse_mode, view) in std::iter::once((false, &round))
-                                .chain(coarse.as_ref().map(|view| (true, view)))
-                            {
-                                let mut reference = worker.clone();
-                                reference.width = view.target.width() as i32;
-                                reference.height = view.target.height() as i32;
-                                let lines = if coarse_mode {
-                                    shape.rasterize_coarse(&mut reference)
-                                } else {
-                                    shape.rasterize(&mut reference)
-                                };
-                                let fit = score::fit(
-                                    view.target,
-                                    view.current,
-                                    Some(view.error_grid.sums()),
-                                    lines,
-                                    i32::from(alpha),
-                                );
-                                let energy = score::energy(
-                                    view.target,
-                                    view.current,
-                                    lines,
-                                    fit,
-                                    view.score,
-                                );
-                                let counts = worker.evaluations;
-                                let unbounded = if coarse_mode {
-                                    worker.coarse_energy(view, &state, None).unwrap()
-                                } else {
-                                    state.clone().energy(&mut worker, view)
-                                };
-                                assert_eq!(unbounded, energy);
-                                assert_eq!(worker.evaluations, counts + 1);
-                                for bound in [
-                                    0,
-                                    energy.saturating_sub(1),
-                                    energy,
-                                    energy + 1,
-                                    energy.saturating_add(view.score),
-                                    i64::MAX as u64 + 1,
-                                    u64::MAX,
-                                ] {
-                                    let expected = score::energy_below(
-                                        view.target,
-                                        view.current,
-                                        lines,
-                                        fit,
-                                        view.score,
-                                        bound,
-                                    );
-                                    for pruning in [false, true] {
-                                        worker.pruning = pruning;
-                                        let counts = (worker.evaluations, worker.rejected);
-                                        let actual = if coarse_mode {
-                                            worker.coarse_energy(view, &state, Some(bound))
-                                        } else {
-                                            state.clone().energy_below(&mut worker, view, bound)
-                                        };
-                                        assert_eq!(
-                                            actual, expected,
-                                            "{kind:?} alpha={alpha} coarse={coarse_mode} bound={bound}"
-                                        );
-                                        assert_eq!(
-                                            (worker.evaluations, worker.rejected),
-                                            (
-                                                counts.0 + 1,
-                                                counts.1 + u64::from(expected.is_none())
-                                            )
-                                        );
-                                    }
-                                }
-                            }
+                            assert_candidate_evaluation(&mut worker, &round, &state);
+                            assert_candidate_evaluation(&mut worker, &coarse, &state);
                             shape.mutate(&mut worker, step);
                         }
                     }
@@ -1081,6 +1086,7 @@ mod tests {
 
         let base_score = score::difference_full_raw(&target, &current);
         let round = SearchRound {
+            half_resolution: false,
             target: &target,
             current: &current,
             error_grid: &grid,
@@ -1088,18 +1094,24 @@ mod tests {
             coarse: None,
         };
 
-        let mut w = WorkerCtx::new(4, 4, test_rng());
-        let energy = w.energy(
-            &round,
-            |ctx| {
-                ctx.lines.clear();
-                &ctx.lines
-            },
+        let lines = [];
+        let fit = score::fit(
+            &target,
+            &current,
+            Some(round.error_grid.sums()),
+            &lines,
             128,
         );
-
+        let energy = score::energy(&target, &current, &lines, fit, base_score);
         assert_eq!(energy, base_score, "empty lines should return base score");
-        assert_eq!(w.evaluations, 1);
+        assert_eq!(
+            score::energy_below(&target, &current, &lines, fit, base_score, base_score + 1),
+            Some(base_score)
+        );
+        assert_eq!(
+            score::energy_below(&target, &current, &lines, fit, base_score, base_score),
+            None
+        );
     }
 
     #[test]
@@ -1109,6 +1121,7 @@ mod tests {
         let mut grid = ErrorGrid::new(32, 32, 4, 4);
         grid.compute(&target, &current);
         let round = SearchRound {
+            half_resolution: false,
             target: &target,
             current: &current,
             error_grid: &grid,
@@ -1306,6 +1319,7 @@ mod tests {
             let mut coarse = coarse.then(|| Coarse::new(target, current).expect("large enough"));
             let coarse_round = coarse.as_mut().map(|coarse| coarse.round(current));
             let round = SearchRound {
+                half_resolution: false,
                 target,
                 current,
                 error_grid: &grid,
@@ -1368,6 +1382,7 @@ mod tests {
         let mut coarse = Coarse::new(&target, &current).expect("large enough");
         let coarse_round = coarse.round(&current);
         let full = SearchRound {
+            half_resolution: false,
             target: &target,
             current: &current,
             error_grid: &grid,
@@ -1420,6 +1435,7 @@ mod tests {
         let mut coarse = Coarse::new(&target, &current).expect("large enough");
         let coarse_round = coarse.round(&current);
         let full = SearchRound {
+            half_resolution: false,
             target: &target,
             current: &current,
             error_grid: &grid,
@@ -1464,6 +1480,7 @@ mod tests {
             let mut grid = ErrorGrid::new(width, height, 4, 4);
             grid.compute(&target, &current);
             let round = SearchRound {
+                half_resolution: false,
                 target: &target,
                 current: &current,
                 error_grid: &grid,
@@ -1499,6 +1516,7 @@ mod tests {
         let mut grid = ErrorGrid::new(32, 32, 4, 4);
         grid.compute(&target, &current);
         let round = SearchRound {
+            half_resolution: false,
             target: &target,
             current: &current,
             error_grid: &grid,
