@@ -128,7 +128,6 @@ function writeFixtureProject(version) {
   const pkg = {
     name: PACKAGE_NAME,
     version,
-    optionalDependencies: { [PLATFORM_PACKAGE]: version },
     napi: { binaryName: "primeval-node", targets: ["x86_64-unknown-linux-gnu"] },
   };
   fs.writeFileSync(path.join(dir, "package.json"), `${JSON.stringify(pkg, null, 2)}\n`);
@@ -150,10 +149,8 @@ function writePackageLock(dir, version) {
     name: PACKAGE_NAME,
     version,
     lockfileVersion: 3,
-    packages: {
-      "": { name: PACKAGE_NAME, version, optionalDependencies: { [PLATFORM_PACKAGE]: version } },
-      [`node_modules/${PLATFORM_PACKAGE}`]: { version },
-    },
+    // npm cannot lock a platform package of a version not on the registry yet.
+    packages: { "": { name: PACKAGE_NAME, version } },
   };
   fs.writeFileSync(path.join(dir, "package-lock.json"), `${JSON.stringify(lock, null, 2)}\n`);
 }
@@ -198,6 +195,12 @@ test("bump-version also bumps the cargo workspace version and Cargo.lock", () =>
       "0.2.0",
     );
     assert.doesNotThrow(() => validateCargoVersions("0.2.0", readCargoWorkspace(dir)));
+    // The platform packages are added at publish time, never by the bump.
+    const pkg = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8"));
+    assert.equal(pkg.version, "0.2.0");
+    assert.equal(pkg.optionalDependencies, undefined);
+    const lock = JSON.parse(fs.readFileSync(path.join(dir, "package-lock.json"), "utf8"));
+    assert.equal(lock.version, "0.2.0");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -222,6 +225,55 @@ test("bump-version restores every file when the cargo step fails", () => {
       files.map((file) => fs.readFileSync(path.join(dir, file), "utf8")),
       before,
     );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("bump-version refuses a package.json with committed platform packages", () => {
+  const dir = writeFixtureProject("0.1.1");
+  const pkg = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8"));
+  fs.writeFileSync(
+    path.join(dir, "package.json"),
+    `${JSON.stringify({ ...pkg, optionalDependencies: { [PLATFORM_PACKAGE]: "0.1.1" } }, null, 2)}\n`,
+  );
+  const files = ["package.json", "package-lock.json", "Cargo.toml", "Cargo.lock"];
+  const before = files.map((file) => fs.readFileSync(path.join(dir, file), "utf8"));
+  try {
+    assert.throws(
+      () =>
+        bumpPackageVersion(
+          "0.2.0",
+          path.join(dir, "package.json"),
+          path.join(dir, "package-lock.json"),
+          fakeTools(dir),
+        ),
+      /added at publish time/,
+    );
+    assert.deepEqual(
+      files.map((file) => fs.readFileSync(path.join(dir, file), "utf8")),
+      before,
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("check-package rejects committed platform packages", () => {
+  const dir = writeFixtureProject("0.1.1");
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8"));
+    fs.writeFileSync(
+      path.join(dir, "package.json"),
+      `${JSON.stringify({ ...pkg, optionalDependencies: { [PLATFORM_PACKAGE]: "0.1.1" } })}\n`,
+    );
+    const result = spawnSync(
+      process.execPath,
+      ["scripts/napi-targets.mjs", "check-package", path.join(dir, "package.json")],
+      { cwd: repoRoot, encoding: "utf8" },
+    );
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /optionalDependencies.*added at publish time/);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

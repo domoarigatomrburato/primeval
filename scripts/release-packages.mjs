@@ -5,15 +5,22 @@
 //   node scripts/release-packages.mjs verify <tag>
 //   node scripts/release-packages.mjs verify-root
 //
-// `publish` first checks that the root package is complete (`verify-root`),
-// then skips every package whose version is already on the registry and
-// publishes the root package last, so a failed run can simply be re-run.
-// `verify` fails unless every package is on the registry at the tag version.
+// `publish` first adds the platform packages to the root package.json as
+// `optionalDependencies` (the committed file must not list them: npm cannot
+// lock a version that is not on the registry yet), checks that the root
+// package is complete (`verify-root`) and that its tarball lists them, then
+// skips every package whose version is already on the registry and publishes
+// the root package last, so a failed run can simply be re-run. It restores the
+// committed package.json when it is done, and publishes without lifecycle
+// scripts: `npm run prepare:package` must have run.
+// `verify` fails unless every package is on the registry at the tag version
+// and the published root package lists every platform package.
 // `verify-root` fails unless the root tarball (`npm pack --dry-run`) has
 // every file both entries need at runtime, the wasm builds included; it
 // expects `npm run prepare:package` and `npm run build:wasm` to have run.
 import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -37,6 +44,34 @@ export function releasePackages(pkg, npmDir, rootDir) {
     }),
     { name: packageName, version, dir: rootDir },
   ];
+}
+
+/**
+ * The root package.json as published: `pkg` (the committed file, which must
+ * not list them) with every platform package of `napi.targets`, in that
+ * order, at the package version as `optionalDependencies`.
+ */
+export function withPlatformDependencies(pkg) {
+  const { expectedOptionalDependencies, version } = validatePackageMetadata(pkg);
+  return {
+    ...pkg,
+    optionalDependencies: Object.fromEntries(
+      expectedOptionalDependencies.map((name) => [name, version]),
+    ),
+  };
+}
+
+/** Fails unless `actual` has exactly the `expected` dependencies, in any order. */
+export function verifyPlatformDependencies(label, expected, actual) {
+  const normalize = (dependencies) =>
+    JSON.stringify(Object.entries(dependencies ?? {}).sort(([a], [b]) => a.localeCompare(b)));
+  if (normalize(actual) !== normalize(expected)) {
+    const show = (dependencies) =>
+      Object.keys(dependencies ?? {}).length === 0 ? "(none)" : JSON.stringify(dependencies);
+    throw new Error(
+      `${label} has optionalDependencies ${show(actual)}, expected ${show(expected)}`,
+    );
+  }
 }
 
 /** The `./snippets/...` files a wasm-bindgen glue imports, relative to its directory. */
@@ -108,12 +143,32 @@ function packedRootFiles(rootDir) {
   return summary.files.map((file) => file.path);
 }
 
-function verifyRepositoryRootPackage() {
-  verifyRootPackage(
-    requiredRootFiles(readRootPackageInputs(REPO_ROOT)),
-    packedRootFiles(REPO_ROOT),
-  );
+function verifyRepositoryRootPackage(rootDir = REPO_ROOT) {
+  verifyRootPackage(requiredRootFiles(readRootPackageInputs(rootDir)), packedRootFiles(rootDir));
   console.log("verified the root package contents");
+}
+
+/**
+ * The package.json inside the root tarball, as `npm pack` (without lifecycle
+ * scripts) writes it; the tarball goes to a temporary directory and is removed.
+ */
+export function packedRootManifest(rootDir) {
+  const destination = fs.mkdtempSync(path.join(os.tmpdir(), "primeval-root-pack-"));
+  try {
+    const output = execFileSync(
+      npmCommand(),
+      ["pack", "--json", "--ignore-scripts", "--pack-destination", destination],
+      { cwd: rootDir, encoding: "utf8" },
+    );
+    const [{ filename }] = JSON.parse(output);
+    return JSON.parse(
+      execFileSync("tar", ["-xzOf", path.join(destination, filename), "package/package.json"], {
+        encoding: "utf8",
+      }),
+    );
+  } finally {
+    fs.rmSync(destination, { recursive: true, force: true });
+  }
 }
 
 export function assertTagMatchesVersion(tag, version) {
@@ -165,6 +220,35 @@ export function publishPackages(packages, { isPublished, publish, log }) {
   return actions;
 }
 
+/**
+ * Publishes a release from the root package in `rootDir`: writes the
+ * package.json with the platform packages (`withPlatformDependencies`), then,
+ * before publishing anything, checks the root package (`verifyRoot`) and that
+ * its tarball (`packedManifest`) lists exactly them; then `publishPackages`.
+ * The committed package.json is restored in every case.
+ */
+export function publishRelease({ rootDir, npmDir, tag }, tools) {
+  const packageJsonPath = path.join(rootDir, "package.json");
+  const committedSource = fs.readFileSync(packageJsonPath, "utf8");
+  const pkg = JSON.parse(committedSource);
+  assertTagMatchesVersion(tag, pkg.version);
+  const packages = releasePackages(pkg, npmDir, rootDir);
+  const published = withPlatformDependencies(pkg);
+
+  fs.writeFileSync(packageJsonPath, `${JSON.stringify(published, null, 2)}\n`);
+  try {
+    tools.verifyRoot(rootDir);
+    verifyPlatformDependencies(
+      "the packed root package",
+      published.optionalDependencies,
+      tools.packedManifest(rootDir).optionalDependencies,
+    );
+    return publishPackages(packages, tools);
+  } finally {
+    fs.writeFileSync(packageJsonPath, committedSource);
+  }
+}
+
 /** Waits for every package to be visible on the registry; fails with the missing ones. */
 export async function verifyPublished(
   packages,
@@ -189,6 +273,37 @@ export async function verifyPublished(
   );
 }
 
+/**
+ * Waits for every package of the release of `pkg` (the committed package.json)
+ * to be on the registry (`verifyPublished`), then checks that the published
+ * root package lists every platform package (`rootDependencies`).
+ */
+export async function verifyRelease(pkg, tag, { rootDependencies, ...tools }) {
+  assertTagMatchesVersion(tag, pkg.version);
+  // Directories are irrelevant for verification.
+  const packages = releasePackages(pkg, "", "");
+  await verifyPublished(packages, tools);
+  verifyPlatformDependencies(
+    "the published root package",
+    withPlatformDependencies(pkg).optionalDependencies,
+    rootDependencies(packages.at(-1)),
+  );
+  (tools.log ?? console.log)(`verified the optionalDependencies of ${pkg.name}@${pkg.version}`);
+}
+
+/**
+ * Interprets `npm view <name>@<version> optionalDependencies --json`: the map,
+ * or `{}` when the version has none. Any failure is an error: the caller has
+ * already seen the version on the registry.
+ */
+export function parseNpmViewDependencies({ status, stdout, stderr = "" }) {
+  if (status !== 0) {
+    throw new Error(`npm view failed with status ${status}: ${stderr.trim()}`);
+  }
+  const output = stdout.trim();
+  return output === "" ? {} : JSON.parse(output);
+}
+
 function npmCommand() {
   return process.platform === "win32" ? "npm.cmd" : "npm";
 }
@@ -206,8 +321,25 @@ function npmIsPublished({ name, version }) {
   return parseNpmView(version, result);
 }
 
+function npmRootDependencies({ name, version }) {
+  const result = spawnSync(
+    npmCommand(),
+    ["view", `${name}@${version}`, "optionalDependencies", "--json", "--prefer-online"],
+    { encoding: "utf8" },
+  );
+  if (result.error) {
+    throw result.error;
+  }
+  return parseNpmViewDependencies(result);
+}
+
+// Without lifecycle scripts: the root package's `prepack` would rebuild dist/
+// and binding.js after the checks, and the binding generator refuses a
+// package.json that lists the platform packages.
+export const NPM_PUBLISH_ARGS = ["publish", "--access", "public", "--ignore-scripts"];
+
 function npmPublish({ dir }) {
-  execFileSync(npmCommand(), ["publish", "--access", "public"], { cwd: dir, stdio: "inherit" });
+  execFileSync(npmCommand(), NPM_PUBLISH_ARGS, { cwd: dir, stdio: "inherit" });
 }
 
 async function main(argv) {
@@ -219,22 +351,22 @@ async function main(argv) {
       if (!firstArg) {
         throw new Error("publish requires the npm packages directory");
       }
-      assertTagMatchesVersion(secondArg, pkg.version);
-      // Before anything is published: an incomplete root package fails the release.
-      verifyRepositoryRootPackage();
-      const packages = releasePackages(pkg, path.resolve(firstArg), REPO_ROOT);
-      publishPackages(packages, {
-        isPublished: npmIsPublished,
-        publish: npmPublish,
-        log: console.log,
-      });
+      publishRelease(
+        { rootDir: REPO_ROOT, npmDir: path.resolve(firstArg), tag: secondArg },
+        {
+          verifyRoot: verifyRepositoryRootPackage,
+          packedManifest: packedRootManifest,
+          isPublished: npmIsPublished,
+          publish: npmPublish,
+          log: console.log,
+        },
+      );
       break;
     }
     case "verify": {
-      assertTagMatchesVersion(firstArg, pkg.version);
-      // Directories are irrelevant for verification.
-      await verifyPublished(releasePackages(pkg, REPO_ROOT, REPO_ROOT), {
+      await verifyRelease(pkg, firstArg, {
         isPublished: npmIsPublished,
+        rootDependencies: npmRootDependencies,
       });
       break;
     }

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 
@@ -7,13 +8,20 @@ import { OUTPUT_FILES, VARIANTS } from "../../scripts/build-wasm.mjs";
 import {
   assertTagMatchesVersion,
   glueSnippets,
+  NPM_PUBLISH_ARGS,
+  packedRootManifest,
   parseNpmView,
+  parseNpmViewDependencies,
   publishPackages,
+  publishRelease,
   readRootPackageInputs,
   releasePackages,
   requiredRootFiles,
+  verifyPlatformDependencies,
   verifyPublished,
+  verifyRelease,
   verifyRootPackage,
+  withPlatformDependencies,
 } from "../../scripts/release-packages.mjs";
 
 const repoRoot = process.cwd();
@@ -21,11 +29,12 @@ const repoRoot = process.cwd();
 const PKG = {
   name: "@aleburato/primeval",
   version: "1.2.3",
-  optionalDependencies: {
-    "@aleburato/primeval-darwin-arm64": "1.2.3",
-    "@aleburato/primeval-linux-x64-gnu": "1.2.3",
-  },
   napi: { targets: ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"] },
+};
+
+const PLATFORM_DEPENDENCIES = {
+  "@aleburato/primeval-darwin-arm64": "1.2.3",
+  "@aleburato/primeval-linux-x64-gnu": "1.2.3",
 };
 
 const PACKAGES = releasePackages(PKG, "/repo/npm", "/repo");
@@ -149,6 +158,221 @@ test("post-publish verification fails and names every missing package", async ()
     /not on the registry: @aleburato\/primeval-linux-x64-gnu@1\.2\.3, @aleburato\/primeval@1\.2\.3/,
   );
   assert.deepEqual(sleeps, [10, 10]);
+});
+
+// --- Platform packages as optionalDependencies, added at publish time ---
+
+test("withPlatformDependencies adds every platform package at the version, in napi.targets order", () => {
+  const before = structuredClone(PKG);
+  const published = withPlatformDependencies(PKG);
+  assert.deepEqual(published, { ...PKG, optionalDependencies: PLATFORM_DEPENDENCIES });
+  assert.deepEqual(Object.keys(published.optionalDependencies), [
+    "@aleburato/primeval-darwin-arm64",
+    "@aleburato/primeval-linux-x64-gnu",
+  ]);
+  assert.deepEqual(PKG, before, "the input is not modified");
+});
+
+test("withPlatformDependencies refuses a package.json that already lists them", () => {
+  assert.throws(
+    () => withPlatformDependencies({ ...PKG, optionalDependencies: PLATFORM_DEPENDENCIES }),
+    /added at publish time/,
+  );
+});
+
+test("platform dependency verification wants exactly the expected map", () => {
+  assert.doesNotThrow(() =>
+    verifyPlatformDependencies("the packed root package", PLATFORM_DEPENDENCIES, {
+      "@aleburato/primeval-linux-x64-gnu": "1.2.3",
+      "@aleburato/primeval-darwin-arm64": "1.2.3",
+    }),
+  );
+  for (const actual of [
+    undefined,
+    {},
+    { "@aleburato/primeval-darwin-arm64": "1.2.3" },
+    { ...PLATFORM_DEPENDENCIES, "@aleburato/primeval-darwin-arm64": "1.2.2" },
+    { ...PLATFORM_DEPENDENCIES, extra: "1.0.0" },
+  ]) {
+    assert.throws(
+      () => verifyPlatformDependencies("the packed root package", PLATFORM_DEPENDENCIES, actual),
+      /^Error: the packed root package has optionalDependencies .*, expected /,
+      JSON.stringify(actual),
+    );
+  }
+});
+
+test("npm view of optionalDependencies reads a map, nothing, or a failure", () => {
+  assert.deepEqual(
+    parseNpmViewDependencies({ status: 0, stdout: `${JSON.stringify(PLATFORM_DEPENDENCIES)}\n` }),
+    PLATFORM_DEPENDENCIES,
+  );
+  // npm prints nothing for a field the version does not have.
+  assert.deepEqual(parseNpmViewDependencies({ status: 0, stdout: "\n", stderr: "" }), {});
+  assert.throws(
+    () => parseNpmViewDependencies({ status: 1, stdout: "", stderr: "npm error code E404\n" }),
+    /npm view failed with status 1/,
+  );
+});
+
+test("the root package is published without lifecycle scripts", () => {
+  // prepack would rebuild dist/ and binding.js between the root package
+  // check and the publish, from a package.json that lists the platform
+  // packages, which the binding generator refuses.
+  assert.deepEqual(NPM_PUBLISH_ARGS, ["publish", "--access", "public", "--ignore-scripts"]);
+});
+
+function releaseFixture(pkg = PKG) {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "primeval-release-"));
+  const source = `${JSON.stringify(pkg, null, 2)}\n`;
+  fs.writeFileSync(path.join(rootDir, "package.json"), source);
+  const readPackage = () => JSON.parse(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"));
+  const events = [];
+  const tools = {
+    verifyRoot: (dir) => {
+      assert.equal(dir, rootDir);
+      events.push(["verifyRoot", readPackage().optionalDependencies]);
+    },
+    packedManifest: (dir) => {
+      assert.equal(dir, rootDir);
+      events.push(["packedManifest"]);
+      return readPackage();
+    },
+    isPublished: () => false,
+    publish: ({ name, dir }) => {
+      const onDisk = dir === rootDir ? readPackage().optionalDependencies : undefined;
+      events.push(["publish", name, onDisk]);
+    },
+    log: () => {},
+  };
+  return { rootDir, source, events, tools };
+}
+
+test("publish adds the platform packages before it checks and publishes anything", () => {
+  const { rootDir, source, events, tools } = releaseFixture();
+  try {
+    const actions = publishRelease({ rootDir, npmDir: "/repo/npm", tag: "v1.2.3" }, tools);
+    assert.deepEqual(events, [
+      ["verifyRoot", PLATFORM_DEPENDENCIES],
+      ["packedManifest"],
+      ["publish", "@aleburato/primeval-darwin-arm64", undefined],
+      ["publish", "@aleburato/primeval-linux-x64-gnu", undefined],
+      ["publish", "@aleburato/primeval", PLATFORM_DEPENDENCIES],
+    ]);
+    assert.deepEqual(
+      actions.map(({ name, dir }) => [name, dir]),
+      [
+        ["@aleburato/primeval-darwin-arm64", "/repo/npm/darwin-arm64"],
+        ["@aleburato/primeval-linux-x64-gnu", "/repo/npm/linux-x64-gnu"],
+        ["@aleburato/primeval", rootDir],
+      ],
+    );
+    // The committed package.json is back, so later steps validate it as committed.
+    assert.equal(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"), source);
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test("publish fails before publishing anything when the packed root misses them", () => {
+  const { rootDir, source, events, tools } = releaseFixture();
+  try {
+    assert.throws(
+      () =>
+        publishRelease(
+          { rootDir, npmDir: "/repo/npm", tag: "v1.2.3" },
+          { ...tools, packedManifest: () => PKG },
+        ),
+      /the packed root package has optionalDependencies \(none\), expected /,
+    );
+    assert.deepEqual(
+      events.filter(([event]) => event === "publish"),
+      [],
+    );
+    assert.equal(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"), source);
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test("publish fails before publishing anything when the root package check fails", () => {
+  const { rootDir, source, events, tools } = releaseFixture();
+  try {
+    assert.throws(
+      () =>
+        publishRelease(
+          { rootDir, npmDir: "/repo/npm", tag: "v1.2.3" },
+          {
+            ...tools,
+            verifyRoot: () => {
+              throw new Error("the root package is missing dist/index.js");
+            },
+          },
+        ),
+      /missing dist\/index\.js/,
+    );
+    assert.deepEqual(events, []);
+    assert.equal(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"), source);
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test("publish refuses a mismatched tag or committed platform packages, leaving package.json alone", () => {
+  for (const [pkg, tag, error] of [
+    [PKG, "v1.2.4", /v1\.2\.4/],
+    [{ ...PKG, optionalDependencies: PLATFORM_DEPENDENCIES }, "v1.2.3", /added at publish time/],
+  ]) {
+    const { rootDir, source, events, tools } = releaseFixture(pkg);
+    try {
+      assert.throws(() => publishRelease({ rootDir, npmDir: "/repo/npm", tag }, tools), error);
+      assert.deepEqual(events, []);
+      assert.equal(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"), source);
+    } finally {
+      fs.rmSync(rootDir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("release verification also checks the root package's published optionalDependencies", async () => {
+  const views = [];
+  const tools = {
+    isPublished: () => true,
+    rootDependencies: ({ name, version }) => {
+      views.push(`${name}@${version}`);
+      return PLATFORM_DEPENDENCIES;
+    },
+    sleep: async () => {},
+    log: () => {},
+  };
+  await verifyRelease(PKG, "v1.2.3", tools);
+  assert.deepEqual(views, ["@aleburato/primeval@1.2.3"]);
+
+  await assert.rejects(
+    verifyRelease(PKG, "v1.2.3", { ...tools, rootDependencies: () => ({}) }),
+    /the published root package has optionalDependencies \(none\), expected /,
+  );
+  await assert.rejects(verifyRelease(PKG, "v1.2.4", tools), /v1\.2\.4/);
+});
+
+test("the packed root manifest is read from a real tarball", () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "primeval-packed-manifest-"));
+  try {
+    const pkg = {
+      ...withPlatformDependencies(PKG),
+      files: ["index.js"],
+      scripts: { prepack: "exit 1" },
+    };
+    fs.writeFileSync(path.join(rootDir, "package.json"), `${JSON.stringify(pkg, null, 2)}\n`);
+    fs.writeFileSync(path.join(rootDir, "index.js"), "export {};\n");
+    const manifest = packedRootManifest(rootDir);
+    assert.equal(manifest.name, PKG.name);
+    assert.deepEqual(manifest.optionalDependencies, PLATFORM_DEPENDENCIES);
+    // No tarball is left behind.
+    assert.deepEqual(fs.readdirSync(rootDir).sort(), ["index.js", "package.json"]);
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
 });
 
 // --- Root package contents ---

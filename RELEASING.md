@@ -8,6 +8,8 @@ Release automation is defined in [.github/workflows/quality.yml](.github/workflo
 
 The npm package, the platform packages, and the Cargo crates share one version. `package.json` is the source; the Cargo workspace carries it in `[workspace.package]`, and every crate inherits it with `version.workspace = true`. `npm run check:napi-targets` (part of `npm run verify`) fails if they drift.
 
+The root package depends on the platform packages through `optionalDependencies`, but only as published: `scripts/release-packages.mjs publish` adds them, one per `napi.targets` entry at the package version, just before it publishes. The committed `package.json` and `package-lock.json` must not list them, and `npm run check:napi-targets` fails if they do: at bump time the new platform versions are not on the registry yet, so npm cannot lock them and `npm ci` would refuse the lockfile.
+
 Versioning restarts at the first real release. A `v0.1.1` tag existed but nothing was ever published from it, and it has been deleted; give the first release a version that was never tagged (for example `0.1.2`).
 
 ## Before Tagging
@@ -21,7 +23,7 @@ npm run verify
 
 ## Version Bump
 
-Use the repository helper, which keeps `package.json`, `package-lock.json`, the platform package versions, `Cargo.toml`, and `Cargo.lock` aligned with `napi.targets`:
+Use the repository helper, which sets the version in `package.json`, regenerates `package-lock.json` with npm, and updates `Cargo.toml` and `Cargo.lock`; it does not add the platform packages (see Versioning):
 
 ```bash
 npm run bump:version -- 0.1.2
@@ -56,8 +58,8 @@ When a `v*` tag is pushed, [.github/workflows/napi-prebuilds.yml](.github/workfl
 6. Build both WebAssembly builds for the browser entry with `npm run build:wasm`, on the pinned stable toolchain, the dated nightly, and the matching wasm-bindgen-cli (all pinned through `scripts/build-wasm.mjs`). The build fails if the threaded `.wasm` does not import a shared memory, the single-threaded one does, or either is over the size budget in that script.
 7. Assemble per-platform npm packages and verify that every expected package contains the correct `.node` payload.
 8. Put the wasm build in `wasm/`, build the root package, and check with `scripts/release-packages.mjs verify-root` (run by `publish` before it publishes anything, and by `npm run verify:wasm` on every pull request) that its tarball has every `dist/` module and every wasm file both builds need. A missing or incomplete wasm build fails the release here.
-9. Publish with `scripts/release-packages.mjs publish`: every platform package, then the root package last, with provenance. A package whose version is already on the registry is skipped.
-10. Verify with `npm view` that every package is on the registry at the tag version, and fail otherwise.
+9. Publish with `scripts/release-packages.mjs publish`. It first writes the platform packages into the workspace's `package.json` as `optionalDependencies` and, before publishing anything, checks the root package (step 8) and that its tarball lists exactly them. It then publishes every platform package, then the root package last, with provenance and without lifecycle scripts (the root package was built in step 8), and restores the committed `package.json`. A package whose version is already on the registry is skipped.
+10. Verify with `npm view` that every package is on the registry at the tag version and that the published root package's `optionalDependencies` list exactly the platform packages at that version, and fail otherwise.
 11. Create the GitHub Release with generated notes, unless it already exists.
 
 ## First Release
@@ -67,7 +69,7 @@ npm trusted publishing (OIDC) can only be set up for a package that already exis
 1. On npmjs.com, create a granular access token with read and write access to the `@aleburato` scope and a short expiry, for example 7 days.
 2. Add it to the repository as the Actions secret `NPM_TOKEN`. The publish step passes it to npm as `NODE_AUTH_TOKEN`.
 3. Release as described above.
-4. On npmjs.com, add a trusted publisher to each of the six packages (`@aleburato/primeval` and the five platform packages in `package.json` `optionalDependencies`): repository `domoarigatomrburato/primeval`, workflow `napi-prebuilds.yml`.
+4. On npmjs.com, add a trusted publisher to each of the six packages (`@aleburato/primeval` and the five platform packages, one per `package.json` `napi.targets` entry): repository `domoarigatomrburato/primeval`, workflow `napi-prebuilds.yml`.
 5. Delete the `NPM_TOKEN` secret and revoke the token. Later releases publish through OIDC, which needs npm 11.5.1 or newer on the runner.
 
 ## Re-running A Failed Release

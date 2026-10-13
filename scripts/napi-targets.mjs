@@ -80,30 +80,29 @@ export function readPackageLock(packageLockPath = DEFAULT_PACKAGE_LOCK) {
   return JSON.parse(fs.readFileSync(packageLockPath, "utf8"));
 }
 
+/**
+ * Validates the committed package.json: name, version and napi.targets. The
+ * platform packages derived from napi.targets are the root package's
+ * `optionalDependencies` only in the published package: `release-packages.mjs
+ * publish` adds them at publish time, because npm cannot lock a platform
+ * package of a version that is not on the registry yet, and `npm ci` then
+ * refuses the lockfile. So the committed package.json must not list them.
+ */
 export function validatePackageMetadata(pkg) {
   const packageName = requiredString(pkg.name, "package.json name");
   const version = requiredString(pkg.version, "package.json version");
   const targets = requiredTargets(pkg.napi?.targets);
   const expectedOptionalDependencies = optionalDependencyNamesForTargets(packageName, targets);
-  const actualOptionalDependencies = Object.keys(pkg.optionalDependencies ?? {}).sort();
+  const committed = Object.keys(pkg.optionalDependencies ?? {}).filter((dependencyName) =>
+    isPlatformPackage(packageName, dependencyName),
+  );
 
-  if (
-    JSON.stringify(actualOptionalDependencies) !==
-    JSON.stringify([...expectedOptionalDependencies].sort())
-  ) {
+  if (committed.length > 0) {
     throw new Error(
-      `optionalDependencies drift from napi.targets; expected ${expectedOptionalDependencies.join(
+      `package.json optionalDependencies must not list the platform packages (${committed.join(
         ", ",
-      )}, got ${actualOptionalDependencies.join(", ") || "(none)"}`,
+      )}): they are added at publish time, from napi.targets, by scripts/release-packages.mjs publish`,
     );
-  }
-
-  for (const dependencyName of expectedOptionalDependencies) {
-    if (pkg.optionalDependencies[dependencyName] !== version) {
-      throw new Error(
-        `optional dependency ${dependencyName} must match package version ${version}`,
-      );
-    }
   }
 
   return {
@@ -114,6 +113,7 @@ export function validatePackageMetadata(pkg) {
   };
 }
 
+/** Validates package-lock.json against the committed package.json; it must not lock the platform packages. */
 export function validatePackageLock(pkg, packageLock) {
   const { packageName, version, expectedOptionalDependencies } = validatePackageMetadata(pkg);
   const lockName = requiredString(packageLock.name, "package-lock.json name");
@@ -144,29 +144,20 @@ export function validatePackageLock(pkg, packageLock) {
     );
   }
 
-  const expectedOptionalDependencyVersions = optionalDependencyVersionMap(
-    expectedOptionalDependencies,
-    version,
-  );
-  const rootOptionalDependencies = normalizeDependencyMap(rootPackage.optionalDependencies);
-
-  if (
-    JSON.stringify(rootOptionalDependencies) !==
-    JSON.stringify(normalizeDependencyMap(expectedOptionalDependencyVersions))
-  ) {
-    throw new Error(
-      `package-lock.json root optionalDependencies must match package.json for version ${version}`,
-    );
+  for (const dependencyName of Object.keys(rootPackage.optionalDependencies ?? {})) {
+    if (isPlatformPackage(packageName, dependencyName)) {
+      throw new Error(
+        `package-lock.json root optionalDependencies must not list ${dependencyName}; regenerate the lockfile with npm install --package-lock-only --ignore-scripts`,
+      );
+    }
   }
 
-  for (const dependencyName of expectedOptionalDependencies) {
-    const dependencyPackage = requiredObject(
-      packageLock.packages?.[`node_modules/${dependencyName}`],
-      `package-lock.json entry for ${dependencyName}`,
-    );
-
-    if (dependencyPackage.version !== version) {
-      throw new Error(`package-lock.json entry ${dependencyName} must use version ${version}`);
+  for (const entry of Object.keys(packageLock.packages ?? {})) {
+    const dependencyName = entry.match(/(?:^|\/)node_modules\/((?:@[^/]+\/)?[^/]+)$/)?.[1];
+    if (dependencyName && isPlatformPackage(packageName, dependencyName)) {
+      throw new Error(
+        `package-lock.json must not contain ${entry}; regenerate the lockfile with npm install --package-lock-only --ignore-scripts`,
+      );
     }
   }
 
@@ -177,16 +168,11 @@ export function validatePackageLock(pkg, packageLock) {
   };
 }
 
+/** The package.json with `nextVersion`; nothing else changes. */
 export function updatePackageVersion(pkg, nextVersion) {
-  const packageName = requiredString(pkg.name, "package.json name");
-  const version = requiredString(nextVersion, "next version");
-  const targets = requiredTargets(pkg.napi?.targets);
-  const expectedOptionalDependencies = optionalDependencyNamesForTargets(packageName, targets);
-
   return {
     ...pkg,
-    version,
-    optionalDependencies: optionalDependencyVersionMap(expectedOptionalDependencies, version),
+    version: requiredString(nextVersion, "next version"),
   };
 }
 
@@ -311,10 +297,9 @@ export function bumpPackageVersion(
   );
 
   try {
-    const updatedPackage = updatePackageVersion(
-      readPackageMetadata(resolvedPackageJsonPath),
-      nextVersion,
-    );
+    const currentPackage = readPackageMetadata(resolvedPackageJsonPath);
+    validatePackageMetadata(currentPackage);
+    const updatedPackage = updatePackageVersion(currentPackage, nextVersion);
     writeJsonFile(resolvedPackageJsonPath, updatedPackage);
     tools.run(npmCommand(), ["install", "--package-lock-only", "--ignore-scripts"], {
       cwd: packageDir,
@@ -400,18 +385,9 @@ function requiredTargets(targets) {
   return targets.map((target) => requiredString(target, "napi.targets entry"));
 }
 
-function normalizeDependencyMap(dependencies) {
-  return Object.fromEntries(
-    Object.entries(requiredObject(dependencies ?? {}, "dependency map")).sort(([left], [right]) =>
-      left.localeCompare(right),
-    ),
-  );
-}
-
-function optionalDependencyVersionMap(optionalDependencies, version) {
-  return Object.fromEntries(
-    optionalDependencies.map((dependencyName) => [dependencyName, version]),
-  );
+/** A platform package of `packageName`: one napi.targets lists, or one of a target it no longer lists. */
+function isPlatformPackage(packageName, dependencyName) {
+  return dependencyName.startsWith(`${packageName}-`);
 }
 
 function writeJsonFile(filePath, value) {

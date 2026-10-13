@@ -93,13 +93,6 @@
     "knip": "knip",
     "format": "biome check --write"
   },
-  "optionalDependencies": {
-    "@aleburato/primeval-darwin-arm64": "0.1.1",
-    "@aleburato/primeval-darwin-x64": "0.1.1",
-    "@aleburato/primeval-linux-arm64-gnu": "0.1.1",
-    "@aleburato/primeval-linux-x64-gnu": "0.1.1",
-    "@aleburato/primeval-win32-x64-msvc": "0.1.1"
-  },
   "napi": {
     "binaryName": "primeval-node",
     "targets": [
