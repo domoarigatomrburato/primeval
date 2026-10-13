@@ -550,3 +550,32 @@ On the corpus the new order changed 10 of the 90 rows, all on `synthetic-shapes`
 Quadratics and polygons gain least: 83% and 79% of their lines are one pixel long, where four-pixel groups cannot help. The measured variant was then reduced from 1917 to 1000 lines without losing speed (the bench was 0–3% faster per kind).
 
 Still open from the review, all exact: prepared-geometry reuse in the joint optimisation, cheaper rejection before the colour fit, and worker reuse in the browser. Caching the second Gaussian variate would change the random streams, so it needs a quality measurement first.
+
+## 26. Rejection before the colour fit, worker reuse, and a joint shortcut that did not pay (2026-10-13)
+
+The last three exact proposals of the speed review (section 22) were built in parallel by Codex (`gpt-6.1-sol` at high reasoning), each in its own worktree, and timed afterwards on a quiet machine against the `main` they started from. Two are kept.
+
+**Rejection before the fit (kept).** A bounded greedy evaluation rasterizes the candidate, fits its colour from the prefix sums, then adds each line's error after blending until the total reaches the bound. It already stopped before any per-pixel work once `score − before` reached the bound, but only after the rasterization and the fit had computed `before`. The energy after drawing is `score − before + after` with `after ≥ 0`, and every rasterizer emits each pixel at most once, so any `U ≥ before` decides the same rejection earlier. `Shape::candidate_rectangle` gives each kind a conservative pixel rectangle, at full and at coarse resolution, from its parameters alone, and a summed-area table of the per-pixel squared error, kept with the row prefix sums and updated from the first changed row down, gives the error inside it in four lookups. A candidate is now rejected when `score − U ≥ bound`, before it is rasterized. On the corpus at 100 and 200 shapes, the rectangle catches this share of the bounded full-resolution evaluations: rectangle 46% (its rectangle is exact), circle 39%, ellipse 32%, rotated rectangle 23%, triangle 21%, `any` 17%, rotated ellipse 11%, polygon 6%, quadratic 0.4%. No pin moved, and every non-time column of the corpus run is unchanged. Time, new over base:
+
+| Kind | 10 threads (two pairs) | 1 thread |
+|---|---|---|
+| rectangle | 0.954–0.973 | 0.914–0.937 |
+| rotated rectangle | 0.956–0.997 | 0.940–0.957 |
+| triangle | 0.918–0.946 | 0.972–0.985 |
+| circle, ellipse | 0.962–1.014 | 0.973–0.981 |
+| any, rotated ellipse | 0.967–1.003 | 0.969–0.985 |
+| polygon, quadratic | 0.977–0.999 | 0.979–0.999 |
+| all | 0.975–0.994 (mean 0.985) | 0.979 |
+
+Two base runs at 10 threads differed by up to 4% on triangles, so differences of 1–2% are within the noise. The review's second rejection, refit candidates entirely hidden by the layers above, was counted first: 376 of 13.3 million refit evaluations, so it was not built.
+
+**Worker reuse in the browser (kept).** Each browser call ran in a fresh worker that was terminated when the call settled, so the threaded build instantiated the module and started one pool worker per core, one at a time, on every call. Now a call that settles with a result keeps its worker idle for 10 s, at most one per page, and the next call runs its task there. Every other outcome (an abort, a throwing `onProgress`, a panic, an error) still terminates the worker at once, and concurrent calls still run in separate workers. Each call builds its model and random streams afresh, and the browser tests check that reused and fresh workers give the same bytes. Time per call, reuse over a fresh worker, in headless Chromium on the M2 Pro (10 sequential calls on the Mona Lisa fixture, two interleaved batches each):
+
+| Build | 10 shapes | 100 shapes |
+|---|---|---|
+| threaded (10 pool workers) | 0.81–0.82 (about 50 ms less) | 0.965–0.969 |
+| single-threaded | 0.99 | 0.99–1.00 |
+
+**Pixel runs in the joint optimisation (dropped).** The review's other two parts for the joint passes, reusing `Prepared` between the fit and the gradient and skipping the projection's derivatives for valid layers, are constant work per layer and were not built. The per-pixel part was: the joint passes evaluate each layer's coverage, and in the gradient pass its derivative, at every pixel of its bounding box. For triangles about half of those pixels lie outside the shape and 44% inside, where the per-edge distances only confirm a coverage of 0 or 1 and a zero geometric gradient. The change found, per row, the runs where the computed distances prove that outcome, by binary search on the same monotone expressions and predicates, and skipped the edge evaluation there: about 90% of polygon pixels, and the inner disk of curved layers. Its output was identical, and it was slower. At one thread, over three interleaved pairs, the refine time rose by 7–9% for circles and ellipses, 2–7% for triangles and 0–2.5% for polygons, against a base noise of about 1%; at 10 threads only triangles and rectangles looked faster, within the noise. Each pixel's edge test was already cheap, and the per-row searches and the extra branch per pixel cost more than they saved. The patch is in the orchestrator's lab directory.
+
+All the exact proposals of the speed review are now built or measured. Caching the second Gaussian variate changes the random streams, so it still needs a quality measurement first.
