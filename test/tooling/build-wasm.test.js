@@ -325,7 +325,7 @@ test("clippy checks the single-threaded variant on the pinned stable toolchain",
   assert.deepEqual(command.env, { RUSTFLAGS: "-C target-feature=+simd128" });
 });
 
-test("the kernel tests run the score module's tests on wasm32-wasip1 with SIMD, under Node's WASI", () => {
+test("the kernel tests run the score and refit-sums tests on wasm32-wasip1 with SIMD, under Node's WASI", () => {
   const command = cargoKernelTestCommand();
   const runner = [
     process.execPath,
@@ -345,6 +345,7 @@ test("the kernel tests run the score module's tests on wasm32-wasip1 with SIMD, 
     `target.wasm32-wasip1.runner=${JSON.stringify(runner)}`,
     "--",
     "score::",
+    "refine::simd_parity::",
     "--nocapture",
   ]);
   assert.deepEqual(command.env, { RUSTFLAGS: "-C target-feature=+simd128" });

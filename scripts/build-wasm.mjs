@@ -5,9 +5,9 @@
 // - `wasm/threaded/`: rayon on Web Workers, on the dated nightly below, with
 //   the standard library rebuilt for atomics.
 //
-// Both require WebAssembly SIMD (simd128), for the scoring kernels of
-// `primeval-core`; `test-kernels` runs their parity tests on wasm32-wasip1
-// under Node's WASI.
+// Both require WebAssembly SIMD (simd128), for the scoring and refit-sums
+// kernels of `primeval-core`; `test-kernels` runs their parity tests on
+// wasm32-wasip1 under Node's WASI.
 //
 // This file is the single source of truth for the nightly pin, the SIMD and
 // threaded RUSTFLAGS, the build-std flags, the output layout and the size
@@ -46,7 +46,7 @@ export const NIGHTLY_TOOLCHAIN = "nightly-2026-09-25";
 /**
  * Every wasm32 build enables SIMD, which every current browser supports
  * (Chrome 91, Firefox 89, Safari 16.4); `primeval-core` then compiles its
- * simd128 scoring kernels.
+ * simd128 scoring and refit-sums kernels.
  */
 export const SIMD_RUSTFLAGS = ["-C", "target-feature=+simd128"];
 
@@ -161,9 +161,10 @@ export function cargoClippyCommand() {
 }
 
 /**
- * The tests of `primeval-core`'s `score` module, its scoring kernels, on
- * wasm32-wasip1 with SIMD: the simd128 kernels against the scalar ones, and a
- * test that fails without the flag. Cargo runs the test binary with
+ * The tests of `primeval-core`'s `score` module and `refine::simd_parity`,
+ * its scoring and refit-sums kernels, on wasm32-wasip1 with SIMD: the
+ * simd128 kernels against the scalar ones, and a test that fails without
+ * the flag. Cargo runs the test binary with
  * `wasi-runner.mjs` under this Node. The rest of the suite needs threads,
  * which WASI preview 1 lacks.
  */
@@ -186,6 +187,7 @@ export function cargoKernelTestCommand() {
       `target.${TEST_TARGET}.runner=${JSON.stringify(runner)}`,
       "--",
       "score::",
+      "refine::simd_parity::",
       // A failing test aborts the run (panic = "abort"), so print its
       // message as it happens.
       "--nocapture",
@@ -502,7 +504,7 @@ function usage() {
       "Usage:",
       "  node scripts/build-wasm.mjs [build [single|threaded]]  build into wasm/ (default: both)",
       "  node scripts/build-wasm.mjs clippy                     clippy for wasm32 on the pinned stable",
-      "  node scripts/build-wasm.mjs test-kernels               the scoring kernels' tests on wasm32-wasip1",
+      "  node scripts/build-wasm.mjs test-kernels               the score and refit-sums tests on wasm32-wasip1",
       "  node scripts/build-wasm.mjs install-tools              install the nightly, wasip1 and wasm-bindgen-cli",
       "  node scripts/build-wasm.mjs wasm-bindgen-version       print the required wasm-bindgen-cli version",
     ].join("\n"),

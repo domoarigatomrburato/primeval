@@ -37,6 +37,18 @@
 //! layers above it; the bound is pinned by
 //! `layer_model_matches_the_exact_composite`. `A` and `B` are `f32` planes,
 //! the canvas below stays the exact u8 canvas, and the sums are `f64`.
+//! After clipping, pixel `j` of each line goes to slot `j mod 4`, including
+//! hidden pixels; each line restarts at slot 0. Six planes of four `f64`
+//! accumulators persist across lines, starting at `+0.0`: weights, three
+//! channel numerators, errors and removed energy. Each pixel's RGB squares
+//! add as `(R + G) + B` before its slot addition. Hidden pixels and missing
+//! tail slots add nothing, equivalent to adding `+0.0`. Each total folds
+//! `(((+0.0 + s0) + s1) + s2) + s3` ([`Sums`]). Groups use explicit NEON on
+//! aarch64, baseline SSE2 on x86_64 and simd128 on wasm32 with that feature;
+//! tails use fixed-lane updates and other targets use scalar code. All
+//! are bit for bit equal to
+//! the scalar reference, with the same per-pixel `f32` operand order and
+//! lane-wise IEEE operations, without fused operations or reassociation.
 //!
 //! # A pass
 //!
@@ -65,6 +77,8 @@
 //! on scheduling.
 //! [`crate::Model::refine`] then verifies the pass on the exact canvas and
 //! keeps it only if the exact score improved.
+
+mod sums;
 
 use crate::alpha::Alpha;
 use crate::buffer::{BYTES_PER_PIXEL, Buffer};
@@ -268,6 +282,7 @@ impl Layer<'_> {
     /// Calls `visit(p, g, q, r)` for every pixel `p` of `lines` that the
     /// shape at `alpha` influences, a pixel once per line that covers it,
     /// with `g = A w`, and `q` and `r` per channel; see the module doc.
+    #[cfg(test)]
     #[inline]
     fn visit(
         &self,
@@ -311,20 +326,16 @@ impl Layer<'_> {
         }
     }
 
-    /// The model's sums over the pixels of `lines` drawn at `alpha`.
+    /// The model's sums over the pixels of `lines` drawn at `alpha`, in
+    /// the target-independent four-slot order specified by [`Sums`].
+    /// After clipping, hidden pixels retain their slots; every line starts
+    /// at slot 0, and the accumulators persist across lines. Four-pixel
+    /// groups use the target's SIMD kernel; the remaining 0..3 pixels use
+    /// fixed-lane scalar or SIMD updates, equal to a zero-padded group.
+    /// The target loop carries its vector accumulators across every line
+    /// and writes the slot planes only for the final ordered fold.
     pub(crate) fn sums(&self, lines: &[Scanline], alpha: u8) -> Sums {
-        let mut sums = Sums::default();
-        self.visit(lines, alpha, |_, g, q, r| {
-            let g = f64::from(g);
-            sums.weights += g * g;
-            for c in 0..3 {
-                let (q, r) = (f64::from(q[c]), f64::from(r[c]));
-                sums.numerators[c] += g * q;
-                sums.errors += q * q;
-                sums.removed += r * r;
-            }
-        });
-        sums
+        sums::sums(self, lines, alpha)
     }
 
     /// The model's best colour for a shape drawn along `lines` at `alpha`,
@@ -359,6 +370,14 @@ impl Layer<'_> {
 /// and `Σ r²` over the channels. Per channel the energy
 /// `Σ (q − g · s)²` is the quadratic `Σ q² − 2 s Σ g · q + s² Σ g²`, so no
 /// second pass over the pixels is needed for any colour.
+///
+/// Six planes use four slots, initially +0.0: clipped pixel j of each line
+/// goes to j mod 4, counting hidden pixels, with slot 0 restarted per line.
+/// Per-pixel f32 formulas keep their operand order; after exact f64
+/// conversion, each slot adds g*g, g*q per channel, (qr*qr + qg*qg) + qb*qb,
+/// and (rr*rr + rg*rg) + rb*rb. Slots persist across lines, then each plane
+/// folds as (((+0.0 + s0) + s1) + s2) + s3. SIMD and scalar give identical
+/// bits; hidden pixels and missing tail slots contribute +0.0.
 #[derive(Default)]
 pub(crate) struct Sums {
     numerators: [f64; 3],
@@ -754,120 +773,6 @@ mod tests {
         let mut pixels = vec![0_u8; (width * height * 3) as usize];
         rng.fill(&mut pixels[..]);
         Buffer::from_rgb(width, height, pixels).expect("valid length")
-    }
-
-    /// The original serial additions, independent of the production loop.
-    fn serial_sums(layer: &Layer<'_>, lines: &[Scanline], alpha: u8) -> Sums {
-        let mut sums = Sums::default();
-        for line in lines {
-            let Some((x1, x2)) = clamp_line(line, layer.above.width, layer.above.height) else {
-                continue;
-            };
-            let Some(blend) = Blend::new(alpha, line.alpha) else {
-                continue;
-            };
-            let row = line.y as usize * layer.above.width as usize;
-            for p in row + x1 as usize..=row + x2 as usize {
-                let a = layer.above.transmittance[p];
-                if a == 0.0 {
-                    continue;
-                }
-                let g = f64::from(a * blend.paint);
-                sums.weights += g * g;
-                for c in 0..3 {
-                    let i = 3 * p + c;
-                    let rest = f32::from(layer.target.pixels()[i]) - layer.above.offset[i];
-                    let d = f32::from(layer.below.pixels()[i]);
-                    let q = f64::from(rest - a * blend.keep * d);
-                    let r = f64::from(rest - a * d);
-                    sums.numerators[c] += g * q;
-                    sums.errors += q * q;
-                    sums.removed += r * r;
-                }
-            }
-        }
-        sums
-    }
-
-    fn sum_bits(sums: Sums) -> [u64; 6] {
-        let [r, g, b] = sums.numerators;
-        [r, g, b, sums.weights, sums.errors, sums.removed].map(f64::to_bits)
-    }
-
-    /// Random folded layers, all short lengths and tails, long lines,
-    /// clipping, overlap, coverage/alpha extremes and hidden pixels.
-    fn check_sums(reference: impl Fn(&Layer<'_>, &[Scanline], u8) -> Sums) {
-        let mut rng = create_rng(0x5a45);
-        for width in [2, 17, 257] {
-            let height = 5;
-            let target = noise(&mut rng, width, height);
-            let below = noise(&mut rng, width, height);
-            let mut above = Above::new(width, height);
-            for _ in 0..24 {
-                let lines: Vec<_> = (0..12)
-                    .map(|_| Scanline {
-                        y: rng.random_range(-1..=height as i32),
-                        x1: rng.random_range(-10..width as i32),
-                        x2: rng.random_range(0..width as i32 + 10),
-                        alpha: rng.random_range(0..=score::M),
-                    })
-                    .collect();
-                above.fold(
-                    &lines,
-                    Color::new(rng.random(), rng.random(), rng.random(), rng.random()),
-                );
-            }
-            above.fold(
-                &[Scanline {
-                    y: 1,
-                    x1: 1,
-                    x2: width as i32 / 2,
-                    alpha: score::M,
-                }],
-                Color::new(30, 60, 90, 255),
-            );
-            assert!(above.transmittance.contains(&0.0));
-            let layer = Layer {
-                target: &target,
-                below: &below,
-                above: &above,
-            };
-            let mut lines = Vec::new();
-            for length in (0..=13).chain([width as i32, width as i32 + 20]) {
-                for x1 in [-9, 0, 1, width as i32 - 3, width as i32, width as i32 + 3] {
-                    for y in [-1, 0, 1, 4, 5] {
-                        for coverage in [0, 1, 255, 256, 32768, score::M - 1, score::M] {
-                            let line = Scanline {
-                                y,
-                                x1,
-                                x2: x1 + length - 1,
-                                alpha: coverage,
-                            };
-                            for alpha in [0, 1, 128, 255] {
-                                assert_eq!(
-                                    sum_bits(layer.sums(&[line], alpha)),
-                                    sum_bits(reference(&layer, &[line], alpha)),
-                                    "width {width}, {line:?}, alpha {alpha}"
-                                );
-                            }
-                            lines.push(line);
-                        }
-                    }
-                }
-            }
-            for alpha in [0, 1, 128, 255] {
-                assert_eq!(
-                    sum_bits(layer.sums(&lines, alpha)),
-                    sum_bits(reference(&layer, &lines, alpha)),
-                    "width {width}, overlapping lines, alpha {alpha}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn sums_keep_serial_visit_order() {
-        check_sums(serial_sums);
     }
 
     fn opaque(rng: &mut ChaCha8Rng) -> Color {
@@ -1481,5 +1386,290 @@ mod tests {
             let top_down: Vec<usize> = (0..layers.len()).rev().collect();
             assert_eq!(visited, top_down, "{replay:?}");
         }
+    }
+}
+
+/// Thread-free refit-sums tests, also selected by the WASI kernel runner.
+#[cfg(test)]
+mod simd_parity {
+    use super::*;
+    use crate::rng::create_rng;
+    use rand::RngExt;
+    use rand_chacha::ChaCha8Rng;
+
+    fn noise(rng: &mut ChaCha8Rng, width: u32, height: u32) -> Buffer {
+        let mut pixels = vec![0_u8; (width * height * 3) as usize];
+        rng.fill(&mut pixels[..]);
+        Buffer::from_rgb(width, height, pixels).expect("valid length")
+    }
+
+    /// Scalar specification of the fixed slots, independent of the block loop.
+    fn slot_sums(layer: &Layer<'_>, lines: &[Scanline], alpha: u8) -> Sums {
+        let mut weights = [0.0; 4];
+        let mut numerators = [[0.0; 4]; 3];
+        let mut errors = [0.0; 4];
+        let mut removed = [0.0; 4];
+        for line in lines {
+            let Some((x1, x2)) = clamp_line(line, layer.above.width, layer.above.height) else {
+                continue;
+            };
+            let Some(blend) = Blend::new(alpha, line.alpha) else {
+                continue;
+            };
+            let row = line.y as usize * layer.above.width as usize;
+            for (j, p) in (row + x1 as usize..=row + x2 as usize).enumerate() {
+                let slot = j % 4;
+                let a = layer.above.transmittance[p];
+                if a == 0.0 {
+                    weights[slot] += 0.0;
+                    for numerator in &mut numerators {
+                        numerator[slot] += 0.0;
+                    }
+                    errors[slot] += 0.0;
+                    removed[slot] += 0.0;
+                    continue;
+                }
+                let g = f64::from(a * blend.paint);
+                weights[slot] += g * g;
+                let mut q2 = [0.0; 3];
+                let mut r2 = [0.0; 3];
+                for c in 0..3 {
+                    let i = 3 * p + c;
+                    let rest = f32::from(layer.target.pixels()[i]) - layer.above.offset[i];
+                    let d = f32::from(layer.below.pixels()[i]);
+                    let q = f64::from(rest - a * blend.keep * d);
+                    let r = f64::from(rest - a * d);
+                    numerators[c][slot] += g * q;
+                    q2[c] = q * q;
+                    r2[c] = r * r;
+                }
+                errors[slot] += (q2[0] + q2[1]) + q2[2];
+                removed[slot] += (r2[0] + r2[1]) + r2[2];
+            }
+        }
+        let sum = |slots: [f64; 4]| slots.into_iter().fold(0.0, |sum, slot| sum + slot);
+        Sums {
+            weights: sum(weights),
+            numerators: numerators.map(sum),
+            errors: sum(errors),
+            removed: sum(removed),
+        }
+    }
+
+    fn sum_bits(sums: Sums) -> [u64; 6] {
+        let [r, g, b] = sums.numerators;
+        [r, g, b, sums.weights, sums.errors, sums.removed].map(f64::to_bits)
+    }
+
+    /// Random folded layers, all short lengths and tails, long lines,
+    /// clipping, overlap, coverage/alpha extremes and hidden pixels.
+    fn check_sums(reference: impl Fn(&Layer<'_>, &[Scanline], u8) -> Sums) {
+        let mut rng = create_rng(0x5a45);
+        for width in [2, 17, 257] {
+            let height = 5;
+            let target = noise(&mut rng, width, height);
+            let below = noise(&mut rng, width, height);
+            let mut above = Above::new(width, height);
+            for _ in 0..24 {
+                let lines: Vec<_> = (0..12)
+                    .map(|_| Scanline {
+                        y: rng.random_range(-1..=height as i32),
+                        x1: rng.random_range(-10..width as i32),
+                        x2: rng.random_range(0..width as i32 + 10),
+                        alpha: rng.random_range(0..=score::M),
+                    })
+                    .collect();
+                above.fold(
+                    &lines,
+                    Color::new(rng.random(), rng.random(), rng.random(), rng.random()),
+                );
+            }
+            above.fold(
+                &[Scanline {
+                    y: 1,
+                    x1: 1,
+                    x2: width as i32 / 2,
+                    alpha: score::M,
+                }],
+                Color::new(30, 60, 90, 255),
+            );
+            assert!(above.transmittance.contains(&0.0));
+            let layer = Layer {
+                target: &target,
+                below: &below,
+                above: &above,
+            };
+            let mut lines = Vec::new();
+            for length in (0..=13).chain([width as i32, width as i32 + 20]) {
+                for x1 in [-9, 0, 1, width as i32 - 3, width as i32, width as i32 + 3] {
+                    for y in [-1, 0, 1, 4, 5] {
+                        for coverage in [0, 1, 255, 256, 32768, score::M - 1, score::M] {
+                            let line = Scanline {
+                                y,
+                                x1,
+                                x2: x1 + length - 1,
+                                alpha: coverage,
+                            };
+                            for alpha in [0, 1, 128, 255] {
+                                assert_eq!(
+                                    sum_bits(layer.sums(&[line], alpha)),
+                                    sum_bits(reference(&layer, &[line], alpha)),
+                                    "width {width}, {line:?}, alpha {alpha}"
+                                );
+                            }
+                            lines.push(line);
+                        }
+                    }
+                }
+            }
+            for _ in 0..128 {
+                let line = Scanline {
+                    y: rng.random_range(-1..=height as i32),
+                    x1: rng.random_range(-20..width as i32 + 20),
+                    x2: rng.random_range(-20..width as i32 + 20),
+                    alpha: rng.random_range(0..=score::M),
+                };
+                let alpha = rng.random();
+                assert_eq!(
+                    sum_bits(layer.sums(&[line], alpha)),
+                    sum_bits(reference(&layer, &[line], alpha)),
+                    "random {line:?}, alpha {alpha}"
+                );
+                lines.push(line);
+            }
+            for alpha in [0, 1, 128, 255] {
+                assert_eq!(
+                    sum_bits(layer.sums(&lines, alpha)),
+                    sum_bits(reference(&layer, &lines, alpha)),
+                    "width {width}, overlapping lines, alpha {alpha}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sums_match_fixed_slot_order() {
+        check_sums(slot_sums);
+    }
+
+    /// Independent scalar update, also checking the un-folded accumulator
+    /// lanes after every group; a final fold alone can hide a lane swap.
+    fn slot_update(
+        sums: &mut sums::SlotSums,
+        slot: usize,
+        t: [u8; 3],
+        d: [u8; 3],
+        b: [f32; 3],
+        a: f32,
+        blend: Blend,
+    ) {
+        if a == 0.0 {
+            return;
+        }
+        let g = f64::from(a * blend.paint);
+        sums.weights[slot] += g * g;
+        let mut q2 = [0.0; 3];
+        let mut r2 = [0.0; 3];
+        for c in 0..3 {
+            let rest = f32::from(t[c]) - b[c];
+            let d = f32::from(d[c]);
+            let q = f64::from(rest - (a * blend.keep) * d);
+            let r = f64::from(rest - a * d);
+            sums.numerators[c][slot] += g * q;
+            q2[c] = q * q;
+            r2[c] = r * r;
+        }
+        sums.errors[slot] += (q2[0] + q2[1]) + q2[2];
+        sums.removed[slot] += (r2[0] + r2[1]) + r2[2];
+    }
+
+    fn slot_bits(sums: &sums::SlotSums) -> [[u64; 4]; 6] {
+        [
+            sums.weights,
+            sums.numerators[0],
+            sums.numerators[1],
+            sums.numerators[2],
+            sums.errors,
+            sums.removed,
+        ]
+        .map(|s| s.map(f64::to_bits))
+    }
+
+    #[test]
+    fn groups_match_scalar_slots_for_real_blends() {
+        let mut rng = create_rng(0x51_07);
+        let mut expected = sums::SlotSums::default();
+        let mut actual = sums::SlotSums::default();
+        // Cover every integer blend weight k (and thus every real keep/paint)
+        // using full alpha and coverage k. Also cover each shape alpha with
+        // coverage extremes, so the blend's integer rounding is exercised.
+        for (alpha, coverage) in
+            (1..=score::M)
+                .map(|k| (255, k))
+                .chain((1..=255).flat_map(|alpha| {
+                    [0, 1, 255, 256, 32768, score::M - 1, score::M]
+                        .map(|coverage| (alpha, coverage))
+                }))
+        {
+            let Some(blend) = Blend::new(alpha, coverage) else {
+                continue;
+            };
+            let t = std::array::from_fn(|_| std::array::from_fn(|_| rng.random()));
+            let d = std::array::from_fn(|_| std::array::from_fn(|_| rng.random()));
+            let a = std::array::from_fn(|slot| match (coverage as usize + slot) % 8 {
+                0 | 1 => 0.0,
+                2 => 1.0,
+                _ => rng.random_range(0.0..=1.0),
+            });
+            // Real folded offsets are bounded by 255 times the opacity
+            // k = 1 - A. Include arbitrary f32 planes inside that bound.
+            let b = std::array::from_fn(|slot| {
+                std::array::from_fn(|_| rng.random_range(0.0..=255.0 * (1.0 - a[slot])))
+            });
+            for slot in 0..4 {
+                slot_update(
+                    &mut expected,
+                    slot,
+                    t[slot],
+                    d[slot],
+                    b[slot],
+                    a[slot],
+                    blend,
+                );
+            }
+            sums::group(&mut actual, &t, &d, &b, &a, blend);
+            assert_eq!(
+                slot_bits(&actual),
+                slot_bits(&expected),
+                "alpha {alpha}, coverage {coverage}, A {a:?}"
+            );
+        }
+        // Exercise every hidden-lane mask, including an entirely hidden
+        // group, exact byte and offset extremes, and signed-zero residuals.
+        for mask in 0..16 {
+            let a = std::array::from_fn(|slot| if mask & (1 << slot) == 0 { 0.0 } else { 1.0 });
+            let t = [[0, 255, 0], [255, 0, 255], [1, 128, 254], [255; 3]];
+            let d = [[255, 0, 255], [0, 255, 0], [254, 128, 1], [255; 3]];
+            let b = std::array::from_fn(|slot| [255.0 * (1.0 - a[slot]); 3]);
+            let blend = Blend::new(255, score::M).unwrap();
+            for slot in 0..4 {
+                slot_update(
+                    &mut expected,
+                    slot,
+                    t[slot],
+                    d[slot],
+                    b[slot],
+                    a[slot],
+                    blend,
+                );
+            }
+            sums::group(&mut actual, &t, &d, &b, &a, blend);
+            assert_eq!(
+                slot_bits(&actual),
+                slot_bits(&expected),
+                "hidden mask {mask}"
+            );
+        }
+        assert_eq!(sum_bits(actual.finish()), sum_bits(expected.finish()));
     }
 }
