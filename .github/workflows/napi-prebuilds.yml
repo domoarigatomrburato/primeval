@@ -149,7 +149,8 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [build, wasm]
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # Two registry waits (publish, then verify) of up to 15 minutes each.
+    timeout-minutes: 45
     permissions:
       contents: read
       id-token: write

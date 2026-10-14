@@ -277,12 +277,13 @@ export async function publishRelease({ rootDir, npmDir, tag }, tools) {
 
 /**
  * Waits for every package to be visible on the registry; fails with the missing ones.
- * The default wait is about 5 minutes: npm completes trusted-publishing (OIDC)
- * publishes asynchronously, about 2 minutes in practice in October 2026.
+ * The default wait is about 15 minutes: npm completes trusted-publishing (OIDC)
+ * publishes asynchronously. It usually shows a version about 2 minutes after
+ * `npm publish` returns, but once (0.2.2, the Windows package) it took about 9.
  */
 export async function verifyPublished(
   packages,
-  { isPublished, sleep = delay, attempts = 30, delayMs = 10_000, log = console.log },
+  { isPublished, sleep = delay, attempts = 90, delayMs = 10_000, log = console.log },
 ) {
   let missing = packages;
   for (let attempt = 1; ; attempt += 1) {

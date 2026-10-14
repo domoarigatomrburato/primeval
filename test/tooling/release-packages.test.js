@@ -258,6 +258,20 @@ test("post-publish verification fails and names every missing package", async ()
   assert.deepEqual(sleeps, [10, 10]);
 });
 
+test("the default wait is 90 checks, 10 seconds apart (about 15 minutes)", async () => {
+  const sleeps = [];
+  await assert.rejects(
+    verifyPublished(PACKAGES, {
+      isPublished: () => false,
+      sleep: async (ms) => sleeps.push(ms),
+      log: () => {},
+    }),
+    /not on the registry/,
+  );
+  assert.equal(sleeps.length, 89);
+  assert.ok(sleeps.every((ms) => ms === 10_000));
+});
+
 // --- Platform packages as optionalDependencies, added at publish time ---
 
 test("withPlatformDependencies adds every platform package at the version, in napi.targets order", () => {
