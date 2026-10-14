@@ -1,6 +1,6 @@
 # Audit And Refactoring Plan (October 2026): open items
 
-The audit of `3e872be` (2026-10-01) and the algorithm work that followed it are done, except the items below; the full plan, with its findings, decisions and measurements, is in the git history (last complete at `dcc0ab4`). The review log [`../algorithm-leap-review-2026-10-07.md`](../algorithm-leap-review-2026-10-07.md) records the engine work, and [`../architecture.md`](../architecture.md) describes the result. Delete this file when its last item lands or is dropped.
+The audit of `3e872be` (2026-10-01) and the algorithm work that followed it are done, except the items below; the full plan, with its findings, decisions and measurements, is in the git history (last complete at `dcc0ab4`). The engine work's decisions are in [`../adr/`](../adr/README.md), its measured defaults in [`../tuning.md`](../tuning.md) and the experiments it did not adopt in [`../experiments.md`](../experiments.md); [`../architecture.md`](../architecture.md) describes the result. Delete this file when its last item lands or is dropped.
 
 ## Release and tooling
 
@@ -11,8 +11,8 @@ The audit of `3e872be` (2026-10-01) and the algorithm work that followed it are 
 
 - **PERF-3: NEON `line_after` reduces horizontally every 8 pixels.** `neon::line_after` in `crates/primeval-core/src/score.rs` sums each 8-pixel chunk's squares with `vaddvq_u32`; keeping vector accumulators across the line and reducing once would save those reductions (`line_sums` and `difference_bytes` already accumulate). Status: not scheduled: the maintainer closed the speed work on 2026-10-13.
 - **Experiment 6: scale guard.** Measure peak memory and time at `resizeInput` 1024 and 2048 with 500 and 2000 shapes, and set a threshold above which the final stage falls back from the joint optimisation to refit passes. Status: open. The joint optimisation caps its checkpoints (64 MiB) and its coverage cache (32 MiB), but not the buffers that hold the canvas under each layer of a segment; the README's "Memory" section states what a render takes.
-- **Joint optimisation for rotated ellipses.** Rotated ellipses end with one refit pass: the joint optimisation gained them only 2–3%, and the guard rejected it on most images, on thin ellipses, where the locally straight coverage errs most (review log, section 13). Status: deferred until a coverage exact at high curvature exists.
-- **A stroke width that varies along one quadratic curve (4c).** It needs the curve exported as a filled outline, about three times the bytes (review log, sections 14 and 15). Status: parked.
+- **Joint optimisation for rotated ellipses.** Rotated ellipses end with one refit pass: the joint optimisation gained them only 2–3%, and the guard rejected it on most images, on thin ellipses, where the locally straight coverage errs most ([`../experiments.md`](../experiments.md#2026-10-08-rotated-ellipses-in-the-joint-optimisation)). Status: deferred until a coverage exact at high curvature exists.
+- **A stroke width that varies along one quadratic curve (4c).** It needs the curve exported as a filled outline, about three times the bytes ([`../experiments.md`](../experiments.md#2026-10-09-a-stroke-width-that-varies-along-one-curve-4c)). Status: parked.
 
 ## Demo
 

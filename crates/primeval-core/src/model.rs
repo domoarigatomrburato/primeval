@@ -50,7 +50,7 @@ impl Effort {
     ///
     /// Earlier measurements returned polygons, rotated ellipses and `any`
     /// from 32 to 16 rounds because the extra quality cost too much time
-    /// (`docs/algorithm-leap-review-2026-10-07.md`).
+    /// (`docs/internals/experiments.md`).
     const DEFAULT: Self = Self {
         rounds: 16,
         candidates: 1,

@@ -165,9 +165,9 @@ pub enum Refits {
 /// stayed, by a deterministic count of evaluations. The passes during the
 /// search of `any`, triangles and ellipses were then thinned to trade
 /// some of that quality for time, on the measurements of
-/// `docs/algorithm-leap-review-2026-10-07.md`: the mean of the two
-/// medians against the previous `approximate` (16 search rounds, then one
-/// refit pass) and the time over the same rows, on an Apple M2 Pro.
+/// `docs/internals/tuning.md`: the mean of the two medians against the
+/// previous `approximate` (16 search rounds, then one refit pass) and the
+/// time over the same rows, on an Apple M2 Pro.
 ///
 /// - Every kind but triangles runs refit passes during the search, on a
 ///   [`During::Spaced`] schedule whose cost grows linearly with the shape
@@ -642,10 +642,10 @@ mod tests {
 
     /// The passes during the search are the pipeline's most expensive
     /// stage and the only one that loses at equal time
-    /// (`docs/algorithm-leap-review-2026-10-07.md`): up to 200 steps they
-    /// refit, or jointly optimise, at most 5 layers per step for the kinds
-    /// that end with the joint optimisation, which gains more for less,
-    /// and at most 10 for the others.
+    /// (`docs/internals/tuning.md`): up to 200 steps they refit, or jointly
+    /// optimise, at most 5 layers per step for the kinds that end with the
+    /// joint optimisation, which gains more for less, and at most 10 for
+    /// the others.
     #[test]
     fn passes_during_the_search_stay_cheap() {
         for shape in KINDS {

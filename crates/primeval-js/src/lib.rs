@@ -5,8 +5,8 @@
 //! them with the `primeval-render` parsers and merges them onto
 //! [`RenderOptions::default`], so an absent field always takes the Rust
 //! default. It also owns the JavaScript spelling of option names and error
-//! messages. `docs/architecture.md` in the repository describes how it fits
-//! with the bindings.
+//! messages. `docs/internals/architecture.md` in the repository describes
+//! how it fits with the bindings.
 #![warn(missing_docs)]
 
 use primeval_render::{

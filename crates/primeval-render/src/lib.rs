@@ -7,8 +7,8 @@
 //!
 //! The Node package and napi binding in this repository build on the same API.
 //! If you want the canonical Rust-side defaults and validation behavior, this is
-//! the crate to call. `docs/architecture.md` in the repository describes how
-//! it fits with the engine, the bindings and the package.
+//! the crate to call. `docs/internals/architecture.md` in the repository
+//! describes how it fits with the engine, the bindings and the package.
 //!
 //! # Example
 //!

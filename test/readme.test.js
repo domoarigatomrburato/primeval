@@ -99,10 +99,22 @@ function filesUnder(dir) {
     .map((entry) => path.relative(repoRoot, path.join(entry.parentPath, entry.name)));
 }
 
-test("the README and the gallery link only to files in the repository", () => {
-  for (const file of ["README.md", "docs/gallery.md"]) {
+test("the documentation links only to files in the repository", () => {
+  const internals = filesUnder("docs/internals").filter((file) => file.endsWith(".md"));
+  assert.ok(internals.length > 0, "docs/internals has no Markdown files");
+  const files = [
+    "README.md",
+    "docs/gallery.md",
+    "AGENTS.md",
+    "CONTRIBUTING.md",
+    "RELEASING.md",
+    ...internals,
+  ];
+  // AGENTS.md names paths in code spans, not links.
+  const withoutLinks = new Set(["AGENTS.md"]);
+  for (const file of files) {
     const links = localLinks(file);
-    assert.ok(links.length > 0, `${file} has no local links`);
+    assert.ok(links.length > 0 || withoutLinks.has(file), `${file} has no local links`);
     for (const link of links) {
       assert.ok(fs.existsSync(path.join(repoRoot, link)), `${file} links to missing ${link}`);
     }

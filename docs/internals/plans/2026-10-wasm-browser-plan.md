@@ -1,6 +1,6 @@
 # Browser support through WebAssembly, and a demo on GitHub Pages
 
-Status: W0–W5 done (2026-10-02, PR #10); Pages is enabled, so the demo goes live when PR #10 merges. `AGENTS.md` already lists browsers in scope. Came before the algorithm change, which the review log `docs/algorithm-leap-review-2026-10-07.md` records.
+Status: W0–W5 done (2026-10-02, PR #10); Pages is enabled, so the demo goes live when PR #10 merges. `AGENTS.md` already lists browsers in scope. Came before the algorithm change, whose decisions [`../adr/`](../adr/README.md) and measurements [`../tuning.md`](../tuning.md) record.
 
 ## Goal
 
