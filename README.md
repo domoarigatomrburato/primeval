@@ -3,9 +3,9 @@
 [![Quality](https://github.com/domoarigatomrburato/primeval/actions/workflows/quality.yml/badge.svg)](https://github.com/domoarigatomrburato/primeval/actions/workflows/quality.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-`primeval` is a Rust-powered image approximation tool that turns photos and artwork into **stylized reconstructions built from simple geometric shapes**.
+`primeval` turns photos and artwork into **stylized reconstructions built from simple geometric shapes**, in the manner of Michael Fogleman's [`primitive`](https://github.com/fogleman/primitive): a search adds one translucent shape at a time, and the result exports as **clean SVG or PNG**.
 
-Give it an input image and it searches for a layered approximation you can export as **clean SVG or PNG** output.
+The difference is what happens to a shape after it is placed. `primitive` places each shape once and never revisits it; primeval keeps revising the shapes it has already placed, during the search and in a final stage that optimises all of them against the input, so **the same number of shapes gets closer to the image** (see the [comparison](#compared-with-primitive) below).
 
 **[Try it in your browser](https://domoarigatomrburato.github.io/primeval/)**: the demo runs the engine as WebAssembly, on every core, and your image never leaves the page.
 
@@ -26,7 +26,17 @@ Give it an input image and it searches for a layered approximation you can expor
   </tr>
 </table>
 
-Inspired by Michael Fogleman's original [`primitive`](https://github.com/fogleman/primitive), this repository is an **independent Rust implementation** with a reusable core library (`primeval-core`) and an ESM-only Node package (`@domoarigatomrburato/primeval`) that includes both a programmatic API and a Node CLI, and runs the same API in the browser.
+primeval is an **independent Rust implementation**, not a port: it shares `primitive`'s idea and shape vocabulary, with an engine of its own. It ships as a reusable core library (`primeval-core`) and an ESM-only Node package (`@domoarigatomrburato/primeval`) with a programmatic API and a CLI, and runs the same API in the browser. Optimising every shape at once with gradients also appears in research on differentiable vector graphics, [diffvg](https://github.com/BachiLi/diffvg) (2020) and [LIVE](https://github.com/Picsart-AI-Research/LIVE-Layerwise-Image-Vectorization) (2022), as PyTorch code on a GPU; primeval does it on the CPU, with an analytic model of the anti-aliased output, and gives the same output whatever the number of cores.
+
+## Compared with Primitive
+
+*American Gothic*, 200 triangles, through Go `primitive` and primeval with the same settings: alpha 128, working size 256, output size 1024, the average colour as background. One run each; Go seeds itself from the clock, so its picture is not reproducible.
+
+| Original | Go `primitive` | primeval |
+| --- | --- | --- |
+| ![American Gothic, the original painting.](docs/readme/originals/americangothic.jpg) | ![American Gothic with 200 triangles from Go primitive.](docs/readme/versus-go/americangothic-triangle-200-go.jpg) | ![American Gothic with 200 triangles from primeval.](docs/readme/versus-go/americangothic-triangle-200-primeval.jpg) |
+
+Over both benchmark paintings and all nine shape kinds, primeval's error was lower in every configuration, by 25% at 200 steps and 29% at 1000 in geometric mean, in about a third of the time. The [benchmark section](#compared-with-go-primitive) has the table, the settings and the command.
 
 ## Progression Gallery
 
@@ -34,11 +44,14 @@ Browse the full example gallery in [`docs/gallery.md`](docs/gallery.md). The sam
 
 ## Highlights
 
-- Fast multi-threaded search: hill climbing adds one shape per step, refit passes during the search revise the shapes so far against each other (for triangles, a joint gradient optimisation of every shape at once, kept when the working canvas gets closer to the input), then a final stage revises every shape (for triangles, polygons, rectangles, rotated rectangles, ellipses and circles, and every shape of `any` but its quadratics, a joint gradient optimisation of every shape at once, on a model of the anti-aliased output); seeded output does not depend on the number of CPU cores
-- Nine shape modes in the CLI: mixed (`any`), triangle, rectangle, ellipse, circle, rotated rectangle, quadratic curve, rotated ellipse, and polygon. Every shape reads as its kind: triangles keep every angle above 15°, polygons are convex quadrilaterals with every angle above 15°, and a rectangle's long side, rotated or not, is at most 8 times its short side; a quadratic curve is a stroke with round caps (the document's root element carries `stroke-linecap="round"`) whose width the search chooses between 2 and 6 working pixels, exported as the path's `stroke-width`
-- Optimization at a small working resolution, with the same shapes exported at a high output resolution
-- Vector export via SVG, plus raster output as PNG
-- The same API in the browser, through WebAssembly, multi-threaded on cross-origin isolated pages
+- Shapes are revised after they are placed: refit passes during the search, then a final stage that revises every shape, for most kinds a joint gradient optimisation of all of them at once, so fewer shapes do more
+- Nine shape kinds: mixed (`any`), triangle, rectangle, ellipse, circle, rotated rectangle, quadratic curve, rotated ellipse and polygon
+- Clean SVG output, with PNG as an option; the search runs at a small working resolution and the same shapes export at any output size
+- The same API on Node and in the browser, through WebAssembly, multi-threaded on cross-origin isolated pages; the image never leaves the device
+- Deterministic: a seed gives the same output with the same version on the same platform, whatever the number of CPU cores
+- Fast: a multi-threaded search, about three times faster than Go `primitive` on the benchmark paintings at 200 and 1000 steps
+
+Every shape reads as its kind: triangles keep every angle above 15°, polygons are convex quadrilaterals with every angle above 15°, and a rectangle's long side, rotated or not, is at most 8 times its short side. A quadratic curve is a stroke with round caps (the document's root element carries `stroke-linecap="round"`) whose width the search chooses between 2 and 6 working pixels, exported as the path's `stroke-width`.
 
 ## Install
 
@@ -316,6 +329,34 @@ Browser notes:
 - Both builds use WebAssembly SIMD, which Chrome 91, Firefox 89, Safari 16.4 and newer versions support. In a browser without it, `approximate()` rejects with an `InternalError` that says so.
 - The same seed and options give the same output. Native and browser output currently match for the same seed, but this is not guaranteed across platforms. The engine and the PNG writer compute rotations with portable arithmetic, and the engine draws its random moves with a pure Rust logarithm, on every target.
 
+## Image Placeholders
+
+A few translucent triangles make a placeholder that is an image in its own right: it carries the photo's colours and composition while the photo loads, and still looks like something if it never does. Generate it at build time with a fixed seed, so a rebuild does not change it, and inline it as the `<img>`'s `src` until the photo is swapped in, or as the element's background:
+
+```js
+import { approximate, toDataUri } from "@domoarigatomrburato/primeval";
+import { readFile } from "node:fs/promises";
+
+const placeholder = await approximate({
+  input: await readFile("photo.jpg"),
+  output: "svg",
+  render: { count: 30, shape: "triangle", outputSize: 32, seed: 1 },
+});
+
+console.log(toDataUri(placeholder));
+```
+
+The size grows with the shape count. Triangles on a 960 × 1200 portrait (`mae-jemison.jpg` from the gallery, seed 42), gzipped as a server sends the page; the output size only sets the SVG's intrinsic size, since the coordinates stay at the working resolution:
+
+| Triangles | SVG | gzipped |
+| ---: | ---: | ---: |
+| 8 | 810 B | 390 B |
+| 30 | 2.6 KB | 0.9 KB |
+| 60 | 5.3 KB | 1.6 KB |
+| 100 | 8.7 KB | 2.5 KB |
+
+Pick the count by eye, on your own photos. By bytes alone, blurred placeholders win: [BlurHash](https://github.com/woltapp/blurhash) and [ThumbHash](https://github.com/evanw/thumbhash) fit in about 30 bytes, a 16-pixel WebP in about 100. [SQIP](https://github.com/axe312ger/sqip) has made geometric SVG placeholders with Go `primitive` since 2017; its default of 8 shapes is about the size of the first row.
+
 ## Alpha Comparison (Mona Lisa, 200 steps, mixed shape)
 
 The images below use identical settings (`shape: any`, `count: 200`, `seed: 42`) with only alpha changed:
@@ -455,7 +496,7 @@ cargo run --release -p primeval-render --example versus_go -- --steps 200,1000 -
 
 ## Used in Production
 
-- [nudaluce.com](https://nudaluce.com) *(NSFW)* — my photography portfolio uses `primeval`-generated SVG placeholders as image previews. The site includes artistic male nude portraits.
+- [nudaluce.com](https://nudaluce.com) *(NSFW)* — my photography portfolio uses `primeval`-generated SVG placeholders as image previews (see [Image Placeholders](#image-placeholders)). The site includes artistic male nude portraits.
 
 ## Contributing
 

@@ -135,6 +135,13 @@ cargo run --release -p primeval-render --example gallery  # several minutes
 
 To add an image, drop a JPEG, PNG or WebP file you may redistribute into `docs/readme/originals/`, add its row (work, author, licence and source) to [`docs/readme/originals/SOURCES.md`](docs/readme/originals/SOURCES.md), and run the same command; `test/readme.test.js` fails while an image has no row. The benchmark runners keep their fixed corpus of the two paintings, so a new image changes only the gallery. Name it with dashes (`the-kiss.jpg` becomes "The Kiss" in the gallery) or add its title to `TITLES` in `crates/primeval-render/examples/gallery.rs`. The doc comment there lists the step counts, seed and output sizes.
 
+The README's side-by-side comparison with Go `primitive` in `docs/readme/versus-go/` is made by hand, since Go seeds itself from the clock and its picture cannot be reproduced. After `npm run build`, render both at the same settings (`go install github.com/fogleman/primitive@latest` for the Go tool), then scale each PNG to a 480-pixel JPEG at quality 85, like the gallery thumbnails (on macOS, `sips -Z 480 -s format jpeg -s formatOptions 85 <png> --out <jpg>`):
+
+```bash
+primitive -i docs/readme/originals/americangothic.jpg -o go.png -n 200 -m 1 -a 128 -r 256 -s 1024
+node dist/cli.js docs/readme/originals/americangothic.jpg -o primeval.png -f --shape triangle --count 200 --alpha 128 --resize-input 256 --output-size 1024 --seed 42
+```
+
 ## Profiling
 
 Builds target each architecture's portable baseline; the repository sets no `target-cpu`, and the release workflow rejects artifacts that use SVE, or AVX-512 outside the few dependency functions that run only after a runtime CPU check (`DISPATCHED_FUNCTIONS` in `scripts/check-artifact.mjs`). To profile with every instruction your own CPU supports, opt in for that build only and keep the output in a separate target directory:

@@ -17,7 +17,7 @@ Main components:
 - `scripts/`: binding-loader generation, `napi.targets` tooling, the wasm build (`build-wasm.mjs`, the single source of the nightly pin, the SIMD and threaded flags, output layout and the gzip size budget per `.wasm`; `wasi-runner.mjs` runs its kernel tests under Node's WASI), the demo site (`demo.mjs`: `npm run demo:build` assembles `site/`, `npm run demo` also serves it), and the static server it shares with `test/browser/` (`static-server.mjs`)
 - `test/`: Node/package tests; `test/tooling/`: packaging, loader, and release-metadata tests; `test/browser/`: the browser entry in headless Chromium (Playwright), unbundled and in a Vite build of the packed package, and the demo
 - `demo/`: the browser demo, plain HTML, CSS and ES modules with no build step, deployed to GitHub Pages by `.github/workflows/pages.yml`; `demo/coi-sw.js` is its cross-origin isolation service worker
-- `docs/readme/`: source images (`originals/`, also the test fixtures) and alpha comparisons used by the README
+- `docs/readme/`: source images (`originals/`, also the test fixtures), the alpha comparisons (`comparisons/`, generated) and the hand-made Go `primitive` comparison (`versus-go/`) used by the README
 - `docs/images/` and `docs/gallery.md`: progression gallery and thumbnails
 - `docs/`: user-facing documentation only (the gallery, its images, the README's sources); everything about how the project works lives in `docs/internals/`
 - `docs/internals/architecture.md`: how the system works and how its pieces fit together (components, the data flow of one call, the engine pipeline, determinism, bindings, browser runtime, build and release). Read it before working on a component you do not know; update it when a change alters what it describes.

@@ -127,6 +127,7 @@ test("the gallery shows every original and every generated image", () => {
     ...filesUnder("docs/readme/originals"),
     ...filesUnder("docs/images"),
     ...filesUnder("docs/readme/comparisons"),
+    ...filesUnder("docs/readme/versus-go"),
   ];
   for (const file of generated) {
     assert.ok(linked.has(file), `${file} is not linked from the gallery or the README`);
