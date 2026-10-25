@@ -50,15 +50,15 @@ Reddit's rules were read on 2026-10-24; its archives could not be searched for e
 Done:
 
 - [x] README rewritten (`a0f0c0a`): the difference from Primitive first, side-by-side comparison, benefits-first highlights, prior art, placeholder section.
+- [x] GitHub showcase (2026-10-25): Website set to the demo, description rewritten around the positioning, topics `webassembly` and `creative-coding` added.
+- [x] Open Graph and Twitter card metadata on the demo page, with `demo/og.jpg` (primeval's own render of the Grand Prismatic Spring, 1200 × 630).
 
 To do:
 
-- [ ] GitHub showcase: the Website field is empty and the description does not mention the browser; link the demo, mention it, and add the topics `webassembly` and `creative-coding` (`lqip`, `placeholder` and `primitive` are already there).
-- [ ] Open Graph and Twitter card metadata and a share image for the demo page; the demo source has none.
-- [ ] A 10 to 20 second clip: original, shapes appearing, result.
+- [ ] A 10 to 20 second clip: original, shapes appearing, result (needs ffmpeg or a screen recording; not installed).
 - [ ] Three static comparisons on different subjects, one of them blur versus geometric placeholder, with images suited to each channel.
 - [ ] Let 3 to 5 people try the demo unguided: do they find how to start, get a result, download it?
-- [ ] Decide whether to publish the crates (`primeval-core`, `primeval-render`) before any r/rust mention; without them, skip r/rust.
+- [ ] Decide whether to publish the crates before any r/rust mention; `primeval-core`, `primeval-render` and `primeval-node` were free on crates.io on 2026-10-25. Without them, skip r/rust.
 - [ ] Put the "generated with primeval" credit on nudaluce.com, with a link.
 
 ## Sequence and goals
